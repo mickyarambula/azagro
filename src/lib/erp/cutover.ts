@@ -218,6 +218,12 @@ export const applyStockSnap = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({ csv: z.string().min(3) }))
   .handler(async ({ context, data }) => {
+    const boot = await getSql();
+    await boot.query(
+      `create unique index if not exists stock_moves_opening_cutover_uq
+       on stock_moves (company_id, product_id, location_to)
+       where move_type = 'opening' and origin = 'Corte Compaq'`,
+    );
     return withTx(async (sql) => {
       await assertCan(sql, context.userId, "inventory", "edit");
       const companyId = await cid(sql, context.userId);
@@ -240,6 +246,7 @@ export const applyStockSnap = createServerFn({ method: "POST" })
           where company_id = ${companyId} and product_id = ${product[0].id} and location_to = ${loc[0].id}
             and move_type = 'opening' and origin = 'Corte Compaq'
           limit 1
+          for update
         `;
         if (already[0]) {
           skipped += 1;

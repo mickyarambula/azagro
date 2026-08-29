@@ -1456,6 +1456,7 @@ export const registerPayment = createServerFn({ method: "POST" })
     const residual = Number(inv[0].residual);
     if (residual <= 0.009) throw new Error("Esta factura ya está saldada");
     const applied = Math.min(data.amount, residual);
+    await sql`select id from banks where id = ${data.bankId} and company_id = ${m.company_id} for update`;
     const bank = await sql<{ id: number; name: string; opening: string; movement: string }>`
       select b.id, b.name, b.opening::text,
         coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement

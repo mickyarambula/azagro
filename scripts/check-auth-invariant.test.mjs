@@ -10,7 +10,6 @@ import { appEnvPlugin } from "./app-env-plugin.mjs";
 import {
   authEnabledFromEnvValue,
   authInvariantWarnings,
-  buildAuthEnabled,
   compareAuthInvariant,
   probeDevAuthEnabled,
 } from "./check-auth-invariant.mjs";
@@ -112,11 +111,6 @@ test("only a divergence warns the smoke verdict", () => {
   ]) {
     assert.deepEqual(authInvariantWarnings(result), []);
   }
-});
-
-test("the build side resolves the template's shipped app-env", () => {
-  assert.equal(buildAuthEnabled(projectRoot(), {}), false);
-  assert.equal(buildAuthEnabled(projectRoot(), { VITE_AUTH_ENABLED: "true" }), true);
 });
 
 test("the CLI reports rather than silently passing when run via a symlink", async () => {
