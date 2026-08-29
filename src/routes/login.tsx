@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { LogoLockup } from "@/components/brand";
-import { GROK_PROVIDERS, authClient, authEnabled, captureSessionToken, signIn } from "@/lib/auth/client";
+import { authClient, authEnabled, captureSessionToken, signInWithGoogle } from "@/lib/auth/client";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 
 export const Route = createFileRoute("/login")({ component: Login });
@@ -63,11 +63,9 @@ function Login() {
 
           {authEnabled ? (
             <div className="mt-5 grid gap-2">
-              {GROK_PROVIDERS.map((p) => (
-                <button key={p.providerId} type="button" onClick={() => signIn(p.providerId, { callbackURL: "/" })} className="erp-btn w-full">
-                  Continuar con {p.label}
-                </button>
-              ))}
+              <button type="button" onClick={() => signInWithGoogle({ callbackURL: "/" })} className="erp-btn w-full">
+                Continuar con Google
+              </button>
             </div>
           ) : (
             <p className="mt-4 text-sm text-muted">El acceso está desactivado.</p>
