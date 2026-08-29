@@ -1,0 +1,264 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", "Segoe UI", system-ui, sans-serif;
+  --font-display: "DM Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "IBM Plex Mono", monospace;
+
+  --color-paper: var(--bg);
+  --color-paper-2: var(--bg-2);
+  --color-cream: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-forest: var(--brand);
+  --color-forest-2: var(--ink);
+  --color-leaf: var(--brand);
+  --color-navy: var(--rail);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-ok: var(--ok);
+  --color-accent: var(--accent);
+  --color-brand: var(--brand);
+  --color-brand-soft: var(--brand-soft);
+  --color-tab: var(--tab);
+  --color-tab-fg: var(--tab-fg);
+  --color-seller: var(--seller);
+  --color-seller-fg: var(--seller-fg);
+  --color-link: var(--link);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-fg: var(--ink);
+  --color-subtle: var(--muted);
+  --color-border: var(--line);
+  --color-primary: var(--brand);
+  --color-action: var(--accent);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  --shadow-card: 0 0 0 1px var(--line), 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+:root {
+  --bg: #f4f6f8;
+  --bg-2: #eef1f4;
+  --surface: #ffffff;
+  --ink: #1c2430;
+  --ink-soft: #3c4250;
+  --muted: #5b6573;
+  --line: #e5e8ee;
+  --rail: #ffffff;
+  --brand: #1b6b4c;
+  --brand-soft: #e7f3ed;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --danger: #dc2626;
+  --warn: #b45309;
+  --ok: #15803d;
+  --tab: #1b5e45;
+  --tab-fg: #ffffff;
+  --seller: #1d4f91;
+  --seller-fg: #ffffff;
+  --link: #2f5bd7;
+}
+
+html[data-theme="dark"] {
+  --bg: #0e1116;
+  --bg-2: #161b22;
+  --surface: #171b22;
+  --ink: #e8eaee;
+  --ink-soft: #c5cad3;
+  --muted: #9aa3b2;
+  --line: #2a313c;
+  --rail: #12161c;
+  --brand: #3d9b68;
+  --brand-soft: #163024;
+  --accent: #5b7cfa;
+  --accent-hover: #4c6ee8;
+  --danger: #f87171;
+  --warn: #fb923c;
+  --ok: #4ade80;
+  --tab: #164a38;
+  --tab-fg: #ffffff;
+  --seller: #1a3f73;
+  --seller-fg: #ffffff;
+  --link: #7aa2ff;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    min-height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: "ss01" on, "tnum" on;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  table {
+    border-collapse: collapse;
+  }
+  .logo-dark {
+    display: none;
+  }
+  html[data-theme="dark"] .logo-light {
+    display: none;
+  }
+  html[data-theme="dark"] .logo-dark {
+    display: block;
+  }
+  @media print {
+    .logo-light {
+      display: block !important;
+    }
+    .logo-dark {
+      display: none !important;
+    }
+  }
+}
+
+@layer utilities {
+  .label-caps {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+}
+
+@layer components {
+  .erp-input {
+    height: 38px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    padding: 0 12px;
+    color: var(--ink);
+  }
+  .erp-input:focus {
+    outline: 2px solid color-mix(in oklab, var(--accent) 35%, transparent);
+    outline-offset: 0;
+    border-color: var(--accent);
+  }
+  .erp-btn {
+    height: 36px;
+    border-radius: 8px;
+    padding: 0 14px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+  }
+  .erp-btn:hover {
+    background: var(--bg);
+  }
+  .erp-btn-primary {
+    height: 36px;
+    border-radius: 8px;
+    padding: 0 14px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 0;
+    background: var(--accent);
+    color: white;
+  }
+  .erp-btn-primary:hover {
+    background: var(--accent-hover);
+  }
+  .erp-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--bg-2);
+    color: var(--ink-soft);
+  }
+  .erp-chip-client {
+    background: var(--brand-soft);
+    color: var(--brand);
+  }
+  .erp-chip-supplier {
+    background: var(--bg-2);
+    color: var(--ink);
+  }
+  .erp-tab {
+    height: 40px;
+    padding: 0 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+    background: transparent;
+  }
+  .erp-tab:hover {
+    color: var(--ink);
+  }
+  .erp-tab[data-on="true"] {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .erp-row:hover {
+    background: var(--bg);
+  }
+  .erp-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  html.azagro-printing body > *:not(#azagro-print-root) {
+    display: none !important;
+  }
+  html.azagro-printing #azagro-print-root {
+    display: block !important;
+    background: #fff;
+  }
+  html.azagro-printing,
+  html.azagro-printing body {
+    background: #fff !important;
+    color: #14201c !important;
+  }
+}
