@@ -4,6 +4,7 @@ import { BackBar } from "@/components/erp";
 import { applyPartnerDefaults, duesPreview, OrderFields, type OrderDraft, type OrderLookups } from "@/components/order-form";
 import { orderLookups, saveOrder } from "@/lib/erp/orders";
 import { validateDueDates } from "@/lib/erp/credit";
+import { useAccess } from "@/lib/access";
 import { num, todayISO } from "@/lib/utils";
 
 export const Route = createFileRoute("/sales/nuevo")({
@@ -47,10 +48,12 @@ function empty(lookups: OrderLookups): OrderDraft {
 
 function Nuevo() {
   const navigate = useNavigate();
+  const access = useAccess();
   const [lookups, setLookups] = useState<OrderLookups | null>(null);
   const [form, setForm] = useState<OrderDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [overrideCredit, setOverrideCredit] = useState(false);
 
   useEffect(() => {
     void orderLookups()
@@ -84,7 +87,7 @@ function Nuevo() {
     setBusy(true);
     setError(null);
     try {
-      const res = await saveOrder({ data: { ...form, confirm } });
+      const res = await saveOrder({ data: { ...form, confirm, overrideCredit } });
       await navigate({ to: "/sales/$orderId", params: { orderId: String(res.id) } });
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar");
@@ -115,6 +118,16 @@ function Nuevo() {
         </button>
       </div>
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}
+      {access.role === "admin" && error?.includes("límite de crédito") && (
+        <label className="mb-3 flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={overrideCredit}
+            onChange={(e) => setOverrideCredit(e.target.checked)}
+          />
+          Autorizo exceder el límite de crédito (queda en bitácora)
+        </label>
+      )}
       <OrderFields form={form} setForm={setForm} lookups={lookups} />
     </form>
   );

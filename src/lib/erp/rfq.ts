@@ -7,7 +7,7 @@ import { rememberTrade } from "@/lib/erp/links";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -61,6 +61,7 @@ export const listRfqs = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "purchases", "view");
     await ensure(sql);
     const rfqs = await sql<{
       id: number;
@@ -94,6 +95,7 @@ export const getRfq = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "purchases", "view");
     await ensure(sql);
     const head = await sql<{
       id: number;

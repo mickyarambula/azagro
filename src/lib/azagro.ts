@@ -7,7 +7,7 @@ import { BANK_CATALOG, CREDIT_POLICY_CATALOG, TIIE_SEED } from "@/lib/erp/catalo
 import { syncCompaqCatalogs, linkSeedDestinos } from "@/lib/erp/compaq";
 import { rememberTrade } from "@/lib/erp/links";
 import { seedAcl, type AppRole } from "@/lib/erp/acl";
-import { assertCan, memberScope } from "@/lib/erp/acl";
+import { activeMember, assertCan, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
 import { issueMoraInvoice } from "@/lib/erp/ops";
 import { ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
@@ -40,7 +40,7 @@ async function membership(sql: Sql, userId: string) {
     select c.id as company_id, c.name, c.join_code, m.role
     from members m
     join companies c on c.id = m.company_id
-    where m.user_id = ${userId}
+    where m.user_id = ${userId} and m.status = 'active'
     limit 1
   `;
   return rows[0] ?? null;
@@ -179,7 +179,7 @@ export const getWorkspace = createServerFn({ method: "GET" })
       workspace: {
         companyId: m.company_id,
         companyName: m.name,
-        joinCode: m.join_code,
+        joinCode: m.role === "admin" ? m.join_code : "",
         role: m.role,
         userId: context.userId,
         memberCount: count[0]?.n ?? 1,
@@ -226,11 +226,23 @@ export const joinCompany = createServerFn({ method: "POST" })
       select id from companies where join_code = ${data.code.trim().toUpperCase()}
     `;
     if (!co[0]) throw new Error("Clave de equipo no válida");
-    await sql`
-      insert into members (company_id, user_id, role)
-      values (${co[0].id}, ${context.userId}, 'operator')
+    // La clave de equipo ya no da acceso directo: deja una solicitud pendiente
+    // que un administrador debe aprobar asignando rol.
+    const already = await sql<{ id: number }>`
+      select id from access_requests
+      where user_id = ${context.userId} and company_id = ${co[0].id} and status = 'pending'
+      limit 1
     `;
-    return { ok: true };
+    if (!already[0]) {
+      const profile = await sql<{ email: string; name: string }>`
+        select "email" as email, "name" as name from "user" where "id" = ${context.userId} limit 1
+      `;
+      await sql`
+        insert into access_requests (company_id, user_id, email, name)
+        values (${co[0].id}, ${context.userId}, ${profile[0]?.email ?? ""}, ${profile[0]?.name ?? ""})
+      `;
+    }
+    return { ok: true, pending: true };
   });
 
 async function requireCompany(sql: Sql, userId: string) {
@@ -256,8 +268,8 @@ export const getDashboard = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const sql = await getSql();
-    const m = await requireCompany(sql, context.userId);
-    const cid = m.company_id;
+    const me = await activeMember(sql, context.userId);
+    const cid = me.company_id;
     await ensureStock(sql);
     const ar = await sql<{ total: string; overdue: string }>`
       select
@@ -346,25 +358,30 @@ export const getDashboard = createServerFn({ method: "GET" })
       from banks b
       where b.company_id = ${cid}
     `;
+    // Cada quien ve solo las cifras de sus módulos: sin cartera no hay saldos,
+    // sin bancos no hay caja, sin permiso de costos el valor de inventario va en cero.
+    const seeCredit = me.acl.credit !== "none";
+    const seeBanks = me.acl.banks !== "none";
+    const seeCosts = canSeeCosts(me.role);
     return {
-      ar: Number(ar[0]?.total ?? 0),
-      arOverdue: Number(ar[0]?.overdue ?? 0),
-      ap: Number(ap[0]?.total ?? 0),
-      stockValue: Number(stock[0]?.value ?? 0),
-      stockOwn: Number(stock[0]?.own ?? 0),
-      stockSupplier: Number(stock[0]?.supplier ?? 0),
-      stockTransit: Number(stock[0]?.transit ?? 0),
-      cash: Number(cash[0]?.total ?? 0),
+      ar: seeCredit ? Number(ar[0]?.total ?? 0) : 0,
+      arOverdue: seeCredit ? Number(ar[0]?.overdue ?? 0) : 0,
+      ap: seeCredit ? Number(ap[0]?.total ?? 0) : 0,
+      stockValue: seeCosts ? Number(stock[0]?.value ?? 0) : 0,
+      stockOwn: seeCosts ? Number(stock[0]?.own ?? 0) : 0,
+      stockSupplier: seeCosts ? Number(stock[0]?.supplier ?? 0) : 0,
+      stockTransit: seeCosts ? Number(stock[0]?.transit ?? 0) : 0,
+      cash: seeBanks ? Number(cash[0]?.total ?? 0) : 0,
       lowStock: low[0]?.n ?? 0,
       pendingPo: pending[0]?.po ?? 0,
       pendingSo: pending[0]?.so ?? 0,
-      overdueN: pending[0]?.overdue_n ?? 0,
-      aging: aging.map((a) => ({ bucket: a.bucket, amount: Number(a.amount) })),
-      recentInv,
+      overdueN: seeCredit ? pending[0]?.overdue_n ?? 0 : 0,
+      aging: seeCredit ? aging.map((a) => ({ bucket: a.bucket, amount: Number(a.amount) })) : [],
+      recentInv: seeCredit ? recentInv : [],
       locStock: locStock.map((l) => ({
         name: l.name,
         locType: l.loc_type,
-        value: Number(l.value),
+        value: seeCosts ? Number(l.value) : 0,
         qty: Number(l.qty),
       })),
     };
@@ -375,9 +392,10 @@ export const listPartners = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
-    await assertCan(sql, context.userId, "partners", "view");
-    const scope = await memberScope(sql, context.userId);
-    return sql<{
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.partners === "none") throw new Error("Sin permiso para ver este módulo");
+    const scope = { own_only: me.own_only };
+    const rows = await sql<{
       id: number;
       code: string;
       name: string;
@@ -403,6 +421,11 @@ export const listPartners = createServerFn({ method: "GET" })
         and (${scope.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by p.name
     `;
+    // Sin permiso de cartera no se ven saldos ni límites de crédito.
+    if (me.acl.credit === "none") {
+      return rows.map((r) => ({ ...r, ar: "0", ap: "0", credit_limit: "0" }));
+    }
+    return rows;
   });
 
 export const savePartner = createServerFn({ method: "POST" })
@@ -514,6 +537,9 @@ export const getPartner = createServerFn({ method: "POST" })
       limit 1
     `;
     if (!rows[0]) throw new Error("No encontrado");
+    const me = await activeMember(sql, context.userId);
+    const partner =
+      me.acl.credit === "none" ? { ...rows[0], ar: "0", ap: "0", credit_limit: "0" } : rows[0];
     const contacts = await sql<{
       id: number;
       name: string;
@@ -527,7 +553,7 @@ export const getPartner = createServerFn({ method: "POST" })
       where company_id = ${m.company_id} and partner_id = ${data.id}
       order by is_billing desc, id
     `;
-    return { partner: rows[0], contacts };
+    return { partner, contacts };
   });
 
 export const listProducts = createServerFn({ method: "GET" })
@@ -535,7 +561,9 @@ export const listProducts = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
-    return sql<{
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.products === "none") throw new Error("Sin permiso para ver este módulo");
+    const rows = await sql<{
       id: number;
       code: string;
       name: string;
@@ -554,6 +582,14 @@ export const listProducts = createServerFn({ method: "GET" })
       group by p.id
       order by p.code
     `;
+    const hideCost = !canSeeCosts(me.role);
+    const hidePrice = !canSeeSalePrices(me.role);
+    if (!hideCost && !hidePrice) return rows;
+    return rows.map((r) => ({
+      ...r,
+      cost: hideCost ? "0" : r.cost,
+      list_price: hidePrice ? "0" : r.list_price,
+    }));
   });
 
 export const saveProduct = createServerFn({ method: "POST" })
@@ -600,6 +636,7 @@ export const nextProductCode = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "products", "view");
     return { code: await nextCodeFor(sql, m.company_id, "PRD-", "products") };
   });
 
@@ -629,7 +666,12 @@ export const getProduct = createServerFn({ method: "POST" })
       limit 1
     `;
     if (!rows[0]) throw new Error("No encontrado");
-    return rows[0];
+    const me = await activeMember(sql, context.userId);
+    return {
+      ...rows[0],
+      cost: canSeeCosts(me.role) ? rows[0].cost : "0",
+      list_price: canSeeSalePrices(me.role) ? rows[0].list_price : "0",
+    };
   });
 
 export const listInventory = createServerFn({ method: "GET" })
@@ -637,6 +679,8 @@ export const listInventory = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.inventory === "none") throw new Error("Sin permiso para ver este módulo");
     await ensureStock(sql);
     await seedOpeningLedger(sql, m.company_id, context.userId).catch(() => undefined);
     const quants = await sql<{
@@ -764,6 +808,16 @@ export const listInventory = createServerFn({ method: "GET" })
       where q.company_id = ${m.company_id} and l.loc_type <> 'customer'
     `;
     const mismatches = rawMismatch.filter((r) => Math.abs(Number(r.shown) - Number(r.ledger)) > 0.001);
+    if (!canSeeCosts(me.role)) {
+      return {
+        quants: quants.map((q) => ({ ...q, cost: "0" })),
+        locations,
+        moves: moves.map((mv) => ({ ...mv, unit_cost: "0" })),
+        incoming,
+        outgoing,
+        mismatches,
+      };
+    }
     return { quants, locations, moves, incoming, outgoing, mismatches };
   });
 
@@ -844,6 +898,8 @@ export const listPurchases = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.purchases === "none") throw new Error("Sin permiso para ver este módulo");
     await sql`alter table purchase_orders add column if not exists fulfill_kind text not null default 'inventory'`;
     await sql`alter table purchase_orders add column if not exists so_id integer`;
     await sql`alter table purchase_lines add column if not exists deliver_to text not null default ''`;
@@ -902,6 +958,15 @@ export const listPurchases = createServerFn({ method: "GET" })
     const locations = await sql<{ id: number; name: string; loc_type: string }>`
       select id, name, loc_type from locations where company_id = ${m.company_id} order by name
     `;
+    if (!canSeeCosts(me.role)) {
+      return {
+        orders: orders.map((o) => ({ ...o, total: "0" })),
+        lines: lines.map((l) => ({ ...l, unit_price: "0" })),
+        suppliers,
+        products: products.map((p) => ({ ...p, cost: "0" })),
+        locations,
+      };
+    }
     return { orders, lines, suppliers, products, locations };
   });
 
@@ -929,6 +994,7 @@ export const createPurchase = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "purchases", "edit");
     const n = await sql<{ c: number }>`select count(*)::int as c from purchase_orders where company_id = ${m.company_id}`;
     const name = `OC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const total = data.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
@@ -973,6 +1039,7 @@ export const receivePurchase = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "purchases", "edit");
     const po = await sql<{ id: number; location_id: number; name: string; state: string; fulfill_kind: string }>`
       select id, location_id, name, state, coalesce(fulfill_kind,'inventory') as fulfill_kind from purchase_orders
       where id = ${data.poId} and company_id = ${m.company_id}
@@ -1037,6 +1104,8 @@ export const listSales = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.sales === "none") throw new Error("Sin permiso para ver este módulo");
     const orders = await sql<{
       id: number;
       name: string;
@@ -1075,6 +1144,16 @@ export const listSales = createServerFn({ method: "GET" })
     const locations = await sql<{ id: number; name: string; loc_type: string }>`
       select id, name, loc_type from locations where company_id = ${m.company_id} order by name
     `;
+    // Almacén entrega pedidos pero no ve precios de venta ni límites de crédito.
+    if (!canSeeSalePrices(me.role)) {
+      return {
+        orders: orders.map((o) => ({ ...o, total: "0" })),
+        lines: lines.map((l) => ({ ...l, unit_price: "0" })),
+        customers: customers.map((c) => ({ ...c, credit_limit: "0" })),
+        products: products.map((p) => ({ ...p, list_price: "0" })),
+        locations,
+      };
+    }
     return { orders, lines, customers, products, locations };
   });
 
@@ -1088,6 +1167,7 @@ export const createSale = createServerFn({ method: "POST" })
       currency: z.enum(["MXN", "USD"]).optional().default("MXN"),
       fxRate: z.number().positive().optional().default(1),
       deliveryTo: z.string().optional().default(""),
+      overrideCredit: z.boolean().optional().default(false),
       lines: z.array(
         z.object({
           productId: z.number(),
@@ -1100,7 +1180,7 @@ export const createSale = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
-    await assertCan(sql, context.userId, "sales", "edit");
+    const member = await assertCan(sql, context.userId, "sales", "edit");
     const partner = await sql<{ credit_limit: string }>`
       select credit_limit::text from partners where id = ${data.partnerId} and company_id = ${m.company_id}
     `;
@@ -1112,9 +1192,19 @@ export const createSale = createServerFn({ method: "POST" })
     const limit = Number(partner[0]?.credit_limit ?? 0);
     const used = Number(ar[0]?.ar ?? 0);
     if (limit > 0 && used + total > limit) {
-      throw new Error(
-        `Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}.`,
-      );
+      if (!(data.overrideCredit && member.role === "admin")) {
+        throw new Error(
+          `Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}. Un administrador puede autorizar el exceso.`,
+        );
+      }
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "autorizar-credito",
+        entity: "partner",
+        entityId: data.partnerId,
+        detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+      });
     }
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${m.company_id}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
@@ -1146,6 +1236,7 @@ export const deliverSale = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "edit");
     const so = await sql<{
       id: number;
       location_id: number;
@@ -1385,6 +1476,7 @@ export const listInvoices = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "credit", "view");
     const kind = data?.kind && data.kind !== "all" ? data.kind : null;
     return sql<{
       id: number;
@@ -1439,6 +1531,7 @@ export const registerPayment = createServerFn({ method: "POST" })
     await boot`alter table bank_moves add column if not exists payment_id integer`;
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "banks", "edit");
     const inv = await sql<{
       id: number;
       kind: string;
@@ -1543,7 +1636,17 @@ export const applyLateInterest = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "credit", "edit");
     const r = await issueMoraInvoice(sql, m.company_id, data.invoiceId, { requireCharge: true });
+    await writeAudit(sql, {
+      companyId: m.company_id,
+      userId: context.userId,
+      action: "facturar-mora",
+      entity: "invoice",
+      entityId: data.invoiceId,
+      name: r.name ?? "",
+      detail: `Cargo ${r.charge}`,
+    });
     return { charge: r.charge, name: r.name };
   });
 
@@ -1553,6 +1656,7 @@ export const getStatement = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "statements", "view");
     const partner = await sql<{
       id: number;
       code: string;

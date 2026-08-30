@@ -229,6 +229,38 @@ export async function assertCan(sql: Sql, userId: string, module: ModuleId, need
   return m[0];
 }
 
+// Miembro activo con su ACL cargada; toda lectura del ERP debe pasar por aquí
+// (o por assertCan) para que un usuario desactivado no pueda ni consultar.
+export async function activeMember(sql: Sql, userId: string) {
+  const m = await sql<{ id: number; company_id: number; role: string; status: string; own_only: boolean }>`
+    select id, company_id, role, status, own_only from members where user_id = ${userId} limit 1
+  `;
+  if (!m[0] || m[0].status !== "active") throw new Error("Sin acceso a la empresa");
+  const acl = await loadAcl(sql, m[0].id, m[0].role);
+  return { ...m[0], acl };
+}
+
+export async function assertAdmin(sql: Sql, userId: string) {
+  const m = await activeMember(sql, userId);
+  if (m.role !== "admin") throw new Error("Solo un administrador puede hacer esto");
+  return m;
+}
+
+// Quién ve costos de compra (por proveedor) y quién ve márgenes/utilidad.
+// Almacén y ventas nunca; contabilidad (administracion) ve márgenes pero no
+// costos por proveedor; costos completos solo administración del negocio.
+export function canSeeCosts(role: string) {
+  return role === "admin" || role === "gerencia" || role === "compras";
+}
+
+export function canSeeMargins(role: string) {
+  return role === "admin" || role === "gerencia" || role === "administracion";
+}
+
+export function canSeeSalePrices(role: string) {
+  return role !== "almacen";
+}
+
 export async function memberScope(sql: Sql, userId: string) {
   const m = await sql<{ id: number; role: string; own_only: boolean; company_id: number }>`
     select id, role, own_only, company_id from members where user_id = ${userId} and status = 'active' limit 1

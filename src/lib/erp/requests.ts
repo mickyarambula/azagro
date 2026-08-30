@@ -2,13 +2,14 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
-import { assertCan } from "@/lib/erp/acl";
+import { activeMember, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
+import { writeAudit } from "@/lib/erp/audit";
 import { priceSale } from "@/lib/erp/pricing";
 import { rememberTrade } from "@/lib/erp/links";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -118,6 +119,8 @@ export const listRequests = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.quotes === "none") throw new Error("Sin permiso para ver este módulo");
     await ensure(sql);
     const rows = await sql<{
       id: number;
@@ -141,6 +144,9 @@ export const listRequests = createServerFn({ method: "GET" })
     const products = await sql<{ id: number; code: string; name: string; uom: string; cost: string }>`
       select id, code, name, uom, cost::text from products where company_id = ${companyId} order by code
     `;
+    if (!canSeeCosts(me.role)) {
+      return { rows, customers, products: products.map((p) => ({ ...p, cost: "0" })) };
+    }
     return { rows, customers, products };
   });
 
@@ -150,6 +156,8 @@ export const getRequest = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.quotes === "none") throw new Error("Sin permiso para ver este módulo");
     await ensure(sql);
     const head = await sql<{
       id: number;
@@ -228,6 +236,18 @@ export const getRequest = createServerFn({ method: "POST" })
         select partner_id, product_id, unit_price::text from vendor_rfq_bids where rfq_id = ${head[0].rfq_id}
       `;
       if (r[0]) rfq = { id: r[0].id, name: r[0].name, targets, bids };
+    }
+    // Costos por proveedor, fletes y márgenes: solo quien puede verlos.
+    if (!canSeeCosts(me.role)) {
+      const maskedLines = lines.map((l) => ({
+        ...l,
+        cost: "0",
+        freight: "0",
+        margin_pct: "0",
+        margin_nominal: "0",
+      }));
+      const maskedRfq = rfq ? { ...rfq, bids: rfq.bids.map((b) => ({ ...b, unit_price: "0" })) } : null;
+      return { request: head[0], lines: maskedLines, suppliers, links, rfq: maskedRfq };
     }
     return { request: head[0], lines, suppliers, links, rfq };
   });
@@ -349,6 +369,14 @@ export const deleteRequest = createServerFn({ method: "POST" })
       await sql`delete from vendor_rfqs where id = ${req[0].rfq_id} and company_id = ${companyId}`;
     }
     await sql`delete from customer_requests where id = ${data.id} and company_id = ${companyId}`;
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "borrar-solicitud",
+      entity: "request",
+      entityId: data.id,
+      name: req[0].name,
+    });
     return { ok: true, name: req[0].name };
   });
 
@@ -455,6 +483,10 @@ export const saveLineMargin = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.quotes !== "edit" || !canSeeMargins(me.role)) {
+      throw new Error("Sin permiso para cambiar márgenes");
+    }
     await sql`
       update customer_request_lines
       set margin_mode = ${data.marginMode}, margin_pct = ${data.marginPct}, margin_nominal = ${data.marginNominal}
@@ -501,6 +533,7 @@ export const saveLineFreight = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "purchases", "edit");
     await sql`
       update customer_request_lines set freight = ${data.freight}
       where request_id = ${data.requestId} and product_id = ${data.productId}

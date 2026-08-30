@@ -2,11 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
-import { assertCan } from "@/lib/erp/acl";
+import { assertCan, canSeeCosts, canSeeSalePrices } from "@/lib/erp/acl";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -32,6 +32,7 @@ export const listPartnerProducts = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    const me = await assertCan(sql, context.userId, "partners", "view");
     await ensure(sql);
     const rows = await sql<{
       id: number;
@@ -60,6 +61,21 @@ export const listPartnerProducts = createServerFn({ method: "POST" })
     const partners = await sql<{ id: number; name: string; is_customer: boolean; is_supplier: boolean }>`
       select id, name, is_customer, is_supplier from partners where company_id = ${companyId} order by name
     `;
+    // El precio de compra por proveedor es reservado: sin permiso de costos
+    // solo se ve el vínculo de venta y los costos van en cero.
+    if (!canSeeCosts(me.role)) {
+      return {
+        rows: rows
+          .filter((r) => r.kind !== "buy")
+          .map((r) => (canSeeSalePrices(me.role) ? r : { ...r, unit_price: "0" })),
+        products: products.map((p) => ({
+          ...p,
+          cost: "0",
+          list_price: canSeeSalePrices(me.role) ? p.list_price : "0",
+        })),
+        partners,
+      };
+    }
     return { rows, products, partners };
   });
 

@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
+import { assertCan } from "@/lib/erp/acl";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -16,7 +17,7 @@ export type DealHop = {
 };
 
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -67,6 +68,7 @@ export const getDealTrail = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "view");
     await ensureDealSchema(sql);
 
     let requestId: number | null = null;

@@ -2,7 +2,8 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
-import { assertCan } from "@/lib/erp/acl";
+import { assertCan, canSeeMargins } from "@/lib/erp/acl";
+import { writeAudit } from "@/lib/erp/audit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { computeDealPnl } from "@/lib/erp/reports";
 import { assertDueOk, validateDueDates } from "@/lib/erp/credit";
@@ -11,7 +12,7 @@ import { rememberTrade } from "@/lib/erp/links";
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -27,6 +28,7 @@ const orderSchema = z.object({
   partnerId: z.number(),
   date: z.string(),
   confirm: z.boolean().optional().default(false),
+  overrideCredit: z.boolean().optional().default(false),
   locationId: z.number(),
   notes: z.string().optional().default(""),
   currency: z.enum(["MXN", "USD"]),
@@ -50,6 +52,7 @@ export const orderLookups = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "view");
     const customers = await sql<{
       id: number;
       code: string;
@@ -233,7 +236,7 @@ export const saveOrder = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
-    await assertCan(sql, context.userId, "sales", "edit");
+    const member = await assertCan(sql, context.userId, "sales", "edit");
 
     const dues = computeDues(data);
     assertDueOk(
@@ -260,7 +263,20 @@ export const saveOrder = createServerFn({ method: "POST" })
       const limit = Number(partner[0]?.credit_limit ?? 0);
       const used = Number(ar[0]?.ar ?? 0);
       if (limit > 0 && used + total > limit) {
-        throw new Error(`Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}.`);
+        // Solo un administrador puede autorizar exceder el límite, y queda en bitácora.
+        if (!(data.overrideCredit && member.role === "admin")) {
+          throw new Error(
+            `Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}. Un administrador puede autorizar el exceso.`,
+          );
+        }
+        await writeAudit(sql, {
+          companyId,
+          userId: context.userId,
+          action: "autorizar-credito",
+          entity: "partner",
+          entityId: data.partnerId,
+          detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+        });
       }
     }
 
@@ -347,6 +363,7 @@ export const nextOrderCode = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "view");
     return { code: await nextOrderName(sql, companyId) };
   });
 
@@ -356,7 +373,9 @@ export const getDealPnl = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
-    await assertCan(sql, context.userId, "sales", "view");
+    // La utilidad del expediente (costo vs venta) es información de márgenes.
+    const me = await assertCan(sql, context.userId, "sales", "view");
+    if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
     return computeDealPnl(sql, companyId, data.soId);
   });
 

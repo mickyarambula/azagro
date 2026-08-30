@@ -6,7 +6,7 @@ import { assertCan } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -35,6 +35,7 @@ export const listDocFiles = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, data.kind === "cutover" ? "settings" : "sales", "view");
     await ensureFiles(sql);
     const rows = await sql<{ id: number; filename: string; mime: string; created_at: string; bytes: number }>`
       select id, filename, mime, created_at::text, length(content) as bytes
@@ -84,6 +85,7 @@ export const getDocFile = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "view");
     await ensureFiles(sql);
     const rows = await sql<{ filename: string; mime: string; content: string }>`
       select filename, mime, content from doc_files where id = ${data.id} and company_id = ${companyId}

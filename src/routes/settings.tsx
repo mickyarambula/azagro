@@ -19,7 +19,7 @@ function Page() {
 }
 
 function SettingsBody() {
-  const { can } = useAccess();
+  const { can, role } = useAccess();
   const editable = can("settings", "edit");
   const [form, setForm] = useState({
     legalName: "AZ INSUMOS AGRICOLAS SA DE CV",
@@ -282,17 +282,21 @@ function SettingsBody() {
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <Panel>
           <h2 className="text-sm font-semibold">Tabla TIIE</h2>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <input className="erp-input" type="date" value={tDate} onChange={(e) => setTDate(e.target.value)} />
-            <input className="erp-input w-28" type="number" step="0.0001" value={tRate} onChange={(e) => setTRate(Number(e.target.value))} />
-            <button
-              type="button"
-              className="erp-btn"
-              onClick={() => saveTiie({ data: { date: tDate, rate: tRate } }).then(load)}
-            >
-              Agregar
-            </button>
-          </div>
+          {role === "admin" ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <input className="erp-input" type="date" value={tDate} onChange={(e) => setTDate(e.target.value)} />
+              <input className="erp-input w-28" type="number" step="0.0001" value={tRate} onChange={(e) => setTRate(Number(e.target.value))} />
+              <button
+                type="button"
+                className="erp-btn"
+                onClick={() => saveTiie({ data: { date: tDate, rate: tRate } }).then(load)}
+              >
+                Agregar
+              </button>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-muted">Solo un administrador puede cambiar la TIIE.</p>
+          )}
           <ul className="mt-3 text-sm">
             {tiie.map((r) => (
               <li key={r.date} className="flex justify-between border-b border-line py-1.5">
@@ -304,13 +308,17 @@ function SettingsBody() {
         </Panel>
         <Panel>
           <h2 className="text-sm font-semibold">Tipo de cambio USD/MXN</h2>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <input className="erp-input" type="date" value={fDate} onChange={(e) => setFDate(e.target.value)} />
-            <input className="erp-input w-28" type="number" step="0.0001" value={fRate} onChange={(e) => setFRate(Number(e.target.value))} />
-            <button type="button" className="erp-btn" onClick={() => saveFx({ data: { date: fDate, usdMxn: fRate } }).then(load)}>
-              Agregar
-            </button>
-          </div>
+          {role === "admin" ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <input className="erp-input" type="date" value={fDate} onChange={(e) => setFDate(e.target.value)} />
+              <input className="erp-input w-28" type="number" step="0.0001" value={fRate} onChange={(e) => setFRate(Number(e.target.value))} />
+              <button type="button" className="erp-btn" onClick={() => saveFx({ data: { date: fDate, usdMxn: fRate } }).then(load)}>
+                Agregar
+              </button>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-muted">Solo un administrador puede cambiar el tipo de cambio.</p>
+          )}
           <ul className="mt-3 text-sm">
             {fx.map((r) => (
               <li key={r.date} className="flex justify-between border-b border-line py-1.5">

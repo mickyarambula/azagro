@@ -4,7 +4,8 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { computeMora, computeStatementLine, DEFAULT_POLICY, explainInterest, fxDifferential, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
-import { assertCan } from "@/lib/erp/acl";
+import { activeMember, assertAdmin, assertCan, canSeeCosts } from "@/lib/erp/acl";
+import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { refreshInvoiceResidual } from "@/lib/erp/stock";
@@ -13,7 +14,7 @@ type Sql = Awaited<ReturnType<typeof getSql>>;
 
 async function companyOf(sql: Sql, userId: string) {
   const rows = await sql<{ company_id: number }>`
-    select company_id from members where user_id = ${userId} limit 1
+    select company_id from members where user_id = ${userId} and status = 'active' limit 1
   `;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
@@ -182,11 +183,24 @@ export const saveTiie = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
+    // La TIIE mueve el interés de toda la cartera: solo administrador, con bitácora.
+    await assertAdmin(sql, context.userId);
+    const prev = await sql<{ rate: string }>`
+      select rate::text from tiie_rates where company_id = ${cid} and date = ${data.date}
+    `;
     await sql`
       insert into tiie_rates (company_id, date, rate)
       values (${cid}, ${data.date}, ${data.rate})
       on conflict (company_id, date) do update set rate = excluded.rate
     `;
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "tiie",
+      entity: "settings",
+      name: data.date,
+      detail: `${prev[0] ? `${Number(prev[0].rate)}` : "sin valor"} → ${data.rate}`,
+    });
     return { ok: true };
   });
 
@@ -196,11 +210,23 @@ export const saveFx = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
+    await assertAdmin(sql, context.userId);
+    const prev = await sql<{ usd_mxn: string }>`
+      select usd_mxn::text from fx_rates where company_id = ${cid} and date = ${data.date}
+    `;
     await sql`
       insert into fx_rates (company_id, date, usd_mxn)
       values (${cid}, ${data.date}, ${data.usdMxn})
       on conflict (company_id, date) do update set usd_mxn = excluded.usd_mxn
     `;
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "tipo-cambio",
+      entity: "settings",
+      name: data.date,
+      detail: `${prev[0] ? `${Number(prev[0].usd_mxn)}` : "sin valor"} → ${data.usdMxn}`,
+    });
     return { ok: true };
   });
 
@@ -210,6 +236,7 @@ export const listContacts = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
+    await assertCan(sql, context.userId, "partners", "view");
     return sql<{
       id: number;
       name: string;
@@ -241,6 +268,7 @@ export const saveContact = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
+    await assertCan(sql, context.userId, "partners", "edit");
     if (data.id) {
       await sql`
         update partner_contacts set name=${data.name}, role=${data.role ?? ""}, email=${data.email ?? ""},
@@ -262,6 +290,8 @@ export const listQuotes = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.quotes === "none") throw new Error("Sin permiso para ver este módulo");
     await sql`alter table quote_lines add column if not exists uom text not null default ''`;
     await sql`alter table quotes add column if not exists price_offer text not null default 'both'`;
     await sql`alter table quotes add column if not exists revision integer not null default 1`;
@@ -336,6 +366,10 @@ export const listQuotes = createServerFn({ method: "GET" })
     const products = await sql<{ id: number; code: string; name: string; list_price: string; uom: string }>`
       select id, code, name, list_price::text, uom from products where company_id = ${cid} order by code
     `;
+    // El costo de compra y el flete no son para ventas: solo quien puede ver costos.
+    if (!canSeeCosts(me.role)) {
+      return { quotes, lines: lines.map((l) => ({ ...l, cost: "0", freight: "0" })), customers, products };
+    }
     return { quotes, lines, customers, products };
   });
 
@@ -529,6 +563,15 @@ export const decideQuote = createServerFn({ method: "POST" })
     }
     if (data.decision === "reject") {
       await sql`update quotes set state = 'rejected' where id = ${q[0].id}`;
+      await writeAudit(sql, {
+        companyId: cid,
+        userId: context.userId,
+        action: "decidir-cotizacion",
+        entity: "quote",
+        entityId: q[0].id,
+        name: q[0].name,
+        detail: "Rechazada",
+      });
       return { soId: 0, name: q[0].name, state: "rejected", pos: [] as string[] };
     }
     if (!data.locationId) throw new Error("Elige la bodega de surtido");
@@ -657,6 +700,15 @@ export const decideQuote = createServerFn({ method: "POST" })
     if (pos.length) {
       await sql`update sales_orders set notes = ${[q[0].notes, `Compras ${pos.join(", ")}`].filter(Boolean).join(" · ")} where id = ${so[0]!.id}`;
     }
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "decidir-cotizacion",
+      entity: "quote",
+      entityId: q[0].id,
+      name: q[0].name,
+      detail: `${data.decision === "partial" ? "Parcial" : "Aceptada"} · ${name}${pos.length ? ` · ${pos.join(", ")}` : ""}`,
+    });
     return { soId: so[0]!.id, name, state: data.decision, pos };
   });
 
@@ -816,10 +868,21 @@ export const reconcileMove = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
-    await sql`
+    await assertCan(sql, context.userId, "banks", "edit");
+    const rows = await sql<{ reconciled: boolean; memo: string; amount: string }>`
       update bank_moves set reconciled = not reconciled
       where id = ${data.moveId} and company_id = ${cid}
+      returning reconciled, memo, amount::text
     `;
+    if (!rows[0]) throw new Error("Movimiento no encontrado");
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: rows[0].reconciled ? "conciliar" : "desconciliar",
+      entity: "bank_move",
+      entityId: data.moveId,
+      detail: `${rows[0].memo || ""} · ${rows[0].amount}`.trim(),
+    });
     return { ok: true };
   });
 
@@ -835,6 +898,10 @@ export const getLiveStatement = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.credit === "none" && me.acl.statements === "none") {
+      throw new Error("Sin permiso para ver la cartera");
+    }
     const pol = await policy(sql, cid);
     const asOf = (data.asOf || new Date().toISOString().slice(0, 10)).slice(0, 10);
     const tiieRows = await sql<{ date: string; rate: string }>`
@@ -859,6 +926,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         and is_customer = true
         and (${data.partnerId ?? 0} = 0 or id = ${data.partnerId ?? 0})
         and (${data.groupName ?? ""} = '' or group_name = ${data.groupName ?? ""})
+        and (${me.own_only} = false or seller_id = ${context.userId} or seller_id is null)
       order by name
     `;
 
@@ -1149,7 +1217,18 @@ export const invoiceLiveMora = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
-    return issueMoraInvoice(sql, cid, data.invoiceId, { asOf: data.asOf, requireCharge: true });
+    await assertCan(sql, context.userId, "credit", "edit");
+    const r = await issueMoraInvoice(sql, cid, data.invoiceId, { asOf: data.asOf, requireCharge: true });
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "facturar-mora",
+      entity: "invoice",
+      entityId: data.invoiceId,
+      name: r.name ?? "",
+      detail: `Cargo ${r.charge}`,
+    });
+    return r;
   });
 
 export const saveDocument = createServerFn({ method: "POST" })
@@ -1165,6 +1244,7 @@ export const saveDocument = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
+    await assertCan(sql, context.userId, "statements", "edit");
     const row = await sql<{ id: number }>`
       insert into documents (company_id, kind, title, partner_id, body)
       values (${cid}, ${data.kind}, ${data.title}, ${data.partnerId ?? null}, ${data.body})

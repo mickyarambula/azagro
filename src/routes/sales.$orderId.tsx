@@ -22,7 +22,7 @@ export const Route = createFileRoute("/sales/$orderId")({
 function Ficha() {
   const { orderId } = Route.useParams();
   const id = Number(orderId);
-  const { can } = useAccess();
+  const { can, role } = useAccess();
   const canEdit = can("sales", "edit");
   const [lookups, setLookups] = useState<OrderLookups | null>(null);
   const [form, setForm] = useState<OrderDraft | null>(null);
@@ -52,6 +52,7 @@ function Ficha() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [overrideCredit, setOverrideCredit] = useState(false);
 
   async function load() {
     const [d, l, p] = await Promise.all([getOrder({ data: { id } }), orderLookups(), getDealPnl({ data: { soId: id } }).catch(() => null)]);
@@ -136,7 +137,7 @@ function Ficha() {
           return;
         }
       }
-      await saveOrder({ data: { ...form, id, confirm } });
+      await saveOrder({ data: { ...form, id, confirm, overrideCredit } });
       setMsg(confirm ? "Pedido confirmado" : "Guardado");
       await load();
     } catch (err) {
@@ -282,6 +283,16 @@ function Ficha() {
         </div>
       </div>
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}
+      {role === "admin" && error?.includes("límite de crédito") && (
+        <label className="mb-3 flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={overrideCredit}
+            onChange={(e) => setOverrideCredit(e.target.checked)}
+          />
+          Autorizo exceder el límite de crédito (queda en bitácora)
+        </label>
+      )}
       {msg && <p className="mb-3 text-sm text-ok">{msg}</p>}
       <OrderFields form={form} setForm={setForm} lookups={lookups} locked={locked} />
       {pnl && (

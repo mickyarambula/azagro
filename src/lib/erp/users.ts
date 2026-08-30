@@ -13,6 +13,7 @@ import {
   type AclLevel,
   type AppRole,
 } from "@/lib/erp/acl";
+import { writeAudit } from "@/lib/erp/audit";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -71,7 +72,8 @@ export const getAccessState = createServerFn({ method: "GET" })
         workspace: {
           companyId: member[0].company_id,
           companyName: member[0].name,
-          joinCode: member[0].join_code,
+          // La clave de equipo solo la ve el administrador.
+          joinCode: member[0].role === "admin" ? member[0].join_code : "",
           role: member[0].role,
           roleLabel: isAppRole(member[0].role) ? ROLE_META[member[0].role].label : member[0].role,
           userId: context.userId,
@@ -208,6 +210,15 @@ export const approveAccess = createServerFn({ method: "POST" })
     `;
     await seedAcl(sql, row[0]!.id, data.role);
     await sql`update access_requests set status = 'approved' where id = ${req[0].id}`;
+    await writeAudit(sql, {
+      companyId: me[0]!.company_id,
+      userId: context.userId,
+      action: "alta-usuario",
+      entity: "member",
+      entityId: row[0]!.id,
+      name: req[0].email,
+      detail: `Rol ${ROLE_META[data.role].label}`,
+    });
     return { ok: true };
   });
 
@@ -218,10 +229,20 @@ export const rejectAccess = createServerFn({ method: "POST" })
     const sql = await getSql();
     await assertCan(sql, context.userId, "users", "edit");
     const me = await sql<{ company_id: number }>`select company_id from members where user_id = ${context.userId}`;
-    await sql`
+    const rej = await sql<{ email: string }>`
       update access_requests set status = 'rejected'
       where id = ${data.requestId} and company_id = ${me[0]!.company_id}
+      returning email
     `;
+    if (rej[0]) {
+      await writeAudit(sql, {
+        companyId: me[0]!.company_id,
+        userId: context.userId,
+        action: "rechazar-solicitud",
+        entity: "member",
+        name: rej[0].email,
+      });
+    }
     return { ok: true };
   });
 
@@ -245,13 +266,26 @@ export const updateMember = createServerFn({ method: "POST" })
     const me = await sql<{ company_id: number; id: number }>`
       select company_id, id from members where user_id = ${context.userId}
     `;
-    const target = await sql<{ id: number; user_id: string }>`
-      select id, user_id from members where id = ${data.memberId} and company_id = ${me[0]!.company_id}
+    const target = await sql<{ id: number; user_id: string; role: string; status: string; own_only: boolean; email: string; display_name: string | null }>`
+      select id, user_id, role, status, own_only, email, display_name
+      from members where id = ${data.memberId} and company_id = ${me[0]!.company_id}
     `;
     if (!target[0]) throw new Error("Usuario no encontrado");
-    if (target[0].user_id === context.userId && data.status === "disabled") {
-      throw new Error("No puedes desactivar tu propio usuario");
+    // Candado 1: nadie se toca a sí mismo — ni rol, ni estado, ni permisos.
+    if (target[0].user_id === context.userId) {
+      throw new Error("No puedes modificar tu propio rol, estado o permisos. Pídeselo a otro administrador.");
     }
+    // Candado extra: la empresa no puede quedarse sin ningún administrador activo.
+    if (target[0].role === "admin" && target[0].status === "active" && (data.role !== "admin" || data.status === "disabled")) {
+      const admins = await sql<{ n: number }>`
+        select count(*)::int as n from members
+        where company_id = ${me[0]!.company_id} and role = 'admin' and status = 'active' and id <> ${target[0].id}
+      `;
+      if ((admins[0]?.n ?? 0) === 0) {
+        throw new Error("Es el último administrador activo. Nombra otro administrador antes de cambiarlo.");
+      }
+    }
+    const beforeAcl = await loadAcl(sql, target[0].id, target[0].role);
     await sql`
       update members set
         role = ${data.role},
@@ -272,5 +306,25 @@ export const updateMember = createServerFn({ method: "POST" })
         `;
       }
     }
+    // Candado 2: todo cambio de permisos queda en bitácora (quién, a quién, qué).
+    const changes: string[] = [];
+    if (target[0].role !== data.role) changes.push(`rol ${target[0].role} → ${data.role}`);
+    if (target[0].status !== data.status) changes.push(`estado ${target[0].status} → ${data.status}`);
+    if (target[0].own_only !== data.ownOnly) changes.push(`cartera propia ${target[0].own_only ? "sí" : "no"} → ${data.ownOnly ? "sí" : "no"}`);
+    if (data.acl) {
+      for (const [mod, level] of Object.entries(data.acl)) {
+        const prev = beforeAcl[mod as keyof typeof beforeAcl];
+        if (prev !== undefined && prev !== level) changes.push(`${mod} ${prev} → ${level}`);
+      }
+    }
+    await writeAudit(sql, {
+      companyId: me[0]!.company_id,
+      userId: context.userId,
+      action: "permisos-usuario",
+      entity: "member",
+      entityId: target[0].id,
+      name: target[0].display_name || target[0].email,
+      detail: changes.length ? changes.join(" · ") : "Sin cambios de fondo",
+    });
     return { ok: true };
   });

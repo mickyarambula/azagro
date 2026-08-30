@@ -1,5 +1,17 @@
 # Auditoría de seguridad y permisos — Azagro ERP
 
+> **Estado (30 de agosto de 2026, mismo día):** los hallazgos CRÍTICOS 1–5 y los
+> IMPORTANTES 6–9 ya se corrigieron en código: todas las operaciones de dinero y
+> kardex validan rol y estado activo en el servidor, TIIE/tipo de cambio son solo
+> de administrador y quedan en bitácora, la clave de equipo ya no da acceso
+> directo (deja solicitud pendiente) y solo la ve el admin, los correos exigen
+> permiso de cartera, la conciliación exige bancos, y las altas/cambios de rol
+> quedan en bitácora con quién y qué cambió. Además: nadie puede modificar su
+> propio rol/permisos, la empresa no puede quedarse sin administrador, y exceder
+> el límite de crédito requiere autorización de un administrador (con bitácora).
+> Pruebas en `scripts/erp-permissions.test.mjs`. **Ya se puede dar de alta al
+> equipo.** Quedan los MENORES 10–13, que no bloquean.
+
 Fecha: 30 de agosto de 2026. Solo diagnóstico; no se cambió nada de código.
 Contexto: hoy opera un solo usuario (administrador). Esta auditoría evalúa si
 los permisos aguantan cuando entre el equipo (almacén, ventas, contabilidad).

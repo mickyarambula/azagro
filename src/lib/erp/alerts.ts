@@ -3,12 +3,14 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { exactClock } from "@/lib/erp/credit";
+import { activeMember, assertCan } from "@/lib/erp/acl";
+import { writeAudit } from "@/lib/erp/audit";
 import { money } from "@/lib/utils";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -128,7 +130,31 @@ export const getAlertDigest = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const sql = await getSql();
-    return buildDigest(sql, await cid(sql, context.userId));
+    const companyId = await cid(sql, context.userId);
+    // El resumen trae folios y saldos de cartera: sin permiso de cartera va vacío
+    // (la campana la ve todo el equipo, no debe tronar).
+    const me = await activeMember(sql, context.userId);
+    if (me.acl.credit === "none") {
+      const asOf = new Date().toISOString().slice(0, 10);
+      return {
+        enabled: false,
+        to: "",
+        from: "",
+        legalName: "",
+        asOf,
+        warnCxc: 0,
+        warnCxp: 0,
+        cxc: 0,
+        cxp: 0,
+        items: [] as Awaited<ReturnType<typeof buildDigest>>["items"],
+        payload: { asOf, cxc: [], cxp: [] },
+        subject: "",
+        body: "",
+        mailto: "",
+        resendReady: false,
+      };
+    }
+    return buildDigest(sql, companyId);
   });
 
 export const listNotifications = createServerFn({ method: "GET" })
@@ -206,12 +232,23 @@ export const sendDirectMail = createServerFn({ method: "POST" })
   .validator(z.object({ to: z.string(), subject: z.string(), text: z.string() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
-    const acc = await mailAccount(sql, await cid(sql, context.userId));
+    const companyId = await cid(sql, context.userId);
+    // Escribir a nombre de la empresa exige permiso de cartera, no basta la sesión.
+    await assertCan(sql, context.userId, "credit", "edit");
+    const acc = await mailAccount(sql, companyId);
     const to = data.to.split(/[,;]/).map((s) => s.trim()).filter((s) => s.includes("@"));
     if (!to.length) throw new Error("Falta el correo destino");
     if (!acc.ready) throw new Error("Aún no hay envío directo. Se abre Outlook: en De: elige la cuenta de Azagro.");
     const sent = await sendResend({ key: acc.key, from: acc.from, to, subject: data.subject, text: data.text });
     if (!sent.ok) throw new Error(`No se pudo enviar: ${sent.reason}`);
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "correo",
+      entity: "mail",
+      name: data.subject.slice(0, 120),
+      detail: `Para ${to.join(", ")}`,
+    });
     return { ok: true, notice: `Enviado desde ${acc.emailFrom || "Azagro"} a ${to.join(", ")}.` };
   });
 
@@ -221,6 +258,7 @@ export const sendPaymentReminder = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "credit", "edit");
     const acc = await mailAccount(sql, companyId);
     const inv = await sql<{
       name: string;
@@ -283,6 +321,7 @@ export const sendPartnerReminders = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "credit", "edit");
     const d = await buildDigest(sql, companyId);
     const acc = await mailAccount(sql, companyId);
     const customers = d.items.filter((i) => i.kind === "customer" && i.alert);
@@ -326,6 +365,7 @@ export const sendDueAlerts = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "credit", "edit");
     const d = await buildDigest(sql, companyId);
     if (d.cxc + d.cxp === 0) return { ...d, sent: "none" as const, notice: "No hay vencimientos en alerta." };
     try {

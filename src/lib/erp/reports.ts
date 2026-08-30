@@ -2,14 +2,14 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
-import { assertCan } from "@/lib/erp/acl";
+import { assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { DEFAULT_POLICY } from "@/lib/erp/credit";
 import { YEAR_DAYS } from "@/lib/erp/rules";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
 async function cid(sql: Sql, userId: string) {
-  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} limit 1`;
+  const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
 }
@@ -156,7 +156,8 @@ export const listDealPnl = createServerFn({ method: "POST" })
   .validator(z.object({ from: z.string().optional(), to: z.string().optional() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
-    await assertCan(sql, context.userId, "credit", "view");
+    const me = await assertCan(sql, context.userId, "credit", "view");
+    if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
     const companyId = await cid(sql, context.userId);
     const from = (data.from || "2000-01-01").slice(0, 10);
     const to = (data.to || "2099-12-31").slice(0, 10);
@@ -212,7 +213,8 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
   .validator(z.object({ from: z.string(), to: z.string() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
-    await assertCan(sql, context.userId, "credit", "view");
+    const me = await assertCan(sql, context.userId, "credit", "view");
+    if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
     const companyId = await cid(sql, context.userId);
     const from = data.from.slice(0, 10);
     const to = data.to.slice(0, 10);
