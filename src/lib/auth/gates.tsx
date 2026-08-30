@@ -45,15 +45,47 @@ export function RedirectToSignIn({ to = SIGN_IN_PATH }: { to?: string }) {
 }
 
 /**
- * Minimal signed-in identity chip + sign-out. Restyle freely (see the
- * `design-ui` skill). Sign-out is only shown when auth is enabled (the
- * disabled-auth dev user has nothing to sign out of).
+ * Standalone "Cerrar sesión" control. Use this on any screen where the
+ * visitor could otherwise get stuck signed in with no way out (pending
+ * approval, disabled account, boot errors) — not just inside `<UserButton>`.
+ * Hidden when auth is disabled (the dev user has nothing to sign out of).
  */
-export function UserButton() {
-  const user = useCurrentUser();
+export function SignOutButton({
+  className,
+  label = "Cerrar sesión",
+}: {
+  className?: string;
+  label?: string;
+}) {
   // Sign-out can take a moment (and can fail when deployed), so the control
   // shows it is working and cannot be fired twice.
   const [signingOut, setSigningOut] = useState(false);
+  if (!authEnabled) return null;
+  return (
+    <button
+      type="button"
+      disabled={signingOut}
+      onClick={() => {
+        setSigningOut(true);
+        // Success navigates away; on failure re-enable so it can be retried.
+        void signOut().catch(() => setSigningOut(false));
+      }}
+      className={
+        className ??
+        "cursor-pointer text-sm underline-offset-4 opacity-70 hover:underline disabled:cursor-wait disabled:no-underline"
+      }
+    >
+      {signingOut ? "Cerrando sesión…" : label}
+    </button>
+  );
+}
+
+/**
+ * Minimal signed-in identity chip + sign-out. Restyle freely (see the
+ * `design-ui` skill).
+ */
+export function UserButton() {
+  const user = useCurrentUser();
   if (!user) return null;
   const label = user.displayName ?? user.primaryEmail ?? "Account";
   return (
@@ -70,20 +102,7 @@ export function UserButton() {
         </span>
       )}
       <span className="text-sm font-medium">{label}</span>
-      {authEnabled && (
-        <button
-          type="button"
-          disabled={signingOut}
-          onClick={() => {
-            setSigningOut(true);
-            // Success navigates away; on failure re-enable so it can be retried.
-            void signOut().catch(() => setSigningOut(false));
-          }}
-          className="cursor-pointer text-sm underline-offset-4 opacity-70 hover:underline disabled:cursor-wait disabled:no-underline"
-        >
-          {signingOut ? "Signing out…" : "Sign out"}
-        </button>
-      )}
+      <SignOutButton />
     </div>
   );
 }

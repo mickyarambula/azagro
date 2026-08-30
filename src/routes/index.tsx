@@ -16,6 +16,8 @@ import { AppShell } from "@/components/app-shell";
 import { StatusPill } from "@/components/erp";
 import { getDashboard } from "@/lib/azagro";
 import { FlujoAzagro } from "@/components/flujo";
+import { useAccess } from "@/lib/access";
+import { canSeeCosts, canSeeMargins, pathModule } from "@/lib/erp/acl";
 import { prevPath } from "@/lib/trail";
 import { money } from "@/lib/utils";
 
@@ -38,6 +40,7 @@ const FAVORITES = [
 ] as const;
 
 function Home() {
+  const access = useAccess();
   const [data, setData] = useState<Awaited<ReturnType<typeof getDashboard>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resume, setResume] = useState<string | null>(null);
@@ -52,6 +55,17 @@ function Home() {
 
   const agingOrder = ["Por vencer", "1-30", "31-60", "61+"];
 
+  // Un atajo o una cifra sin permiso no se muestra en $0.00 — se oculta.
+  // (Confunde: parece que la empresa no tiene dinero, no que falta permiso.)
+  const favorites = FAVORITES.filter((f) => {
+    if (f.to === "/ayuda") return true;
+    if (f.to === "/reportes") return access.can("credit", "view") && canSeeMargins(access.role);
+    return access.can(pathModule(f.to));
+  });
+  const seeCash = access.can("banks");
+  const seeCredit = access.can("credit");
+  const seeStockValue = canSeeCosts(access.role);
+
   return (
     <AppShell>
       <div className="p-5">
@@ -64,7 +78,7 @@ function Home() {
       ) : null}
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-        {FAVORITES.map((f) => {
+        {favorites.map((f) => {
           const Icon = f.icon;
           return (
             <Link
@@ -89,33 +103,45 @@ function Home() {
 
       {error && <p className="mt-4 text-sm text-danger">{error}</p>}
 
-      <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Kpi label="Caja" value={data ? money(data.cash) : "—"} hint="Saldos bancarios" />
-        <Kpi label="Por cobrar" value={data ? money(data.ar) : "—"} hint={data?.overdueN ? `${data.overdueN} vencidas` : "Al corriente"} />
-        <Kpi label="Por pagar" value={data ? money(data.ap) : "—"} />
-        <Kpi label="Inventario Azagro" value={data ? money(data.stockOwn) : "—"} hint={data ? `Proveedor ${money(data.stockSupplier)} · tránsito ${money(data.stockTransit)}` : undefined} />
-      </div>
+      {(seeCash || seeCredit || seeStockValue) && (
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {seeCash && <Kpi label="Caja" value={data ? money(data.cash) : "—"} hint="Saldos bancarios" />}
+          {seeCredit && (
+            <Kpi label="Por cobrar" value={data ? money(data.ar) : "—"} hint={data?.overdueN ? `${data.overdueN} vencidas` : "Al corriente"} />
+          )}
+          {seeCredit && <Kpi label="Por pagar" value={data ? money(data.ap) : "—"} />}
+          {seeStockValue && (
+            <Kpi
+              label="Inventario Azagro"
+              value={data ? money(data.stockOwn) : "—"}
+              hint={data ? `Proveedor ${money(data.stockSupplier)} · tránsito ${money(data.stockTransit)}` : undefined}
+            />
+          )}
+        </div>
+      )}
 
       <div className="mt-4 grid gap-3 lg:grid-cols-3">
-        <div className="erp-card p-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-[13px] font-semibold">Antigüedad CxC</h3>
-            <Link to="/credit" search={{ lado: "cobrar" }} className="text-[12px] font-medium text-accent">
-              Por cobrar
-            </Link>
+        {seeCredit && (
+          <div className="erp-card p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[13px] font-semibold">Antigüedad CxC</h3>
+              <Link to="/credit" search={{ lado: "cobrar" }} className="text-[12px] font-medium text-accent">
+                Por cobrar
+              </Link>
+            </div>
+            <ul className="mt-3 space-y-2 text-sm">
+              {agingOrder.map((b) => {
+                const amt = data?.aging.find((a) => a.bucket === b)?.amount ?? 0;
+                return (
+                  <li key={b} className="flex justify-between">
+                    <span className="text-muted">{b}</span>
+                    <span className="tabular-nums">{money(amt)}</span>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
-          <ul className="mt-3 space-y-2 text-sm">
-            {agingOrder.map((b) => {
-              const amt = data?.aging.find((a) => a.bucket === b)?.amount ?? 0;
-              return (
-                <li key={b} className="flex justify-between">
-                  <span className="text-muted">{b}</span>
-                  <span className="tabular-nums">{money(amt)}</span>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+        )}
         <div className="erp-card p-4">
           <div className="flex items-center justify-between">
             <h3 className="text-[13px] font-semibold">Cola operativa</h3>
@@ -132,10 +158,12 @@ function Home() {
               <span className="text-muted">Compras por recibir</span>
               <span className="tabular-nums">{data?.pendingPo ?? "—"}</span>
             </li>
-            <li className="flex justify-between">
-              <span className="text-muted">Facturas vencidas</span>
-              <span className="tabular-nums">{data?.overdueN ?? "—"}</span>
-            </li>
+            {seeCredit && (
+              <li className="flex justify-between">
+                <span className="text-muted">Facturas vencidas</span>
+                <span className="tabular-nums">{data?.overdueN ?? "—"}</span>
+              </li>
+            )}
           </ul>
         </div>
         <div className="erp-card p-4">
@@ -152,7 +180,7 @@ function Home() {
                   {l.name}
                   {l.locType === "supplier" ? " · prov." : ""}
                 </span>
-                <span className="tabular-nums">{money(l.value)}</span>
+                {seeStockValue ? <span className="tabular-nums">{money(l.value)}</span> : <span className="tabular-nums">{l.qty}</span>}
               </li>
             ))}
             {data && data.locStock.length === 0 && <li className="text-muted">Sin ubicaciones.</li>}

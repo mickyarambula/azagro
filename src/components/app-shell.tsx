@@ -17,7 +17,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { RedirectToSignIn, UserButton } from "@/lib/auth/gates";
+import { RedirectToSignIn, SignOutButton, UserButton } from "@/lib/auth/gates";
 import { AlertsBell } from "@/components/alerts-bell";
 import { LogoLockup, LogoMark } from "@/components/brand";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
@@ -175,9 +175,12 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
           <LogoLockup height="h-12" />
           <p className="mt-3 text-sm text-muted">Cargando…</p>
           {bootStuck ? (
-            <button type="button" className="erp-btn mt-3" onClick={() => { setBootStuck(false); void refresh(); }}>
-              Seguir esperando / reintentar
-            </button>
+            <div className="mt-3 flex flex-col items-center gap-2">
+              <button type="button" className="erp-btn" onClick={() => { setBootStuck(false); void refresh(); }}>
+                Seguir esperando / reintentar
+              </button>
+              <SignOutButton />
+            </div>
           ) : null}
         </div>
       </div>
@@ -188,7 +191,12 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
   if (state.status === "disabled") {
     return (
       <main className="grid min-h-dvh place-items-center bg-paper px-4">
-        <p className="text-sm text-muted">Tu usuario está desactivado. Habla con el administrador.</p>
+        <div className="w-full max-w-md erp-card p-7 text-center">
+          <LogoLockup height="h-14" />
+          <h1 className="mt-4 text-xl font-semibold">Usuario desactivado</h1>
+          <p className="mt-2 text-sm text-muted">Habla con el administrador de tu empresa para reactivarlo.</p>
+          <SignOutButton className="erp-btn mt-5 w-full" />
+        </div>
       </main>
     );
   }
@@ -612,6 +620,9 @@ function Onboard({ state, onDone }: { state: AccessPayload; onDone: () => void }
           </>
         )}
         {error && <p className="mt-3 text-sm text-danger">{error}</p>}
+        <div className="mt-4 text-center">
+          <SignOutButton />
+        </div>
       </div>
     </main>
   );
