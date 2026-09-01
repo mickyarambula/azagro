@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
-import { computeMora, computeStatementLine, DEFAULT_POLICY, earlyPayBonus, explainInterest, fxDifferential, moraBilling, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
+import { computeMora, computeStatementLine, DEFAULT_POLICY, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, moraBilling, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
@@ -798,8 +798,8 @@ export const listBanks = createServerFn({ method: "GET" })
     const partners = await sql<{ id: number; name: string; is_customer: boolean; is_supplier: boolean }>`
       select id, name, is_customer, is_supplier from partners where company_id = ${cid} order by name
     `;
-    const invoices = await sql<{ id: number; name: string; partner_id: number; kind: string; residual: string }>`
-      select id, name, partner_id, kind, residual::text from invoices
+    const invoices = await sql<{ id: number; name: string; partner_id: number; kind: string; residual: string; currency: string }>`
+      select id, name, partner_id, kind, residual::text, coalesce(currency,'MXN') as currency from invoices
       where company_id = ${cid} and state <> 'paid' order by id desc limit 80
     `;
     const sales = await sql<{ id: number; name: string; partner_id: number }>`
@@ -838,6 +838,10 @@ export async function applyInvoicePayment(
     amount: number;
     memo?: string;
     date?: string;
+    /** TC del día del pago. Obligatorio para facturas de cliente en USD. */
+    fxPaid?: number;
+    /** Qué hacer con el diferencial cambiario de ESTE cobro (el Excel lo decide pago por pago). */
+    fxTreatment?: "utilidad" | "ajuste";
   },
 ) {
   const inv = await sql<{
@@ -846,20 +850,51 @@ export async function applyInvoicePayment(
     residual: string;
     amount: string;
     inv_class: string;
+    currency: string;
+    amount_fx: string;
+    fx_agreed: string;
     partner_id: number;
     name: string;
     date: string;
     due_date: string;
+    order_id: number | null;
   }>`
     select id, kind, residual::text, amount::text, coalesce(inv_class,'product') as inv_class,
-      partner_id, name, date::text, due_date::text from invoices
+      coalesce(currency,'MXN') as currency, coalesce(amount_fx,0)::text as amount_fx, coalesce(fx_agreed,0)::text as fx_agreed,
+      partner_id, name, date::text, due_date::text, order_id from invoices
     where id = ${opts.invoiceId} and company_id = ${opts.companyId}
     for update
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
   const residual = Number(inv[0].residual);
   if (residual <= 0.009) throw new Error("Esta factura ya está saldada");
-  const applied = Math.min(opts.amount, residual);
+  // Factura de cliente en dólares: el libro está en pesos al TC pactado; el
+  // depósito real se convierte con el TC del día y la diferencia es el
+  // diferencial cambiario del tramo.
+  const isUsdCustomer =
+    inv[0].kind === "customer" && inv[0].currency === "USD" && Number(inv[0].fx_agreed) > 0 && Number(inv[0].amount_fx) > 0;
+  let applied: number;
+  let bankAmount: number;
+  let fxDiff = 0;
+  let usdApplied = 0;
+  if (isUsdCustomer) {
+    if (!opts.fxPaid || opts.fxPaid <= 0) {
+      throw new Error("Es factura en dólares: captura el tipo de cambio del pago.");
+    }
+    const split = fxPaymentSplit({
+      depositedMxn: opts.amount,
+      fxPaid: opts.fxPaid,
+      fxAgreed: Number(inv[0].fx_agreed),
+      residualMxn: residual,
+    });
+    applied = split.appliedMxn;
+    bankAmount = split.bankMxn;
+    fxDiff = split.diff;
+    usdApplied = split.usdApplied;
+  } else {
+    applied = Math.min(opts.amount, residual);
+    bankAmount = applied;
+  }
   await sql`select id from banks where id = ${opts.bankId} and company_id = ${opts.companyId} for update`;
   const bank = await sql<{ id: number; name: string; opening: string; movement: string }>`
     select b.id, b.name, b.opening::text,
@@ -901,16 +936,60 @@ export async function applyInvoicePayment(
     values (${pay[0]!.id}, ${inv[0].id}, ${applied})
   `;
   let newRes = await refreshInvoiceResidual(sql, inv[0].id);
-  const signed = inv[0].kind === "customer" ? applied : -applied;
+  // El banco registra los pesos REALES que entraron o salieron (bankAmount);
+  // la factura se aplica a pesos al TC pactado (applied). La diferencia es el
+  // diferencial cambiario, que se decide abajo.
+  const signed = inv[0].kind === "customer" ? bankAmount : -bankAmount;
   const moveKind = inv[0].kind === "customer" ? "cobro" : "pago";
+  const usdNote = opts.fxPaid && !isUsdCustomer ? ` (pago en USD, TC ${opts.fxPaid})` : "";
   await sql`
     insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, created_by)
     values (
       ${opts.companyId}, ${opts.bankId}, ${payDate}, ${signed},
-      ${opts.memo || `${moveKind} ${inv[0].name}`},
+      ${(opts.memo || `${moveKind} ${inv[0].name}`) + usdNote},
       ${inv[0].partner_id}, ${moveKind}, ${inv[0].id}, ${pay[0]!.id}, ${opts.userId}
     )
   `;
+
+  // Diferencial cambiario del tramo: se decide pago por pago (como el Excel).
+  let fxDoc: string | null = null;
+  let fxNote = "";
+  if (isUsdCustomer && Math.abs(fxDiff) >= 0.01 && opts.fxPaid) {
+    const treatment = opts.fxTreatment ?? "utilidad";
+    const calc = `${usdApplied.toFixed(2)} USD × (TC pagado ${opts.fxPaid} − pactado ${Number(inv[0].fx_agreed)}) = ${fxDiff.toFixed(2)}`;
+    if (treatment === "ajuste") {
+      // Pagó de menos → documento POR COBRAR; de más → POR DEVOLVER (a favor).
+      const n = await sql<{ c: number }>`
+        select count(*)::int as c from invoices where company_id = ${opts.companyId} and inv_class = 'fx'
+      `;
+      fxDoc = `ATC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+      await sql`
+        insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id)
+        values (
+          ${opts.companyId}, 'customer', ${fxDoc}, ${inv[0].partner_id}, ${payDate}, ${payDate}, 'open',
+          ${-fxDiff}, ${-fxDiff}, ${"Ajuste TC " + inv[0].name}, 'fx', 'MXN', ${inv[0].order_id}
+        )
+      `;
+      fxNote = `${fxDiff < 0 ? "POR COBRAR" : "POR DEVOLVER"} ${fxDoc}: ${Math.abs(fxDiff).toFixed(2)}`;
+    } else {
+      await sql`update invoices set fx_result = fx_result + ${fxDiff} where id = ${inv[0].id}`;
+      fxNote = `${fxDiff >= 0 ? "utilidad" : "pérdida"} cambiaria ${Math.abs(fxDiff).toFixed(2)}`;
+    }
+    await sql`
+      update invoices set fx_paid = ${opts.fxPaid}, fx_treatment = ${treatment},
+        fx_invoiced = fx_invoiced + ${Math.max(0, -fxDiff)}
+      where id = ${inv[0].id}
+    `;
+    await writeAudit(sql, {
+      companyId: opts.companyId,
+      userId: opts.userId,
+      action: treatment === "ajuste" ? "ajuste-tc" : "diferencial-tc",
+      entity: "invoice",
+      entityId: inv[0].id,
+      name: inv[0].name,
+      detail: `${calc} → ${fxNote}`,
+    });
+  }
 
   // Descuento REAL por pronto pago: si pagó antes del umbral y lo que falta
   // del saldo cabe en la bonificación (días hasta el plazo financiero, a TIIE
@@ -981,6 +1060,9 @@ export async function applyInvoicePayment(
     moraFormula: mora.formula ?? "",
     discount,
     discountDetail,
+    fxDiff,
+    fxDoc,
+    fxNote,
     bank: bank[0].name,
     cashAfter,
   };
@@ -1000,9 +1082,14 @@ export const addBankMove = createServerFn({ method: "POST" })
       soId: z.number().optional(),
       poId: z.number().optional(),
       bankToId: z.number().optional(),
+      fxPaid: z.number().positive().optional(),
+      fxTreatment: z.enum(["utilidad", "ajuste"]).optional(),
     }),
   )
   .handler(async ({ context, data }) => {
+    const boot = await getSql();
+    await boot`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
+    await boot`alter table invoices add column if not exists fx_treatment text not null default ''`;
     return withTx(async (sql) => {
       const cid = await companyOf(sql, context.userId);
       await assertCan(sql, context.userId, "banks", "edit");
@@ -1017,6 +1104,8 @@ export const addBankMove = createServerFn({ method: "POST" })
           amount: Math.abs(data.amount),
           memo: data.memo ?? "",
           date: data.date,
+          fxPaid: data.fxPaid,
+          fxTreatment: data.fxTreatment,
         });
       }
       const signed =
@@ -1373,7 +1462,8 @@ export async function issueMoraInvoice(
     from invoices where id = ${invoiceId} and company_id = ${companyId}
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
-  if (inv[0].kind !== "customer" || inv[0].inv_class === "interest" || Number(inv[0].amount) <= 0) {
+  // Solo documentos de producto generan mora (ni FI de intereses ni ajustes de TC).
+  if (inv[0].kind !== "customer" || inv[0].inv_class !== "product" || Number(inv[0].amount) <= 0) {
     return { name: null as string | null, charge: 0, formula: "" };
   }
   // La mora corre desde el plazo financiero (credit_due, día 150), no desde el

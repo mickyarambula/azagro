@@ -3,7 +3,7 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan, canSeeMargins } from "@/lib/erp/acl";
-import { daysBetween, earlyPayBonus, financeCost, fxDifferential, nearestRate } from "@/lib/erp/credit";
+import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -34,18 +34,18 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const pol = await policy(sql, companyId);
   // La factura de venta manda: su fecha de emisión fija la TIIE de costo, y
   // sus fechas de pago/plazo financiero fijan la Capa 2 y el pronto pago.
+  await sql`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
   const fv = await sql<{
     date: string;
     due_date: string;
     credit_due: string | null;
     paid_date: string | null;
     amount: string;
-    amount_fx: string;
-    fx_agreed: string;
-    fx_paid: string | null;
+    residual: string;
+    fx_result: string;
   }>`
     select date::text, due_date::text, credit_due::text, paid_date::text,
-      amount::text, coalesce(amount_fx,0)::text as amount_fx, coalesce(fx_agreed,0)::text as fx_agreed, fx_paid::text
+      amount::text, residual::text, coalesce(fx_result,0)::text as fx_result
     from invoices
     where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
     order by id desc limit 1
@@ -156,14 +156,17 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const expPedido = expenses.filter((e) => e.class === "pedido").reduce((s, e) => s + e.amount, 0);
   const expOther = expenses.filter((e) => e.class !== "pedido").reduce((s, e) => s + e.amount, 0);
   let mora = 0;
+  let moraPendiente = 0;
   try {
-    const mi = await sql<{ a: string }>`
-      select coalesce(sum(amount),0)::text as a from invoices
+    const mi = await sql<{ a: string; r: string }>`
+      select coalesce(sum(amount),0)::text as a, coalesce(sum(residual),0)::text as r from invoices
       where company_id = ${companyId} and order_id = ${soId} and inv_class = 'interest'
     `;
     mora = Number(mi[0]?.a ?? 0);
+    moraPendiente = Number(mi[0]?.r ?? 0);
   } catch {
     mora = 0;
+    moraPendiente = 0;
   }
   const revenue = lines.reduce((s, l) => s + l.sale, 0);
   const cogs = lines.reduce((s, l) => s + l.cogs, 0);
@@ -188,14 +191,26 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       })
     : { applies: false, bonus: 0, days: 0, lived: 0, rate: 0 };
   const discount = bono.applies ? bono.bonus : 0;
-  const fxIncome = fv[0] && so[0].currency === "USD"
-    ? fxDifferential(Number(fv[0].amount_fx), Number(fv[0].fx_agreed), fv[0].fx_paid ? Number(fv[0].fx_paid) : null)
-    : 0;
+  // Diferencial cambiario que se decidió dejar como utilidad/pérdida al
+  // cobrar (fx_result). Lo que se convirtió en documento ATC es cartera, no
+  // utilidad — igual que el Excel.
+  const fxIncome = fv[0] ? Number(fv[0].fx_result) : 0;
   const margin = revenue - cogs - freight - otherQuote - expOther;
   // Utilidad real de la operación, como el Excel:
   // + venta + mora + diferencial cambiario
   // − costo proveedor − comisión − Capa 1 − Capa 2 − descuento pronto pago.
   const netProfit = margin + mora + fxIncome - finance - discount;
+  // Las cuatro visiones de la hoja PANORAMA:
+  // devengada (todo) · realizada (sin la mora aún no cobrada) ·
+  // en caja (solo facturas 100% cobradas) · proporcional (parte pagada).
+  const fvAmount = fv[0] ? Number(fv[0].amount) : 0;
+  const fvResidual = fv[0] ? Number(fv[0].residual) : 0;
+  const paidRatio = fvAmount > 0 ? Math.min(1, Math.max(0, (fvAmount - fvResidual) / fvAmount)) : 0;
+  const fullyPaid = Boolean(fv[0]) && fvResidual <= 0.009;
+  const utilidadDevengada = netProfit;
+  const utilidadRealizada = netProfit - moraPendiente;
+  const utilidadCaja = fullyPaid ? utilidadRealizada : 0;
+  const utilidadProporcional = netProfit * paidRatio;
   return {
     name: so[0].name,
     currency: so[0].currency,
@@ -224,6 +239,14 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     netProfit,
     netProfitPct: revenue > 0 ? (netProfit / revenue) * 100 : 0,
     mora,
+    moraPendiente,
+    moraCobrada: mora - moraPendiente,
+    paidRatio,
+    fullyPaid,
+    utilidadDevengada,
+    utilidadRealizada,
+    utilidadCaja,
+    utilidadProporcional,
   };
 }
 
@@ -367,4 +390,178 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
       collected: Number(collections[0]?.amount ?? 0),
       paidOut: Number(payouts[0]?.amount ?? 0),
     };
+  });
+
+/**
+ * PANORAMA — estado de resultados por razón social y consolidado del grupo,
+ * como las hojas EDO_RESULTADOS_RS y PANORAMA del Excel: P&L por cliente,
+ * cobranza de capital e intereses, ajustes de TC pendientes y las cuatro
+ * visiones de utilidad (devengada / realizada / en caja / proporcional).
+ */
+export const getPanorama = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const sql = await getSql();
+    const me = await assertCan(sql, context.userId, "credit", "view");
+    if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
+    const companyId = await cid(sql, context.userId);
+    const orders = await sql<{ id: number; partner: string; group_name: string }>`
+      select s.id, p.name as partner, coalesce(p.group_name, '') as group_name
+      from sales_orders s
+      join partners p on p.id = s.partner_id
+      where s.company_id = ${companyId}
+      order by s.id desc
+      limit 500
+    `;
+    type Row = {
+      partner: string;
+      group: string;
+      venta: number;
+      mora: number;
+      fx: number;
+      costo: number;
+      comision: number;
+      capa1: number;
+      capa2: number;
+      descuento: number;
+      utilidad: number;
+      realizada: number;
+      caja: number;
+      proporcional: number;
+    };
+    const byPartner = new Map<string, Row>();
+    for (const o of orders) {
+      const d = await computeDealPnl(sql, companyId, o.id);
+      const r = byPartner.get(o.partner) ?? {
+        partner: o.partner,
+        group: o.group_name,
+        venta: 0, mora: 0, fx: 0, costo: 0, comision: 0, capa1: 0, capa2: 0,
+        descuento: 0, utilidad: 0, realizada: 0, caja: 0, proporcional: 0,
+      };
+      r.venta += d.revenue;
+      r.mora += d.mora;
+      r.fx += d.fxIncome;
+      r.costo += d.cogs;
+      r.comision += d.commission;
+      r.capa1 += d.layer1;
+      r.capa2 += d.layer2;
+      r.descuento += d.discount;
+      r.utilidad += d.utilidadDevengada;
+      r.realizada += d.utilidadRealizada;
+      r.caja += d.utilidadCaja;
+      r.proporcional += d.utilidadProporcional;
+      byPartner.set(o.partner, r);
+    }
+    const porRazon = [...byPartner.values()]
+      .filter((r) => r.venta !== 0 || r.mora !== 0)
+      .sort((a, b) => b.venta - a.venta);
+    const sum = (f: (r: Row) => number) => porRazon.reduce((s, r) => s + f(r), 0);
+    const totales = {
+      venta: sum((r) => r.venta),
+      mora: sum((r) => r.mora),
+      fx: sum((r) => r.fx),
+      costo: sum((r) => r.costo),
+      comision: sum((r) => r.comision),
+      capa1: sum((r) => r.capa1),
+      capa2: sum((r) => r.capa2),
+      descuento: sum((r) => r.descuento),
+      utilidad: sum((r) => r.utilidad),
+      realizada: sum((r) => r.realizada),
+      caja: sum((r) => r.caja),
+      proporcional: sum((r) => r.proporcional),
+    };
+
+    // Cobranza (capital, mora y ajustes de TC) — sobre facturas reales.
+    const cap = await sql<{ facturado: string; pendiente: string }>`
+      select coalesce(sum(amount),0)::text as facturado, coalesce(sum(residual),0)::text as pendiente
+      from invoices
+      where company_id = ${companyId} and kind = 'customer' and coalesce(inv_class,'product') = 'product' and amount > 0
+    `;
+    const morat = await sql<{ total: string; pendiente: string }>`
+      select coalesce(sum(amount),0)::text as total, coalesce(sum(residual),0)::text as pendiente
+      from invoices
+      where company_id = ${companyId} and kind = 'customer' and inv_class = 'interest'
+    `;
+    const fxDocs = await sql<{ por_cobrar: string; por_devolver: string }>`
+      select
+        coalesce(sum(case when residual > 0 then residual else 0 end),0)::text as por_cobrar,
+        coalesce(sum(case when residual < 0 then -residual else 0 end),0)::text as por_devolver
+      from invoices
+      where company_id = ${companyId} and inv_class = 'fx' and state = 'open'
+    `;
+    const capitalFacturado = Number(cap[0]?.facturado ?? 0);
+    const capitalPendiente = Number(cap[0]?.pendiente ?? 0);
+    const moraTotal = Number(morat[0]?.total ?? 0);
+    const moraPend = Number(morat[0]?.pendiente ?? 0);
+    const fxPorCobrar = Number(fxDocs[0]?.por_cobrar ?? 0);
+    const fxPorDevolver = Number(fxDocs[0]?.por_devolver ?? 0);
+    return {
+      porRazon,
+      totales,
+      cobranza: {
+        capitalFacturado,
+        capitalPagado: capitalFacturado - capitalPendiente,
+        capitalPendiente,
+        moraTotal,
+        moraCobrada: moraTotal - moraPend,
+        moraPendiente: moraPend,
+        fxPorCobrar,
+        fxPorDevolver,
+        granTotalPorCobrar: capitalPendiente + moraPend + fxPorCobrar,
+      },
+    };
+  });
+
+/**
+ * Saldos por vencer por mes futuro (base de la propuesta de pago): cuánto
+ * capital llega a su plazo financiero cada mes y cuánto interés correría por
+ * mes de 30 días si no se paga.
+ */
+export const getUpcomingDue = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const sql = await getSql();
+    await assertCan(sql, context.userId, "credit", "view");
+    const companyId = await cid(sql, context.userId);
+    const pol = await policy(sql, companyId);
+    const tiieRows = await sql<{ date: string; rate: string }>`
+      select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
+    `;
+    const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+    const open = await sql<{
+      amount: string;
+      residual: string;
+      currency: string;
+      due_date: string;
+      credit_due: string | null;
+    }>`
+      select amount::text, residual::text, coalesce(currency,'MXN') as currency, due_date::text, credit_due::text
+      from invoices
+      where company_id = ${companyId} and kind = 'customer' and coalesce(inv_class,'product') = 'product'
+        and state = 'open' and residual > 0.009 and amount > 0
+    `;
+    const today = new Date().toISOString().slice(0, 10);
+    type Bucket = { month: string; n: number; saldo: number; saldoMxnDocs: number; saldoUsdDocs: number; interesMensual: number };
+    const buckets = new Map<string, Bucket>();
+    const vencido: Bucket = { month: "vencido", n: 0, saldo: 0, saldoMxnDocs: 0, saldoUsdDocs: 0, interesMensual: 0 };
+    for (const inv of open) {
+      const moraDue = inv.credit_due || inv.due_date;
+      const saldo = Number(inv.residual);
+      const rate = nearestRate(tiieTable, moraDue, pol.defaultTiie) + pol.collectionSpread;
+      // El interés corre sobre el CARGO original una vez vencido el plazo.
+      const interesMensual = (Number(inv.amount) * rate * 30) / 360;
+      const target = moraDue < today ? vencido : (() => {
+        const key = moraDue.slice(0, 7);
+        const b = buckets.get(key) ?? { month: key, n: 0, saldo: 0, saldoMxnDocs: 0, saldoUsdDocs: 0, interesMensual: 0 };
+        buckets.set(key, b);
+        return b;
+      })();
+      target.n += 1;
+      target.saldo += saldo;
+      if (inv.currency === "USD") target.saldoUsdDocs += saldo;
+      else target.saldoMxnDocs += saldo;
+      target.interesMensual += interesMensual;
+    }
+    const meses = [...buckets.values()].sort((a, b) => a.month.localeCompare(b.month));
+    return { vencido, meses, spread: pol.collectionSpread };
   });

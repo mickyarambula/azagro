@@ -23,7 +23,15 @@ function Page() {
   const kind = lado === "pagar" ? "supplier" : lado === "todos" ? "all" : "customer";
   const [status, setStatus] = useState<"all" | "open" | "overdue" | "paid">("all");
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listInvoices>>>([]);
-  const [pay, setPay] = useState<{ id: number; amount: number; bankId: number; memo: string; date: string } | null>(null);
+  const [pay, setPay] = useState<{
+    id: number;
+    amount: number;
+    bankId: number;
+    memo: string;
+    date: string;
+    fxPaid?: number;
+    fxTreatment?: "utilidad" | "ajuste";
+  } | null>(null);
   const [settings, setSettings] = useState<Awaited<ReturnType<typeof getSettings>> | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -267,12 +275,21 @@ function Page() {
             try {
               if (!pay.bankId) throw new Error("Elige la cuenta de banco");
               const r = await registerPayment({
-                data: { invoiceId: pay.id, amount: pay.amount, bankId: pay.bankId, memo: pay.memo, date: pay.date },
+                data: {
+                  invoiceId: pay.id,
+                  amount: pay.amount,
+                  bankId: pay.bankId,
+                  memo: pay.memo,
+                  date: pay.date,
+                  fxPaid: pay.fxPaid || undefined,
+                  fxTreatment: pay.fxTreatment,
+                },
               });
               setPay(null);
               const extra = r.mora ? ` Mora ${r.mora} (${money(r.moraCharge)})${r.moraFormula ? ` · ${r.moraFormula}` : ""}.` : "";
               const desc = r.discount > 0 ? ` Pronto pago: se bonificaron ${money(r.discount)} y la factura quedó saldada.` : "";
-              setMsg(`Aplicado ${money(r.applied)} en ${r.bank}. Saldo factura ${money(r.residual)}. Caja ${money(r.cashAfter)}.${extra}${desc}`);
+              const fx = r.fxNote ? ` Diferencial TC: ${r.fxNote}.` : "";
+              setMsg(`Aplicado ${money(r.applied)} en ${r.bank}. Saldo factura ${money(r.residual)}. Caja ${money(r.cashAfter)}.${extra}${desc}${fx}`);
               await load();
             } catch (err) {
               setError(err instanceof Error ? err.message : "Error");
@@ -348,7 +365,7 @@ function Page() {
               </select>
             </label>
             <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
-              Importe
+              Importe (pesos depositados)
               <input
                 type="number"
                 min={0.01}
@@ -358,6 +375,45 @@ function Page() {
                 onChange={(e) => setPay({ ...pay, amount: Number(e.target.value) })}
               />
             </label>
+            {rows.find((r) => r.id === pay.id)?.currency === "USD" && (
+              <>
+                <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+                  TC del pago (obligatorio: factura en dólares)
+                  <input
+                    type="number"
+                    min={0.0001}
+                    step="0.0001"
+                    className="erp-input w-full"
+                    value={pay.fxPaid ?? ""}
+                    onChange={(e) => setPay({ ...pay, fxPaid: Number(e.target.value) })}
+                    placeholder="p. ej. 18.60"
+                  />
+                </label>
+                <div className="mt-2 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+                  Diferencial contra el TC pactado
+                  <div className="flex gap-3 text-[13px] normal-case tracking-normal">
+                    <label className="flex items-center gap-1.5">
+                      <input
+                        type="radio"
+                        name="fxTreatment"
+                        checked={(pay.fxTreatment ?? "utilidad") === "utilidad"}
+                        onChange={() => setPay({ ...pay, fxTreatment: "utilidad" })}
+                      />
+                      Dejarlo como utilidad/pérdida
+                    </label>
+                    <label className="flex items-center gap-1.5">
+                      <input
+                        type="radio"
+                        name="fxTreatment"
+                        checked={pay.fxTreatment === "ajuste"}
+                        onChange={() => setPay({ ...pay, fxTreatment: "ajuste" })}
+                      />
+                      Ajustar al pactado (por cobrar / devolver)
+                    </label>
+                  </div>
+                </div>
+              </>
+            )}
             <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
               Referencia
               <input className="erp-input" value={pay.memo} onChange={(e) => setPay({ ...pay, memo: e.target.value })} placeholder="Transferencia, cheque…" />

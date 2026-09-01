@@ -44,6 +44,8 @@ function Page() {
   const [partnerId, setPartnerId] = useState("");
   const [invoiceId, setInvoiceId] = useState("");
   const [soId, setSoId] = useState("");
+  const [fxPaid, setFxPaid] = useState(0);
+  const [fxTreatment, setFxTreatment] = useState<"utilidad" | "ajuste">("utilidad");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -98,12 +100,15 @@ function Page() {
           invoiceId: Number(invoiceId) || undefined,
           soId: Number(soId) || undefined,
           bankToId: Number(bankToId) || undefined,
+          fxPaid: fxPaid || undefined,
+          fxTreatment: fxPaid ? fxTreatment : undefined,
         },
       });
       setAmount(0);
       setMemo("");
       setInvoiceId("");
       setSoId("");
+      setFxPaid(0);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo registrar");
@@ -234,6 +239,27 @@ function Page() {
                 placeholder="Buscar factura…"
               />
             </Field>
+          )}
+          {invoices.find((i) => String(i.id) === invoiceId)?.currency === "USD" && (
+            <>
+              <Field label="TC del pago (factura en dólares)">
+                <input
+                  className="erp-input"
+                  type="number"
+                  min={0.0001}
+                  step="0.0001"
+                  value={fxPaid || ""}
+                  onChange={(e) => setFxPaid(Number(e.target.value))}
+                  placeholder="p. ej. 18.60"
+                />
+              </Field>
+              <Field label="Diferencial contra el pactado">
+                <select className="erp-input" value={fxTreatment} onChange={(e) => setFxTreatment(e.target.value as "utilidad" | "ajuste")}>
+                  <option value="utilidad">Dejarlo como utilidad/pérdida</option>
+                  <option value="ajuste">Ajustar al pactado (por cobrar / devolver)</option>
+                </select>
+              </Field>
+            </>
           )}
           {kind === "cobro" && (
             <Field label="Pedido relacionado">

@@ -1522,6 +1522,8 @@ export const registerPayment = createServerFn({ method: "POST" })
       bankId: z.number(),
       memo: z.string().optional().default(""),
       date: z.string().optional(),
+      fxPaid: z.number().positive().optional(),
+      fxTreatment: z.enum(["utilidad", "ajuste"]).optional(),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -1529,6 +1531,8 @@ export const registerPayment = createServerFn({ method: "POST" })
     await boot`alter table bank_moves add column if not exists kind text not null default 'ajuste'`;
     await boot`alter table bank_moves add column if not exists invoice_id integer`;
     await boot`alter table bank_moves add column if not exists payment_id integer`;
+    await boot`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
+    await boot`alter table invoices add column if not exists fx_treatment text not null default ''`;
     return withTx(async (sql) => {
       const m = await requireCompany(sql, context.userId);
       await assertCan(sql, context.userId, "banks", "edit");
@@ -1541,6 +1545,8 @@ export const registerPayment = createServerFn({ method: "POST" })
         amount: data.amount,
         memo: data.memo ?? "",
         date: data.date,
+        fxPaid: data.fxPaid,
+        fxTreatment: data.fxTreatment,
       });
     });
   });

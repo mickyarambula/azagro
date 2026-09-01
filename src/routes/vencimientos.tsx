@@ -5,6 +5,7 @@ import { FinanceNav, StatusPill } from "@/components/erp";
 import { listInvoices } from "@/lib/azagro";
 import { getAlertDigest, sendDueAlerts, sendPartnerReminders } from "@/lib/erp/alerts";
 import { getSettings } from "@/lib/erp/ops";
+import { getUpcomingDue } from "@/lib/erp/reports";
 import { exactClock, validateDueDates } from "@/lib/erp/credit";
 import { dateDMY, money, moneyIn, num } from "@/lib/utils";
 
@@ -33,6 +34,7 @@ function Page() {
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listInvoices>>>([]);
   const [alerts, setAlerts] = useState({ cxc: 7, cxp: 7 });
   const [lado, setLado] = useState<"all" | "customer" | "supplier">("all");
+  const [porMes, setPorMes] = useState<Awaited<ReturnType<typeof getUpcomingDue>> | null>(null);
   const asOf = new Date().toISOString().slice(0, 10);
 
   useEffect(() => {
@@ -40,6 +42,7 @@ function Page() {
     void getSettings()
       .then((s) => setAlerts({ cxc: s.alertDaysCxc ?? 7, cxp: s.alertDaysCxp ?? 7 }))
       .catch(() => undefined);
+    void getUpcomingDue().then(setPorMes).catch(() => undefined);
   }, []);
 
   const open = useMemo(
@@ -161,6 +164,49 @@ function Page() {
           </tbody>
         </table>
       </div>
+
+      {porMes && (porMes.meses.length > 0 || porMes.vencido.n > 0) && (
+        <div className="mt-6">
+          <h2 className="text-base font-semibold">Saldos por vencer por mes (plazo financiero)</h2>
+          <p className="mt-0.5 text-sm text-muted">
+            Base de la propuesta de pago: cuánto capital llega a su plazo financiero cada mes, y el interés que
+            correría por mes de 30 días si no se paga (cargo × TIIE + {(porMes.spread * 100).toFixed(0)}% × 30/360).
+          </p>
+          <div className="mt-3 overflow-x-auto erp-card">
+            <table className="w-full min-w-[640px] text-left text-[13px]">
+              <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+                <tr>
+                  <th className="px-4 py-3 font-medium">Mes</th>
+                  <th className="px-3 py-3 text-right font-medium">Facturas</th>
+                  <th className="px-3 py-3 text-right font-medium">Saldo</th>
+                  <th className="px-3 py-3 text-right font-medium">De docs. USD</th>
+                  <th className="px-4 py-3 text-right font-medium">Interés por mes si no se paga</th>
+                </tr>
+              </thead>
+              <tbody>
+                {porMes.vencido.n > 0 && (
+                  <tr className="border-t border-line bg-warn/10">
+                    <td className="px-4 py-3 font-medium">Ya vencido</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{porMes.vencido.n}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(porMes.vencido.saldo)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(porMes.vencido.saldoUsdDocs)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{money(porMes.vencido.interesMensual)}</td>
+                  </tr>
+                )}
+                {porMes.meses.map((m) => (
+                  <tr key={m.month} className="border-t border-line">
+                    <td className="px-4 py-3 font-medium">{m.month}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{m.n}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(m.saldo)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(m.saldoUsdDocs)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-muted">{money(m.interesMensual)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </AppShell>
   );
 }

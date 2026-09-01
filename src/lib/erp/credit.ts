@@ -258,6 +258,32 @@ export function fxDifferential(usdAmount: number, fxAgreed: number, fxPaid: numb
 }
 
 /**
+ * Cobro de una factura en dólares (el libro se lleva en pesos al TC pactado):
+ * el depósito real en pesos se convierte a USD con el TC del día del pago,
+ * esos USD se aplican al saldo al TC PACTADO, y la diferencia de pesos es el
+ * diferencial cambiario del tramo:
+ *   diff = USD aplicados × (TC pagado − TC pactado)
+ *   diff negativo → pagaron de menos (POR COBRAR) · positivo → de más (POR DEVOLVER)
+ */
+export function fxPaymentSplit(input: {
+  depositedMxn: number;
+  fxPaid: number;
+  fxAgreed: number;
+  residualMxn: number;
+}) {
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  if (input.fxPaid <= 0 || input.fxAgreed <= 0) {
+    throw new Error("Tipo de cambio inválido");
+  }
+  const residualUsd = input.residualMxn / input.fxAgreed;
+  const usdPaid = input.depositedMxn / input.fxPaid;
+  const usdApplied = Math.min(usdPaid, residualUsd);
+  const appliedMxn = round2(usdApplied * input.fxAgreed);
+  const bankMxn = round2(usdApplied * input.fxPaid);
+  return { usdApplied: round2(usdApplied), appliedMxn, bankMxn, diff: round2(bankMxn - appliedMxn) };
+}
+
+/**
  * Cuánto facturar HOY de mora (FI), sin cobrar doble.
  *
  * Reglas del negocio (Excel de utilidad, confirmadas por el dueño):

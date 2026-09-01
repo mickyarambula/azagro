@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Field, FinanceNav, StatusPill } from "@/components/erp";
-import { getCompanyPnl, listDealPnl } from "@/lib/erp/reports";
+import { getCompanyPnl, getPanorama, listDealPnl } from "@/lib/erp/reports";
 import { exportCsv } from "@/lib/export-csv";
 import { money, todayISO } from "@/lib/utils";
 
@@ -18,14 +18,20 @@ function Page() {
   const [to, setTo] = useState(todayISO);
   const [pnl, setPnl] = useState<Awaited<ReturnType<typeof getCompanyPnl>> | null>(null);
   const [deals, setDeals] = useState<Awaited<ReturnType<typeof listDealPnl>> | null>(null);
+  const [pano, setPano] = useState<Awaited<ReturnType<typeof getPanorama>> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function load() {
     setError(null);
     try {
-      const [c, d] = await Promise.all([getCompanyPnl({ data: { from, to } }), listDealPnl({ data: { from, to } })]);
+      const [c, d, p] = await Promise.all([
+        getCompanyPnl({ data: { from, to } }),
+        listDealPnl({ data: { from, to } }),
+        getPanorama(),
+      ]);
       setPnl(c);
       setDeals(d);
+      setPano(p);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error");
     }
@@ -88,6 +94,86 @@ function Page() {
           Exportar Excel
         </button>
       </div>
+      {pano && (
+        <div className="mb-6">
+          <h2 className="text-base font-semibold">Panorama — visiones de utilidad</h2>
+          <p className="mt-0.5 text-sm text-muted">
+            Devengada = todo, cobrado o no · Realizada = sin la mora aún no cobrada · En caja = solo facturas 100%
+            cobradas · Proporcional = la parte pagada de cada factura.
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Kpi label="Utilidad devengada" value={money(pano.totales.utilidad)} />
+            <Kpi label="Utilidad realizada" value={money(pano.totales.realizada)} hint="Devengada − mora pendiente" />
+            <Kpi label="Utilidad en caja" value={money(pano.totales.caja)} hint="Solo facturas liquidadas" />
+            <Kpi label="Utilidad proporcional" value={money(pano.totales.proporcional)} hint="Según % pagado" />
+          </div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Kpi label="Capital facturado" value={money(pano.cobranza.capitalFacturado)} hint={`Pagado ${money(pano.cobranza.capitalPagado)}`} />
+            <Kpi label="Capital pendiente" value={money(pano.cobranza.capitalPendiente)} />
+            <Kpi label="Mora pendiente" value={money(pano.cobranza.moraPendiente)} hint={`Cobrada ${money(pano.cobranza.moraCobrada)} de ${money(pano.cobranza.moraTotal)}`} />
+            <Kpi
+              label="Total por cobrar"
+              value={money(pano.cobranza.granTotalPorCobrar)}
+              hint={`Incluye ajustes TC por cobrar ${money(pano.cobranza.fxPorCobrar)}${pano.cobranza.fxPorDevolver > 0 ? ` · por devolver ${money(pano.cobranza.fxPorDevolver)}` : ""}`}
+            />
+          </div>
+          {pano.porRazon.length > 0 && (
+            <div className="mt-4 overflow-x-auto erp-card">
+              <table className="w-full min-w-[980px] text-left text-[13px]">
+                <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">Razón social</th>
+                    <th className="px-3 py-3 text-right font-medium">Venta</th>
+                    <th className="px-3 py-3 text-right font-medium">Mora</th>
+                    <th className="px-3 py-3 text-right font-medium">Dif. TC</th>
+                    <th className="px-3 py-3 text-right font-medium">Costo prov.</th>
+                    <th className="px-3 py-3 text-right font-medium">Comisión</th>
+                    <th className="px-3 py-3 text-right font-medium">Capa 1</th>
+                    <th className="px-3 py-3 text-right font-medium">Capa 2</th>
+                    <th className="px-3 py-3 text-right font-medium">Descuento</th>
+                    <th className="px-4 py-3 text-right font-medium">Utilidad</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pano.porRazon.map((r) => (
+                    <tr key={r.partner} className="border-t border-line">
+                      <td className="px-4 py-3 font-medium">
+                        {r.partner}
+                        {r.group ? <span className="ml-1 text-[11px] text-muted">({r.group})</span> : null}
+                      </td>
+                      <td className="px-3 py-3 text-right tabular-nums">{money(r.venta)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums">{money(r.mora)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums">{money(r.fx)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums">{money(r.costo)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.comision)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.capa1)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.capa2)}</td>
+                      <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.descuento)}</td>
+                      <td className="px-4 py-3 text-right tabular-nums font-medium">
+                        {money(r.utilidad)}
+                        <span className="ml-1 text-[11px] text-muted">{r.venta > 0 ? ((r.utilidad / r.venta) * 100).toFixed(1) : "0.0"}%</span>
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="border-t border-line font-semibold">
+                    <td className="px-4 py-3">Total grupo</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.venta)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.mora)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.fx)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.costo)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.comision)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.capa1)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.capa2)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.descuento)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{money(pano.totales.utilidad)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="overflow-x-auto erp-card">
         <table className="w-full min-w-[820px] text-left text-[13px]">
           <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
