@@ -55,6 +55,36 @@ export function fmtDate(iso: string | null | undefined) {
   return `${d}/${m}/${y}`;
 }
 
+/** Azagro opera en Sinaloa: UTC-7 todo el año, sin horario de verano. */
+const AZAGRO_TZ = "America/Mazatlan";
+
+/**
+ * Fecha Y HORA tal como las vive Los Mochis — solo para MOSTRAR en pantalla
+ * o papel. No toca cómo se guarda: la base sigue en UTC/timestamptz: esto
+ * solo convierte al formatear. Espera un instante inequívoco (ISO con "Z" o
+ * con offset explícito); si no lo trae, no se puede convertir con certeza y
+ * se muestra tal cual llegó.
+ */
+export function dateTimeMx(iso: string | null | undefined) {
+  if (!iso) return "—";
+  const hasZone = /Z$|[+-]\d{2}:?\d{2}$/.test(iso.trim());
+  if (!hasZone) return iso;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const parts = new Intl.DateTimeFormat("es-MX", {
+    timeZone: AZAGRO_TZ,
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("day")}/${get("month")}/${get("year")} ${get("hour")}:${get("minute")}:${get("second")}`;
+}
+
 /** Mensaje usable. Esconde basura técnica (ssr/cookies) al operador. */
 export function humanError(err: unknown) {
   const raw = err instanceof Error ? err.message : String(err ?? "Error");

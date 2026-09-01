@@ -106,7 +106,7 @@ function Page() {
                     <td key={s.id} className="px-3 py-2">
                       <MoneyField
                         value={val}
-                        onChange={(n) => {
+                        onCommit={(n) => {
                           void saveRfqBid({ data: { rfqId: id, partnerId: s.id, productId: line.product_id, unitPrice: n } })
                             .then(load)
                             .catch((e) => setError(e instanceof Error ? e.message : "Error"));

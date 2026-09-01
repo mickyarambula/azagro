@@ -92,7 +92,8 @@ export const listAudit = createServerFn({ method: "POST" })
     }>`
       select a.id, a.user_id,
         coalesce(nullif(m.display_name,''), nullif(m.email,''), a.user_id) as who,
-        a.action, a.entity, a.entity_id, a.name, a.detail, a.created_at::text
+        a.action, a.entity, a.entity_id, a.name, a.detail,
+        to_char(a.created_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at
       from audit_log a
       left join members m on m.user_id = a.user_id and m.company_id = a.company_id
       where a.company_id = ${companyId}

@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { listAudit } from "@/lib/erp/audit";
-import { humanError } from "@/lib/utils";
+import { dateTimeMx, humanError } from "@/lib/utils";
 
 export const Route = createFileRoute("/bitacora")({ component: Page });
 
@@ -159,7 +159,7 @@ function Page() {
           <tbody>
             {rows.map((r) => (
               <tr key={r.id} className="border-t border-line align-top">
-                <td className="px-4 py-2 whitespace-nowrap tabular-nums text-muted">{r.created_at.replace("T", " ").slice(0, 19)}</td>
+                <td className="px-4 py-2 whitespace-nowrap tabular-nums text-muted">{dateTimeMx(r.created_at)}</td>
                 <td className="px-3 py-2">{r.who}</td>
                 <td className="px-3 py-2">{ACTION[r.action] ?? r.action}</td>
                 <td className="px-3 py-2 font-medium">{r.name || "—"}</td>

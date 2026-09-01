@@ -12,11 +12,15 @@ function sanitizeDecimal(raw: string) {
 export function QtyField({
   value,
   onChange,
+  onCommit,
   disabled,
   className,
 }: {
   value: number;
-  onChange: (n: number) => void;
+  /** Se llama en cada tecla — úsalo solo para reflejo local (cálculo en vivo, borrador). */
+  onChange?: (n: number) => void;
+  /** Se llama al terminar de escribir (salir del campo o Enter) — úsalo para guardar. */
+  onCommit?: (n: number) => void;
   disabled?: boolean;
   className?: string;
 }) {
@@ -26,6 +30,10 @@ export function QtyField({
   useEffect(() => {
     if (!focus) setRaw(value ? String(value) : "");
   }, [value, focus]);
+
+  function parsed() {
+    return raw === "" || raw === "." ? 0 : Number(raw);
+  }
 
   return (
     <input
@@ -38,11 +46,14 @@ export function QtyField({
       onChange={(e) => {
         const next = sanitizeDecimal(e.target.value);
         setRaw(next);
-        if (next === "" || next === ".") onChange(0);
-        else onChange(Number(next));
+        if (onChange) onChange(next === "" || next === "." ? 0 : Number(next));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
       }}
       onBlur={() => {
         setFocus(false);
+        onCommit?.(parsed());
         setRaw(value ? String(value) : "");
       }}
     />
@@ -52,12 +63,16 @@ export function QtyField({
 export function MoneyField({
   value,
   onChange,
+  onCommit,
   disabled,
   className,
   placeholder = "0.00",
 }: {
   value: number;
-  onChange: (n: number) => void;
+  /** Se llama en cada tecla — úsalo solo para reflejo local (cálculo en vivo, borrador). */
+  onChange?: (n: number) => void;
+  /** Se llama al terminar de escribir (salir del campo o Enter) — úsalo para guardar. */
+  onCommit?: (n: number) => void;
   disabled?: boolean;
   className?: string;
   placeholder?: string;
@@ -68,6 +83,10 @@ export function MoneyField({
   useEffect(() => {
     if (!focus) setRaw(value ? String(value) : "");
   }, [value, focus]);
+
+  function parsed() {
+    return raw === "" || raw === "." ? 0 : Number(raw);
+  }
 
   return (
     <input
@@ -80,11 +99,14 @@ export function MoneyField({
       onChange={(e) => {
         const next = sanitizeDecimal(e.target.value);
         setRaw(next);
-        if (next === "" || next === ".") onChange(0);
-        else onChange(Number(next));
+        if (onChange) onChange(next === "" || next === "." ? 0 : Number(next));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
       }}
       onBlur={() => {
         setFocus(false);
+        onCommit?.(parsed());
         setRaw(value ? String(value) : "");
       }}
     />

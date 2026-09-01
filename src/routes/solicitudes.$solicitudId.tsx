@@ -413,7 +413,7 @@ function Page() {
                                     className="w-full max-w-[9rem]"
                                     placeholder="precio"
                                     value={price}
-                                    onChange={(n) => {
+                                    onCommit={(n) => {
                                       void saveRfqBid({ data: { rfqId: data.rfq!.id, partnerId: s.id, productId: l.product_id, unitPrice: n } })
                                         .then(load)
                                         .catch((e) => setError(humanError(e)));
@@ -447,7 +447,7 @@ function Page() {
                             className="w-full"
                             placeholder="0"
                             value={num(l.freight)}
-                            onChange={(n) => {
+                            onCommit={(n) => {
                               void saveLineFreight({ data: { requestId: id, productId: l.product_id, freight: n } })
                                 .then(load)
                                 .catch((e) => setError(humanError(e)));
@@ -561,7 +561,7 @@ function Page() {
                       {mode === "pct" ? (
                         <QtyField
                           value={num(l.margin_pct) || 12}
-                          onChange={(n) => {
+                          onCommit={(n) => {
                             void saveLineMargin({
                               data: { requestId: id, productId: l.product_id, marginMode: "pct", marginPct: n, marginNominal: 0 },
                             }).then(load);
@@ -570,7 +570,7 @@ function Page() {
                       ) : (
                         <MoneyField
                           value={num(l.margin_nominal)}
-                          onChange={(n) => {
+                          onCommit={(n) => {
                             void saveLineMargin({
                               data: { requestId: id, productId: l.product_id, marginMode: "nominal", marginPct: 0, marginNominal: n },
                             }).then(load);
