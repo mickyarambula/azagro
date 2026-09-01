@@ -311,8 +311,29 @@ export const sendPaymentReminder = createServerFn({ method: "POST" })
         subject,
         text,
       });
-      if (sent.ok) return { sent: "resend" as const, notice: `Recordatorio enviado a ${to}.`, mailto, subject, text, to };
+      if (sent.ok) {
+        // Si el cliente dice "nunca me cobraron", aquí está la prueba.
+        await writeAudit(sql, {
+          companyId,
+          userId: context.userId,
+          action: "recordatorio",
+          entity: "invoice",
+          entityId: data.invoiceId,
+          name: inv[0].name,
+          detail: `Enviado a ${to} · saldo ${inv[0].residual}`,
+        });
+        return { sent: "resend" as const, notice: `Recordatorio enviado a ${to}.`, mailto, subject, text, to };
+      }
     }
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "recordatorio",
+      entity: "invoice",
+      entityId: data.invoiceId,
+      name: inv[0].name,
+      detail: `Borrador abierto en el correo del usuario para ${to || "(sin destinatario)"}`,
+    });
     return { sent: "mailto" as const, notice: "Se abre el correo. En De: elige la cuenta de Azagro.", mailto, subject, text, to };
   });
 
@@ -351,6 +372,14 @@ export const sendPartnerReminders = createServerFn({ method: "POST" })
         if (sent.ok) sentN += 1;
         else failed.push(r.partner);
       }
+      await writeAudit(sql, {
+        companyId,
+        userId: context.userId,
+        action: "recordatorio",
+        entity: "mail",
+        name: "Recordatorios masivos",
+        detail: `${sentN} clientes con recordatorio enviado${failed.length ? ` · sin correo o fallidos: ${failed.join(", ")}` : ""}`.slice(0, 900),
+      });
       return {
         sent: "resend" as const,
         notice: `Recordatorios a clientes: ${sentN} enviados.${failed.length ? ` Sin correo: ${failed.join(", ")}.` : ""}`,
@@ -380,7 +409,17 @@ export const sendDueAlerts = createServerFn({ method: "POST" })
     const acc = await mailAccount(sql, companyId);
     if (to.length && acc.ready) {
       const sent = await sendResend({ key: acc.key, from: acc.from, to, subject: d.subject, text: d.body });
-      if (sent.ok) return { ...d, sent: "resend" as const, notice: `Correo enviado a ${to.join(", ")}.` };
+      if (sent.ok) {
+        await writeAudit(sql, {
+          companyId,
+          userId: context.userId,
+          action: "recordatorio",
+          entity: "mail",
+          name: "Aviso interno de vencimientos",
+          detail: `Enviado a ${to.join(", ")} · ${d.cxc} por cobrar · ${d.cxp} por pagar`,
+        });
+        return { ...d, sent: "resend" as const, notice: `Correo enviado a ${to.join(", ")}.` };
+      }
       return { ...d, sent: "mailto" as const, notice: `No se pudo enviar solo (${sent.reason}). Se abre el correo del equipo.` };
     }
     if (d.mailto) return { ...d, sent: "mailto" as const, notice: "Se abre el correo del equipo. En De: elige la cuenta de Azagro, no la de Plein Produce." };

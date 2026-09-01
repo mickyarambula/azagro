@@ -47,6 +47,7 @@ const ACTION: Record<string, string> = {
   "rechazar-solicitud": "Rechazó solicitud de acceso",
   "permisos-usuario": "Cambió permisos de usuario",
   correo: "Correo enviado",
+  recordatorio: "Recordatorio de cobro",
 };
 
 type Payload = Awaited<ReturnType<typeof listAudit>>;

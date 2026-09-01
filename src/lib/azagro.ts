@@ -47,8 +47,36 @@ async function membership(sql: Sql, userId: string) {
   return rows[0] ?? null;
 }
 
+/**
+ * Candado de unicidad de folios (corre también en PGLite, donde no aplican
+ * las migraciones de producción): una colisión de folios truena en vez de
+ * crear dos documentos con el mismo nombre. Las importadas de Compaq quedan
+ * fuera (folios de terceros); su unicidad la da cutover_key.
+ */
+async function ensureFolioLocks(sql: Sql) {
+  await sql`alter table invoices add column if not exists cutover_key text`;
+  const locks = [
+    `create unique index if not exists invoices_folio_uq on invoices (company_id, name) where cutover_key is null`,
+    `create unique index if not exists sales_orders_folio_uq on sales_orders (company_id, name)`,
+    `create unique index if not exists purchase_orders_folio_uq on purchase_orders (company_id, name)`,
+    `create unique index if not exists quotes_folio_uq on quotes (company_id, name)`,
+    `create unique index if not exists payments_folio_uq on payments (company_id, name)`,
+    `create unique index if not exists stock_moves_ref_uq on stock_moves (company_id, ref)`,
+  ];
+  for (const lock of locks) {
+    try {
+      await sql.query(lock);
+    } catch (err) {
+      // Un candado que no se puede crear (tabla aún sin migrar, duplicado
+      // heredado) no debe tirar el arranque; se reintenta al siguiente boot.
+      console.error("folio lock", err);
+    }
+  }
+}
+
 export async function seedCompany(sql: Sql, companyId: number) {
   await sql`alter table company_settings add column if not exists seeded_at timestamptz`;
+  await ensureFolioLocks(sql);
   await sql`
     insert into company_settings (company_id, legal_name)
     values (${companyId}, 'AZ INSUMOS AGRICOLAS SA DE CV')

@@ -382,10 +382,29 @@ export const deleteRequest = createServerFn({ method: "POST" })
     if (req[0].quote_id) {
       throw new Error("Ya tiene cotización. No se borra; ábrela en Cotizaciones.");
     }
+    // Es el único borrado duro del sistema: el contenido completo queda
+    // escrito en la bitácora antes de desaparecer.
+    const head = await sql<{ partner: string; delivery_mode: string; notes: string }>`
+      select p.name as partner, r.delivery_mode, coalesce(r.notes,'') as notes
+      from customer_requests r join partners p on p.id = r.partner_id
+      where r.id = ${data.id}
+    `;
+    const contenido = await sql<{ code: string; qty: string; uom: string; cost: string; supplier: string | null; margin_pct: string }>`
+      select p.code, l.qty::text, coalesce(l.uom, p.uom) as uom, coalesce(l.cost,0)::text as cost,
+        s.name as supplier, coalesce(l.margin_pct,0)::text as margin_pct
+      from customer_request_lines l
+      join products p on p.id = l.product_id
+      left join partners s on s.id = l.supplier_id
+      where l.request_id = ${data.id}
+      order by l.id
+    `;
     if (req[0].rfq_id) {
       await sql`delete from vendor_rfqs where id = ${req[0].rfq_id} and company_id = ${companyId}`;
     }
     await sql`delete from customer_requests where id = ${data.id} and company_id = ${companyId}`;
+    const partidas = contenido
+      .map((l) => `${l.code} ×${Number(l.qty)} ${l.uom}${Number(l.cost) ? ` costo ${Number(l.cost)}` : ""}${l.supplier ? ` prov ${l.supplier}` : ""}${Number(l.margin_pct) ? ` margen ${Number(l.margin_pct)}%` : ""}`)
+      .join(" · ");
     await writeAudit(sql, {
       companyId,
       userId: context.userId,
@@ -393,6 +412,7 @@ export const deleteRequest = createServerFn({ method: "POST" })
       entity: "request",
       entityId: data.id,
       name: req[0].name,
+      detail: `${head[0]?.partner ?? ""} · entrega ${head[0]?.delivery_mode ?? ""}${head[0]?.notes ? ` · notas: ${head[0].notes}` : ""} · ${contenido.length} partidas: ${partidas}`.slice(0, 900),
     });
     return { ok: true, name: req[0].name };
   });

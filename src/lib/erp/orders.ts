@@ -318,6 +318,17 @@ export const saveOrder = createServerFn({ method: "POST" })
       if (current[0].state === "confirmed" && !data.confirm) {
         throw new Error("Pedido confirmado: no vuelve a borrador");
       }
+      // Decisión de negocio: tras confirmar, cliente y moneda quedan fijos
+      // (cambiarlos rompe la cadena con la cotización y el TC pactado).
+      // Precios y fechas siguen editables, con rastro en bitácora.
+      if (current[0].state === "confirmed") {
+        if (current[0].partner_id !== data.partnerId) {
+          throw new Error("Pedido confirmado: el cliente no se cambia. Si es un error, cancélalo y captura uno nuevo.");
+        }
+        if (current[0].currency !== data.currency) {
+          throw new Error("Pedido confirmado: la moneda no se cambia. Si es un error, cancélalo y captura uno nuevo.");
+        }
+      }
       if (!name) name = current[0].name;
       // El pedido NO se congela, pero cada cambio queda con anterior → nuevo
       // (crítico para pedidos ya confirmados: nadie mueve precios sin rastro).

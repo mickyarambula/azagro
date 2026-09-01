@@ -169,3 +169,55 @@ test("FV, FP, NC, FI, ATC y facturas de corte guardan quién las generó", () =>
   assert.ok(ops.slice(ops.indexOf("export async function applyInvoicePayment"), ops.indexOf("export const addBankMove")).includes("created_by"), "ATC con autor");
   assert.ok(cut.includes("opening_paid, created_by"), "facturas importadas con autor");
 });
+
+// ---------------------------------------------------------------------------
+// Pendientes menores cerrados + decisión de negocio (bloque final).
+// ---------------------------------------------------------------------------
+test("folios con candado de unicidad (migración y arranque), sin romper el corte Compaq", () => {
+  const mig = src("migrations/0015_folios_unicos.sql");
+  const az = src("src/lib/azagro.ts");
+  for (const fuente of [mig, az]) {
+    assert.ok(fuente.includes("invoices_folio_uq on invoices (company_id, name) where cutover_key is null"), "facturas del sistema únicas; importadas fuera (folios de terceros)");
+    assert.ok(fuente.includes("sales_orders_folio_uq"), "pedidos únicos");
+    assert.ok(fuente.includes("purchase_orders_folio_uq"), "OCs únicas");
+    assert.ok(fuente.includes("quotes_folio_uq"), "cotizaciones únicas");
+    assert.ok(fuente.includes("payments_folio_uq"), "pagos únicos");
+    assert.ok(fuente.includes("stock_moves_ref_uq"), "referencias de kardex únicas");
+  }
+  assert.ok(az.includes("await ensureFolioLocks(sql)"), "el candado también corre en PGLite al arrancar");
+});
+
+test("decisión de negocio: tras confirmar, cliente y moneda quedan fijos; precio y fechas siguen con rastro", () => {
+  const ord = src("src/lib/erp/orders.ts");
+  const save = fnBody(ord, "saveOrder");
+  assert.ok(save.includes("Pedido confirmado: el cliente no se cambia"), "cliente bloqueado tras confirmar");
+  assert.ok(save.includes("Pedido confirmado: la moneda no se cambia"), "moneda bloqueada tras confirmar");
+  // Precios y fechas NO se bloquean: siguen pasando por el diff con bitácora.
+  assert.ok(save.includes("precio ${Number(ol.unit_price)} → ${nl.unitPrice}"), "el precio sigue editable con rastro");
+  assert.ok(save.includes("fecha ${current[0].date} → ${data.date}"), "la fecha sigue editable con rastro");
+});
+
+test("borrar una solicitud deja el contenido completo escrito en la bitácora", () => {
+  const req = src("src/lib/erp/requests.ts");
+  const del = fnBody(req, "deleteRequest");
+  assert.ok(del.includes("const contenido = await sql"), "lee las partidas ANTES de borrar");
+  assert.ok(del.includes("partidas:"), "las partidas quedan en el detalle");
+  assert.ok(del.includes("costo ${Number(l.cost)}"), "con costo");
+  assert.ok(del.includes("prov ${l.supplier}"), "con proveedor elegido");
+  assert.ok(del.includes("margen ${Number(l.margin_pct)}%"), "con margen");
+  assert.ok(del.includes(".slice(0, 900)"), "acotado para no desbordar la bitácora");
+});
+
+test("los recordatorios de cobro quedan registrados (enviado vs borrador abierto)", () => {
+  const alerts = src("src/lib/erp/alerts.ts");
+  const uno = fnBody(alerts, "sendPaymentReminder");
+  assert.ok(uno.includes(`"recordatorio"`), "el recordatorio individual va a bitácora");
+  assert.ok(uno.includes("Enviado a ${to}"), "cuando salió por correo directo, dice a quién");
+  assert.ok(uno.includes("Borrador abierto"), "cuando solo se abrió el correo, también queda claro");
+  const masivo = fnBody(alerts, "sendPartnerReminders");
+  assert.ok(masivo.includes("Recordatorios masivos"), "el envío masivo queda con conteo");
+  const interno = fnBody(alerts, "sendDueAlerts");
+  assert.ok(interno.includes("Aviso interno de vencimientos"), "el aviso al equipo también");
+  const ui = src("src/routes/bitacora.tsx");
+  assert.ok(ui.includes("Recordatorio de cobro"), "la pantalla lo traduce");
+});
