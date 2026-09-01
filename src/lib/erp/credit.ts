@@ -257,18 +257,68 @@ export function fxDifferential(usdAmount: number, fxAgreed: number, fxPaid: numb
   return usdAmount * (fxAgreed - fxPaid);
 }
 
-/** Descuento pronto pago sobre días no usados del plazo de crédito. */
-export function earlyPayDiscount(input: {
-  capital: number;
-  issueDate: string;
+/**
+ * Cuánto facturar HOY de mora (FI), sin cobrar doble.
+ *
+ * Reglas del negocio (Excel de utilidad, confirmadas por el dueño):
+ * - El interés corre SIEMPRE sobre el cargo original, no sobre el saldo.
+ * - Arranca en el plazo financiero (día 150 desde la factura), no en el
+ *   vencimiento visible (120).
+ * - El acumulado ya facturado se lleva POR SEPARADO: interés por un lado
+ *   (interestInvoiced) y FEGA por otro (fegaCharged). Mezclarlos hacía que
+ *   la segunda FI cobrara de menos exactamente el FEGA.
+ */
+export function moraBilling(input: {
+  cargo: number;
+  moraDue: string;
   asOf: string;
-  creditDays: number;
-  annualRate: number;
+  paidDate?: string | null;
+  tiieAtDue: number;
+  spread: number;
+  fegaRate: number;
+  interestInvoiced: number;
+  fegaCharged: boolean;
 }) {
-  const lived = daysBetween(input.issueDate, input.asOf);
-  const unused = input.creditDays - lived;
-  if (unused <= 0) return 0;
-  return (input.capital * input.annualRate * unused) / YEAR_DAYS;
+  const cargo = Math.max(0, input.cargo);
+  const base = computeMora({
+    capital: cargo,
+    dueDate: input.moraDue,
+    asOf: input.asOf,
+    paidDate: input.paidDate,
+    tiieAtDue: input.tiieAtDue,
+    spread: input.spread,
+    fegaRate: input.fegaRate,
+    fegaAlreadyCharged: input.fegaCharged,
+  });
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const interestNew = round2(Math.max(0, base.interest - Math.max(0, input.interestInvoiced)));
+  const fegaNew = round2(base.fega);
+  return { ...base, interestNew, fegaNew, charge: round2(interestNew + fegaNew) };
+}
+
+/**
+ * Bonificación por pronto pago (regla Excel, confirmada):
+ * aplica solo si el cliente paga antes del umbral (120 días desde la factura);
+ * bonifica los días entre el pago y el plazo financiero (150), a la tasa de
+ * COSTO (TIIE del mes de emisión + spread de costo), sobre el cargo.
+ */
+export function earlyPayBonus(input: {
+  cargo: number;
+  issueDate: string;
+  payDate: string;
+  thresholdDays: number;
+  financialDays: number;
+  tiieAtIssue: number;
+  costSpread: number;
+}) {
+  const lived = daysBetween(input.issueDate, input.payDate);
+  const rate = input.tiieAtIssue + input.costSpread;
+  if (lived >= input.thresholdDays) {
+    return { applies: false, lived, days: 0, rate, bonus: 0 };
+  }
+  const days = Math.max(0, input.financialDays - lived);
+  const bonus = Math.round(((Math.max(0, input.cargo) * rate * days) / YEAR_DAYS) * 100) / 100;
+  return { applies: days > 0, lived, days, rate, bonus };
 }
 
 export type ClockStatus = "overdue" | "today" | "open";

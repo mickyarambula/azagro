@@ -8,7 +8,7 @@ import { syncCompaqCatalogs, linkSeedDestinos } from "@/lib/erp/compaq";
 import { rememberTrade } from "@/lib/erp/links";
 import { seedAcl, type AppRole } from "@/lib/erp/acl";
 import { activeMember, assertCan, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
-import { issueMoraInvoice } from "@/lib/erp/ops";
+import { applyInvoicePayment, issueMoraInvoice } from "@/lib/erp/ops";
 import { ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
 
@@ -1530,103 +1530,18 @@ export const registerPayment = createServerFn({ method: "POST" })
     await boot`alter table bank_moves add column if not exists invoice_id integer`;
     await boot`alter table bank_moves add column if not exists payment_id integer`;
     return withTx(async (sql) => {
-    const m = await requireCompany(sql, context.userId);
-    await assertCan(sql, context.userId, "banks", "edit");
-    const inv = await sql<{
-      id: number;
-      kind: string;
-      residual: string;
-      partner_id: number;
-      name: string;
-      date: string;
-      due_date: string;
-    }>`
-      select id, kind, residual::text, partner_id, name, date::text, due_date::text from invoices
-      where id = ${data.invoiceId} and company_id = ${m.company_id}
-      for update
-    `;
-    if (!inv[0]) throw new Error("Factura no encontrada");
-    const residual = Number(inv[0].residual);
-    if (residual <= 0.009) throw new Error("Esta factura ya está saldada");
-    const applied = Math.min(data.amount, residual);
-    await sql`select id from banks where id = ${data.bankId} and company_id = ${m.company_id} for update`;
-    const bank = await sql<{ id: number; name: string; opening: string; movement: string }>`
-      select b.id, b.name, b.opening::text,
-        coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement
-      from banks b where b.id = ${data.bankId} and b.company_id = ${m.company_id}
-    `;
-    if (!bank[0]) throw new Error("Elige una cuenta de banco");
-    const cash = Number(bank[0].opening) + Number(bank[0].movement);
-    if (inv[0].kind === "supplier" && cash + 0.009 < applied) {
-      throw new Error(
-        `No hay saldo en ${bank[0].name} (${cash.toFixed(2)}). Primero cobra o captura un saldo inicial en Bancos.`,
-      );
-    }
-
-    const today = new Date().toISOString().slice(0, 10);
-    const payDate = (data.date || today).slice(0, 10);
-    if (payDate < inv[0].date) {
-      throw new Error(`La fecha del cobro (${payDate}) no puede ser anterior a la factura (${inv[0].date}).`);
-    }
-    let mora: { name: string | null; charge: number; formula?: string } = { name: null, charge: 0 };
-    if (inv[0].kind === "customer") {
-      try {
-        mora = await issueMoraInvoice(sql, m.company_id, inv[0].id, {
-          asOf: payDate,
-          paidDate: payDate,
-          requireCharge: false,
-        });
-      } catch {
-        mora = { name: null, charge: 0 };
-      }
-    }
-
-    const n = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${m.company_id}`;
-    const name = `PAG-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-    const kind = inv[0].kind === "customer" ? "inbound" : "outbound";
-    const pay = await sql<{ id: number }>`
-      insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
-      values (${m.company_id}, ${kind}, ${name}, ${inv[0].partner_id}, ${applied}, ${data.memo ?? ""}, ${context.userId}, ${payDate})
-      returning id
-    `;
-    await sql`
-      insert into payment_allocs (payment_id, invoice_id, amount)
-      values (${pay[0]!.id}, ${inv[0].id}, ${applied})
-    `;
-    const newRes = await refreshInvoiceResidual(sql, inv[0].id);
-    const signed = inv[0].kind === "customer" ? applied : -applied;
-    const moveKind = inv[0].kind === "customer" ? "cobro" : "pago";
-    await sql`
-      insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, created_by)
-      values (
-        ${m.company_id}, ${data.bankId}, ${payDate}, ${signed},
-        ${data.memo || `${moveKind} ${inv[0].name}`},
-        ${inv[0].partner_id}, ${moveKind}, ${inv[0].id}, ${pay[0]!.id}, ${context.userId}
-      )
-    `;
-    if (newRes <= 0.009) {
-      await sql`update invoices set paid_date = coalesce(paid_date, ${payDate}::date) where id = ${inv[0].id}`;
-    }
-    const cashAfter = cash + signed;
-    await writeAudit(sql, {
-      companyId: m.company_id,
-      userId: context.userId,
-      action: inv[0].kind === "customer" ? "cobro" : "pago",
-      entity: "invoice",
-      entityId: inv[0].id,
-      name: inv[0].name,
-      detail: `${applied} · ${bank[0].name}`,
-    });
-    return {
-      ok: true,
-      applied,
-      residual: newRes,
-      mora: mora.name,
-      moraCharge: mora.charge,
-      moraFormula: mora.formula ?? "",
-      bank: bank[0].name,
-      cashAfter,
-    };
+      const m = await requireCompany(sql, context.userId);
+      await assertCan(sql, context.userId, "banks", "edit");
+      // Mismo camino que Bancos: applyInvoicePayment es la única puerta de cobro.
+      return applyInvoicePayment(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        invoiceId: data.invoiceId,
+        bankId: data.bankId,
+        amount: data.amount,
+        memo: data.memo ?? "",
+        date: data.date,
+      });
     });
   });
 

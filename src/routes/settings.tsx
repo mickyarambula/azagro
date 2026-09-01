@@ -32,6 +32,7 @@ function SettingsBody() {
     defaultTiie: 0.0706,
     asrCommission: 0.01,
     asrSpread: 0.04,
+    earlyPayDays: 120,
     emailFrom: "",
     phone: "",
     alertDaysCxc: 7,
@@ -64,6 +65,7 @@ function SettingsBody() {
       defaultTiie: s.defaultTiie,
       asrCommission: s.asrCommission,
       asrSpread: s.asrSpread,
+      earlyPayDays: s.earlyPayDays ?? 120,
       emailFrom: s.emailFrom,
       phone: s.phone,
       alertDaysCxc: s.alertDaysCxc ?? 7,
@@ -248,11 +250,14 @@ function SettingsBody() {
             Mostrar barra y permitir envío
           </label>
         </Field>
-        <Field label="Plazo factura (días)">
+        <Field label="Plazo factura (días) — vencimiento visible al cliente">
           <input className="erp-input" type="number" value={form.invoiceDays} onChange={(e) => setForm({ ...form, invoiceDays: Number(e.target.value) })} />
         </Field>
-        <Field label="Plazo crédito / mora (días)">
+        <Field label="Plazo financiero / mora (días) — aquí arranca el interés">
           <input className="erp-input" type="number" value={form.creditDays} onChange={(e) => setForm({ ...form, creditDays: Number(e.target.value) })} />
+        </Field>
+        <Field label="Umbral pronto pago (días)">
+          <input className="erp-input" type="number" value={form.earlyPayDays} onChange={(e) => setForm({ ...form, earlyPayDays: Number(e.target.value) })} />
         </Field>
         <Field label="FEGA + comisión (única vez)">
           <input className="erp-input" type="number" step="0.0001" value={form.fegaRate} onChange={(e) => setForm({ ...form, fegaRate: Number(e.target.value) })} />

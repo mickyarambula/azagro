@@ -1,8 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { getSql } from "@/lib/db";
-import { computeMora, computeStatementLine, DEFAULT_POLICY, explainInterest, fxDifferential, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
+import { getSql, withTx } from "@/lib/db";
+import { computeMora, computeStatementLine, DEFAULT_POLICY, earlyPayBonus, explainInterest, fxDifferential, moraBilling, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
@@ -27,6 +27,7 @@ async function policy(sql: Sql, companyId: number) {
   await sql`alter table company_settings add column if not exists alert_email text not null default ''`;
   await sql`alter table company_settings add column if not exists alert_email_on boolean not null default true`;
   await sql`alter table company_settings add column if not exists resend_key text not null default ''`;
+  await sql`alter table company_settings add column if not exists early_pay_days integer not null default 120`;
   const rows = await sql<{
     credit_days: number;
     invoice_days: number;
@@ -45,12 +46,14 @@ async function policy(sql: Sql, companyId: number) {
     alert_email: string;
     alert_email_on: boolean;
     resend_key: string;
+    early_pay_days: number;
   }>`
     select credit_days, invoice_days, fega_rate::text, collection_spread::text, finance_spread::text, default_tiie::text,
       legal_name, rfc, asr_commission::text, asr_spread::text, email_from, phone,
       coalesce(alert_days_cxc,7)::int as alert_days_cxc, coalesce(alert_days_cxp,7)::int as alert_days_cxp,
       coalesce(alert_email,'') as alert_email, coalesce(alert_email_on,true) as alert_email_on,
-      coalesce(resend_key,'') as resend_key
+      coalesce(resend_key,'') as resend_key,
+      coalesce(early_pay_days,120)::int as early_pay_days
     from company_settings where company_id = ${companyId}
   `;
   const r = rows[0];
@@ -68,6 +71,7 @@ async function policy(sql: Sql, companyId: number) {
       alertEmail: "",
       alertEmailOn: true,
       mailReady: false,
+      earlyPayDays: 120,
     };
   }
   return {
@@ -89,6 +93,7 @@ async function policy(sql: Sql, companyId: number) {
     alertEmail: r.alert_email,
     alertEmailOn: r.alert_email_on,
     mailReady: Boolean(process.env.RESEND_API_KEY) || (r.resend_key || "").length > 8,
+    earlyPayDays: r.early_pay_days,
   };
 }
 
@@ -128,29 +133,33 @@ export const saveSettings = createServerFn({ method: "POST" })
       alertEmail: z.string().optional(),
       alertEmailOn: z.boolean().optional(),
       resendKey: z.string().optional(),
+      earlyPayDays: z.number().int().min(0).max(365).optional(),
     }),
   )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
-    await assertCan(sql, context.userId, "settings", "edit");
+    // Los parámetros de cartera mueven intereses y utilidad: solo administrador.
+    await assertAdmin(sql, context.userId);
     await sql`alter table company_settings add column if not exists finance_spread numeric(8,4) not null default 0.045`;
     await sql`alter table company_settings add column if not exists alert_days_cxc integer not null default 7`;
     await sql`alter table company_settings add column if not exists alert_days_cxp integer not null default 7`;
     await sql`alter table company_settings add column if not exists alert_email text not null default ''`;
     await sql`alter table company_settings add column if not exists alert_email_on boolean not null default true`;
     await sql`alter table company_settings add column if not exists resend_key text not null default ''`;
+    await sql`alter table company_settings add column if not exists early_pay_days integer not null default 120`;
+    const before = await policy(sql, cid);
     await sql`
       insert into company_settings (
         company_id, legal_name, rfc, credit_days, invoice_days, fega_rate,
         collection_spread, finance_spread, default_tiie, asr_commission, asr_spread, email_from, phone,
-        alert_days_cxc, alert_days_cxp, alert_email, alert_email_on
+        alert_days_cxc, alert_days_cxp, alert_email, alert_email_on, early_pay_days
       )
       values (
         ${cid}, ${data.legalName}, ${data.rfc}, ${data.creditDays}, ${data.invoiceDays}, ${data.fegaRate},
         ${data.collectionSpread}, ${data.financeSpread}, ${data.defaultTiie}, ${data.asrCommission}, ${data.asrSpread},
         ${data.emailFrom}, ${data.phone}, ${data.alertDaysCxc ?? 7}, ${data.alertDaysCxp ?? 7},
-        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}
+        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays ?? 120}
       )
       on conflict (company_id) do update set
         legal_name = excluded.legal_name,
@@ -168,11 +177,34 @@ export const saveSettings = createServerFn({ method: "POST" })
         alert_days_cxc = excluded.alert_days_cxc,
         alert_days_cxp = excluded.alert_days_cxp,
         alert_email = excluded.alert_email,
-        alert_email_on = excluded.alert_email_on
+        alert_email_on = excluded.alert_email_on,
+        early_pay_days = excluded.early_pay_days
     `;
     const key = (data.resendKey || "").trim();
     if (key.length > 8) {
       await sql`update company_settings set resend_key = ${key} where company_id = ${cid}`;
+    }
+    // Bitácora de los parámetros financieros: valor anterior → nuevo.
+    const watch: Array<[string, number, number]> = [
+      ["spread cobro", before.collectionSpread, data.collectionSpread],
+      ["spread costo/línea", before.financeSpread, data.financeSpread],
+      ["spread ASR", before.asrSpread, data.asrSpread],
+      ["comisión ASR", before.asrCommission, data.asrCommission],
+      ["FEGA", before.fegaRate, data.fegaRate],
+      ["plazo factura", before.invoiceDays, data.invoiceDays],
+      ["plazo financiero", before.creditDays, data.creditDays],
+      ["umbral pronto pago", before.earlyPayDays, data.earlyPayDays ?? 120],
+      ["TIIE por omisión", before.defaultTiie, data.defaultTiie],
+    ];
+    const changes = watch.filter(([, a, b]) => a !== b).map(([n, a, b]) => `${n} ${a} → ${b}`);
+    if (changes.length) {
+      await writeAudit(sql, {
+        companyId: cid,
+        userId: context.userId,
+        action: "parametros",
+        entity: "settings",
+        detail: changes.join(" · "),
+      });
     }
     return { ok: true };
   });
@@ -790,6 +822,117 @@ export const saveBankOpening = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+/**
+ * Cobro/pago aplicado a UNA factura. Es el ÚNICO camino: lo usan la pantalla
+ * de Cartera (registerPayment) y la de Bancos (addBankMove ligado a factura),
+ * para que el mismo pago produzca el mismo resultado por cualquier entrada.
+ * Debe llamarse dentro de una transacción (withTx).
+ */
+export async function applyInvoicePayment(
+  sql: Sql,
+  opts: {
+    companyId: number;
+    userId: string;
+    invoiceId: number;
+    bankId: number;
+    amount: number;
+    memo?: string;
+    date?: string;
+  },
+) {
+  const inv = await sql<{
+    id: number;
+    kind: string;
+    residual: string;
+    partner_id: number;
+    name: string;
+    date: string;
+    due_date: string;
+  }>`
+    select id, kind, residual::text, partner_id, name, date::text, due_date::text from invoices
+    where id = ${opts.invoiceId} and company_id = ${opts.companyId}
+    for update
+  `;
+  if (!inv[0]) throw new Error("Factura no encontrada");
+  const residual = Number(inv[0].residual);
+  if (residual <= 0.009) throw new Error("Esta factura ya está saldada");
+  const applied = Math.min(opts.amount, residual);
+  await sql`select id from banks where id = ${opts.bankId} and company_id = ${opts.companyId} for update`;
+  const bank = await sql<{ id: number; name: string; opening: string; movement: string }>`
+    select b.id, b.name, b.opening::text,
+      coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement
+    from banks b where b.id = ${opts.bankId} and b.company_id = ${opts.companyId}
+  `;
+  if (!bank[0]) throw new Error("Elige una cuenta de banco");
+  const cash = Number(bank[0].opening) + Number(bank[0].movement);
+  if (inv[0].kind === "supplier" && cash + 0.009 < applied) {
+    throw new Error(
+      `No hay saldo en ${bank[0].name} (${cash.toFixed(2)}). Primero cobra o captura un saldo inicial en Bancos.`,
+    );
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const payDate = (opts.date || today).slice(0, 10);
+  if (payDate < inv[0].date) {
+    throw new Error(`La fecha del cobro (${payDate}) no puede ser anterior a la factura (${inv[0].date}).`);
+  }
+  let mora: { name: string | null; charge: number; formula?: string } = { name: null, charge: 0 };
+  if (inv[0].kind === "customer") {
+    mora = await issueMoraInvoice(sql, opts.companyId, inv[0].id, {
+      asOf: payDate,
+      paidDate: payDate,
+      requireCharge: false,
+    });
+  }
+
+  const n = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${opts.companyId}`;
+  const name = `PAG-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const kind = inv[0].kind === "customer" ? "inbound" : "outbound";
+  const pay = await sql<{ id: number }>`
+    insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
+    values (${opts.companyId}, ${kind}, ${name}, ${inv[0].partner_id}, ${applied}, ${opts.memo ?? ""}, ${opts.userId}, ${payDate})
+    returning id
+  `;
+  await sql`
+    insert into payment_allocs (payment_id, invoice_id, amount)
+    values (${pay[0]!.id}, ${inv[0].id}, ${applied})
+  `;
+  const newRes = await refreshInvoiceResidual(sql, inv[0].id);
+  const signed = inv[0].kind === "customer" ? applied : -applied;
+  const moveKind = inv[0].kind === "customer" ? "cobro" : "pago";
+  await sql`
+    insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, created_by)
+    values (
+      ${opts.companyId}, ${opts.bankId}, ${payDate}, ${signed},
+      ${opts.memo || `${moveKind} ${inv[0].name}`},
+      ${inv[0].partner_id}, ${moveKind}, ${inv[0].id}, ${pay[0]!.id}, ${opts.userId}
+    )
+  `;
+  if (newRes <= 0.009) {
+    await sql`update invoices set paid_date = coalesce(paid_date, ${payDate}::date) where id = ${inv[0].id}`;
+  }
+  const cashAfter = cash + signed;
+  await writeAudit(sql, {
+    companyId: opts.companyId,
+    userId: opts.userId,
+    action: inv[0].kind === "customer" ? "cobro" : "pago",
+    entity: "invoice",
+    entityId: inv[0].id,
+    name: inv[0].name,
+    detail: `${applied} · ${bank[0].name}`,
+  });
+  return {
+    ok: true as const,
+    applied,
+    residual: newRes,
+    mora: mora.name,
+    moraCharge: mora.charge,
+    moraFormula: mora.formula ?? "",
+    bank: bank[0].name,
+    cashAfter,
+  };
+}
+
 export const addBankMove = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -807,59 +950,49 @@ export const addBankMove = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ context, data }) => {
-    const sql = await getSql();
-    const cid = await companyOf(sql, context.userId);
-    await assertCan(sql, context.userId, "banks", "edit");
-    const signed =
-      data.kind === "cobro" || data.kind === "ajuste" ? Math.abs(data.amount) : -Math.abs(data.amount);
-    if (data.kind === "pago" || data.kind === "transferencia") {
-      const bal = await sql<{ opening: string; movement: string }>`
-        select b.opening::text, coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement
-        from banks b where b.id = ${data.bankId} and b.company_id = ${cid}
-      `;
-      const cash = Number(bal[0]?.opening ?? 0) + Number(bal[0]?.movement ?? 0);
-      if (cash + 0.009 < Math.abs(data.amount)) {
-        throw new Error(`No hay saldo suficiente en la cuenta (${cash.toFixed(2)}). Cobra primero o captura saldo inicial.`);
+    return withTx(async (sql) => {
+      const cid = await companyOf(sql, context.userId);
+      await assertCan(sql, context.userId, "banks", "edit");
+      // Movimiento ligado a una factura = un cobro/pago de verdad: pasa por el
+      // MISMO camino que la pantalla de Cartera (tope al saldo, mora, bitácora).
+      if (data.invoiceId && (data.kind === "cobro" || data.kind === "pago")) {
+        return applyInvoicePayment(sql, {
+          companyId: cid,
+          userId: context.userId,
+          invoiceId: data.invoiceId,
+          bankId: data.bankId,
+          amount: Math.abs(data.amount),
+          memo: data.memo ?? "",
+          date: data.date,
+        });
       }
-    }
-    const memo = data.memo ?? "";
-    const mv = await sql<{ id: number }>`
-      insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, so_id, po_id, created_by)
-      values (${cid}, ${data.bankId}, ${data.date}, ${signed}, ${memo}, ${data.partnerId ?? null},
-        ${data.kind}, ${data.invoiceId ?? null}, ${data.soId ?? null}, ${data.poId ?? null}, ${context.userId})
-      returning id
-    `;
-    if (data.kind === "transferencia") {
-      if (!data.bankToId) throw new Error("Elige la cuenta destino");
-      await sql`
-        insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by)
-        values (${cid}, ${data.bankToId}, ${data.date}, ${Math.abs(data.amount)}, ${memo || "Transferencia"}, 'transferencia', ${context.userId})
-      `;
-    }
-    if (data.invoiceId) {
-      const inv = await sql<{ residual: string; partner_id: number; kind: string; date: string }>`
-        select residual::text, partner_id, kind, date::text from invoices where id = ${data.invoiceId} and company_id = ${cid}
-      `;
-      if (inv[0]) {
-        if (data.date < inv[0].date) {
-          throw new Error(`La fecha del movimiento (${data.date}) no puede ser anterior a la factura (${inv[0].date}).`);
-        }
-        const residual = Number(inv[0].residual);
-        const applied = Math.min(Math.abs(data.amount), residual);
-        const n = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${cid}`;
-        const name = `PAG-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-        const payKind = inv[0].kind === "customer" ? "inbound" : "outbound";
-        const pay = await sql<{ id: number }>`
-          insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
-          values (${cid}, ${payKind}, ${name}, ${inv[0].partner_id}, ${applied}, ${memo}, ${context.userId}, ${data.date})
-          returning id
+      const signed =
+        data.kind === "cobro" || data.kind === "ajuste" ? Math.abs(data.amount) : -Math.abs(data.amount);
+      if (data.kind === "pago" || data.kind === "transferencia") {
+        const bal = await sql<{ opening: string; movement: string }>`
+          select b.opening::text, coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement
+          from banks b where b.id = ${data.bankId} and b.company_id = ${cid}
         `;
-        await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${pay[0]!.id}, ${data.invoiceId}, ${applied})`;
-        await refreshInvoiceResidual(sql, data.invoiceId);
-        await sql`update bank_moves set payment_id = ${pay[0]!.id} where id = ${mv[0]!.id}`;
+        const cash = Number(bal[0]?.opening ?? 0) + Number(bal[0]?.movement ?? 0);
+        if (cash + 0.009 < Math.abs(data.amount)) {
+          throw new Error(`No hay saldo suficiente en la cuenta (${cash.toFixed(2)}). Cobra primero o captura saldo inicial.`);
+        }
       }
-    }
-    return { ok: true };
+      const memo = data.memo ?? "";
+      await sql`
+        insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, so_id, po_id, created_by)
+        values (${cid}, ${data.bankId}, ${data.date}, ${signed}, ${memo}, ${data.partnerId ?? null},
+          ${data.kind}, ${data.invoiceId ?? null}, ${data.soId ?? null}, ${data.poId ?? null}, ${context.userId})
+      `;
+      if (data.kind === "transferencia") {
+        if (!data.bankToId) throw new Error("Elige la cuenta destino");
+        await sql`
+          insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by)
+          values (${cid}, ${data.bankToId}, ${data.date}, ${Math.abs(data.amount)}, ${memo || "Transferencia"}, 'transferencia', ${context.userId})
+        `;
+      }
+      return { ok: true };
+    });
   });
 
 export const reconcileMove = createServerFn({ method: "POST" })
@@ -938,6 +1071,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         kind: string;
         date: string;
         due_date: string;
+        credit_due: string | null;
         amount: string;
         residual: string;
         state: string;
@@ -953,7 +1087,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         paid_date: string | null;
         credit_days: number;
       }>`
-        select id, name, kind, date::text, due_date::text, amount::text, residual::text, state, origin,
+        select id, name, kind, date::text, due_date::text, credit_due::text, amount::text, residual::text, state, origin,
           currency, amount_fx::text, fx_agreed::text, fx_paid::text, inv_class, fega_charged,
           interest_invoiced::text, fx_invoiced::text, paid_date::text,
           coalesce(credit_days, 0)::int as credit_days
@@ -993,46 +1127,67 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       `;
 
       const rows = invoices.map((inv) => {
-        const tiie = nearestRate(tiieTable, inv.due_date, pol.defaultTiie);
+        // Dos fechas por factura: due_date es el vencimiento VISIBLE al cliente
+        // (120 d); credit_due es el plazo financiero real (150 d) desde el que
+        // corre la mora y del que se toma la TIIE. Sin credit_due (corte
+        // Compaq), se usa el único vencimiento que hay.
+        const moraDue = inv.credit_due || inv.due_date;
+        const tiie = nearestRate(tiieTable, moraDue, pol.defaultTiie);
         const cargo = Number(inv.amount);
         const saldo = Number(inv.residual);
-        const capital = saldo > 0.009 ? saldo : cargo;
         const productDoc = inv.kind === "customer" && (inv.inv_class || "product") === "product";
+        const allocs = pays.filter((p) => p.invoice_id === inv.id);
+        const abono = allocs.reduce((s, p) => s + Number(p.amount), 0);
+        const fechaAbono = allocs.length ? allocs[allocs.length - 1]!.date : inv.paid_date;
+        // El interés corre sobre el CARGO original hasta la liquidación total:
+        // un abono parcial no lo congela ni reduce la base (regla del Excel).
+        const paidForCalc = saldo <= 0.009 ? (inv.paid_date ?? fechaAbono) : null;
         const mora = productDoc
           ? computeMora({
-              capital,
-              dueDate: inv.due_date,
+              capital: Math.max(0, cargo),
+              dueDate: moraDue,
               asOf,
-              paidDate: inv.paid_date,
+              paidDate: paidForCalc,
               tiieAtDue: tiie,
               spread: pol.collectionSpread,
               fegaRate: pol.fegaRate,
-              fegaAlreadyCharged: inv.fega_charged || Number(inv.interest_invoiced) > 0,
+              fegaAlreadyCharged: inv.fega_charged,
             })
-          : { daysOverdue: 0, annualRate: tiie + pol.collectionSpread, interest: 0, fega: 0, mora: 0, tiie, spread: pol.collectionSpread, capital, endDate: asOf };
-        const liveMora = Math.max(0, mora.mora - Number(inv.interest_invoiced));
+          : { daysOverdue: 0, annualRate: tiie + pol.collectionSpread, interest: 0, fega: 0, mora: 0, tiie, spread: pol.collectionSpread, capital: cargo, endDate: asOf };
+        // Lo mismo que facturaría la FI hoy: interés nuevo + FEGA si falta.
+        const liveMora = Math.max(0, mora.interest - Number(inv.interest_invoiced)) + mora.fega;
         const fxDiff = inv.currency === "USD"
           ? fxDifferential(Number(inv.amount_fx), Number(inv.fx_agreed), inv.fx_paid ? Number(inv.fx_paid) : null)
           : 0;
         const liveFx = Math.max(0, fxDiff - Number(inv.fx_invoiced));
         const dueNow = saldo + liveMora + liveFx;
-        const allocs = pays.filter((p) => p.invoice_id === inv.id);
-        const abono = allocs.reduce((s, p) => s + Number(p.amount), 0);
-        const fechaAbono = allocs.length ? allocs[allocs.length - 1]!.date : inv.paid_date;
         const plazo = inv.credit_days || partner.payment_days || 0;
         const { serie, folio } = splitDocName(inv.name);
         const line = productDoc
           ? computeStatementLine({
               cargo,
-              dueDate: inv.due_date,
+              dueDate: moraDue,
               asOf,
-              paidDate: fechaAbono,
+              paidDate: paidForCalc,
               tiieAtDue: tiie,
               spread: pol.collectionSpread,
               fegaRate: pol.fegaRate,
               commissionRate: pol.commissionRate,
             })
           : null;
+        // Bonificación por pronto pago (informativa): pagó antes del umbral,
+        // se bonifican los días hasta el plazo financiero a tasa de costo.
+        const bono = productDoc && paidForCalc
+          ? earlyPayBonus({
+              cargo,
+              issueDate: inv.date,
+              payDate: paidForCalc,
+              thresholdDays: pol.earlyPayDays,
+              financialDays: pol.creditDays,
+              tiieAtIssue: nearestRate(tiieTable, inv.date, pol.defaultTiie),
+              costSpread: pol.asrSpread,
+            })
+          : { applies: false, lived: 0, days: 0, rate: 0, bonus: 0 };
         const formula = explainInterest({
           capital: line?.capital ?? mora.capital,
           days: line?.daysVencidos ?? mora.daysOverdue,
@@ -1048,11 +1203,16 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         });
         const dueCheck = validateDueDates({
           issue: inv.date,
-          due: inv.due_date,
+          due: moraDue,
           days: plazo || undefined,
           asOf,
           allowPast: true,
         });
+        if (bono.applies) {
+          formula.lines.push(
+            `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays}). Bonificación = cargo × (TIIE emisión + ${(pol.asrSpread * 100).toFixed(2)}%) × ${bono.days} d no usados / 360 = ${bono.bonus.toFixed(2)}.`,
+          );
+        }
         return {
           ...inv,
           products: lines.filter((l) => l.invoice_id === inv.id),
@@ -1071,6 +1231,9 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           abono,
           fechaAbono,
           fechaPago: line?.fechaPago ?? fechaAbono ?? asOf,
+          moraDue,
+          bonificacion: bono.bonus,
+          bonificacionDias: bono.days,
           plazo,
           interes: line?.interest ?? mora.interest,
           fega: mora.fega,
@@ -1143,53 +1306,59 @@ export async function issueMoraInvoice(
     residual: string;
     amount: string;
     due_date: string;
+    credit_due: string | null;
     paid_date: string | null;
     fega_charged: boolean;
     interest_invoiced: string;
     name: string;
     kind: string;
     inv_class: string;
+    order_id: number | null;
   }>`
-    select id, partner_id, residual::text, amount::text, due_date::text, paid_date::text,
-      fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class
+    select id, partner_id, residual::text, amount::text, due_date::text, credit_due::text, paid_date::text,
+      fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class, order_id
     from invoices where id = ${invoiceId} and company_id = ${companyId}
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
-  if (inv[0].kind !== "customer" || inv[0].inv_class === "interest") {
+  if (inv[0].kind !== "customer" || inv[0].inv_class === "interest" || Number(inv[0].amount) <= 0) {
     return { name: null as string | null, charge: 0, formula: "" };
   }
+  // La mora corre desde el plazo financiero (credit_due, día 150), no desde el
+  // vencimiento visible al cliente (due_date, día 120). La TIIE es la vigente
+  // en esa fecha. El capital es SIEMPRE el cargo original (regla del Excel).
+  const moraDue = inv[0].credit_due || inv[0].due_date;
   const tiieRows = await sql<{ date: string; rate: string }>`
     select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
   `;
   const tiie = nearestRate(
     tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
-    inv[0].due_date,
+    moraDue,
     pol.defaultTiie,
   );
   const paidDate = opts?.paidDate === undefined ? inv[0].paid_date : opts.paidDate;
-  const mora = computeMora({
-    capital: Number(inv[0].residual) > 0.009 ? Number(inv[0].residual) : Number(inv[0].amount),
-    dueDate: inv[0].due_date,
+  const bill = moraBilling({
+    cargo: Number(inv[0].amount),
+    moraDue,
     asOf,
     paidDate,
     tiieAtDue: tiie,
     spread: pol.collectionSpread,
     fegaRate: pol.fegaRate,
-    fegaAlreadyCharged: inv[0].fega_charged || Number(inv[0].interest_invoiced) > 0,
+    interestInvoiced: Number(inv[0].interest_invoiced),
+    fegaCharged: inv[0].fega_charged,
   });
-  const charge = Math.round(Math.max(0, mora.mora - Number(inv[0].interest_invoiced)) * 100) / 100;
   const formula = explainInterest({
-    capital: mora.capital,
-    days: mora.daysOverdue,
-    tiie: mora.tiie,
-    spread: mora.spread,
-    interest: mora.interest,
-    fega: mora.fega,
+    capital: bill.capital,
+    days: bill.daysOverdue,
+    tiie: bill.tiie,
+    spread: bill.spread,
+    interest: bill.interest,
+    fega: bill.fega,
     fegaRate: pol.fegaRate,
-    dueDate: inv[0].due_date,
+    dueDate: moraDue,
     residual: Number(inv[0].residual),
   }).short;
-  if (charge <= 0) {
+  if (bill.charge <= 0) {
     if (opts?.requireCharge !== false) throw new Error("No hay mora nueva por facturar");
     return { name: null as string | null, charge: 0, formula };
   }
@@ -1197,18 +1366,22 @@ export async function issueMoraInvoice(
   const name = `FI-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
   await sql`
     insert into invoices (
-      company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency
+      company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id
     )
     values (
       ${companyId}, 'customer', ${name}, ${inv[0].partner_id}, ${asOf}, ${asOf}, 'open',
-      ${charge}, ${charge}, ${"Mora " + inv[0].name}, 'interest', 'MXN'
+      ${bill.charge}, ${bill.charge}, ${"Mora " + inv[0].name}, 'interest', 'MXN', ${inv[0].order_id}
     )
   `;
+  // Acumulados por separado: el interés facturado no debe mezclarse con el
+  // FEGA, o la siguiente FI cobraría de menos exactamente el FEGA.
   await sql`
-    update invoices set interest_invoiced = interest_invoiced + ${charge}, fega_charged = true
+    update invoices set
+      interest_invoiced = interest_invoiced + ${bill.interestNew},
+      fega_charged = fega_charged or ${bill.fegaNew > 0}
     where id = ${inv[0].id}
   `;
-  return { name, charge, formula };
+  return { name, charge: bill.charge, formula };
 }
 
 export const invoiceLiveMora = createServerFn({ method: "POST" })

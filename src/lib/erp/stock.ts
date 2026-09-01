@@ -230,14 +230,17 @@ export async function seedOpeningLedger(sql: Sql, companyId: number, userId: str
 
 export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
   await sql`alter table invoices add column if not exists paid_date date`;
-  const row = await sql<{ amount: string; paid: string }>`
-    select i.amount::text,
+  await sql`alter table invoices add column if not exists opening_paid numeric(14,2) not null default 0`;
+  const row = await sql<{ amount: string; opening_paid: string; paid: string }>`
+    select i.amount::text, coalesce(i.opening_paid, 0)::text as opening_paid,
       coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid
     from invoices i
     where i.id = ${invoiceId}
   `;
   if (!row[0]) return 0;
-  const residual = Math.max(0, Number(row[0].amount) - Number(row[0].paid));
+  // opening_paid = abonos que la factura traía desde el corte de Compaq; no
+  // existen como pagos aquí, pero el saldo debe respetarlos siempre.
+  const residual = Math.max(0, Number(row[0].amount) - Number(row[0].opening_paid) - Number(row[0].paid));
   const paid = residual <= 0.009;
   if (paid) {
     await sql`

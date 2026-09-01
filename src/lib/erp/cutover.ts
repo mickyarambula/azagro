@@ -144,6 +144,7 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const boot = await getSql();
     await boot`alter table invoices add column if not exists cutover_key text`;
+    await boot`alter table invoices add column if not exists opening_paid numeric(14,2) not null default 0`;
     await boot.query(
       `create unique index if not exists invoices_cutover_key_uq on invoices (company_id, cutover_key) where cutover_key is not null`,
     );
@@ -173,11 +174,14 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         }
         if (!partner[0]) throw new Error(`No está en catálogo el código ${r.partnerCode} (folio ${r.folio}). Carga catálogos Compaq primero.`);
         const cargo = r.cargo || r.saldo + r.abono;
+        // El abono que ya traía en Compaq queda registrado: el saldo de aquí
+        // en adelante es cargo − abono de corte − pagos capturados en el sistema.
+        const openingPaid = Math.max(0, cargo - r.saldo);
         await sql`
-          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key)
+          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid)
           values (
             ${companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}, ${r.date}, ${r.due}, 'open',
-            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}
+            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}
           )
         `;
         inserted += 1;
