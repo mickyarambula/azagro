@@ -11,10 +11,16 @@
 > costo/precio de producto y saldo inicial de banco quedan con anterior →
 > nuevo; los rechazos (permiso, límite de crédito, importaciones fallidas) se
 > registran; el estado de cuenta a fecha pasada reconstruye el estado real de
-> ese día; y todas las facturas llevan autor. Pruebas en
-> `scripts/erp-trazabilidad.test.mjs`. Quedan los MENORES 11–13, 15 y 16, y
-> el hallazgo 5 queda mitigado (la utilidad de facturas emitidas ya no cambia
-> con Ajustes; solo el costo de catálogo sigue vivo cuando no hay OC ligada).
+> ese día; y todas las facturas llevan autor. También cerrados los MENORES 12
+> (el borrado de solicitudes escribe el contenido completo en bitácora), 13
+> (folios con candado de unicidad, migración 0015) y 15 (recordatorios de
+> cobro registrados). Decisión de negocio aplicada: tras confirmar un pedido,
+> cliente y moneda quedan fijos; precios y fechas editables con rastro.
+> Pruebas en `scripts/erp-trazabilidad.test.mjs`. Quedan los MENORES 11 (la
+> TIIE sobreescribible — mitigado: cada FI ya guarda la suya) y 16
+> (movimientos de banco sueltos fuera de la vista de bitácora), y el hallazgo
+> 5 queda mitigado (la utilidad de facturas emitidas ya no cambia con
+> Ajustes; solo el costo de catálogo sigue vivo cuando no hay OC ligada).
 
 Fecha: 31 de agosto de 2026. Solo diagnóstico; no se cambió nada de código.
 La prueba aplicada: **¿puedo pararme en cualquier folio dentro de dos años y
