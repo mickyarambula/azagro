@@ -5,7 +5,7 @@ import { getSql } from "@/lib/db";
 import { exactClock } from "@/lib/erp/credit";
 import { activeMember, assertCan } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
-import { money } from "@/lib/utils";
+import { money, todayMx } from "@/lib/utils";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -54,7 +54,7 @@ async function buildDigest(sql: Sql, companyId: number) {
   const warnCxp = cfg[0]?.alert_days_cxp ?? 7;
   const to = (cfg[0]?.alert_email || "").trim();
   const enabled = cfg[0]?.alert_email_on !== false;
-  const asOf = new Date().toISOString().slice(0, 10);
+  const asOf = todayMx();
   const rows = await sql<{
     name: string;
     kind: string;
@@ -135,7 +135,7 @@ export const getAlertDigest = createServerFn({ method: "GET" })
     // (la campana la ve todo el equipo, no debe tronar).
     const me = await activeMember(sql, context.userId);
     if (me.acl.credit === "none") {
-      const asOf = new Date().toISOString().slice(0, 10);
+      const asOf = todayMx();
       return {
         enabled: false,
         to: "",

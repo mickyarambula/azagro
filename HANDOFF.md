@@ -109,6 +109,16 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
     alineada con su campo, y la renegociación de precios en Cotizaciones no
     dejaba claro cuándo se guardaba una revisión nueva (ahora muestra la
     revisión actual, un aviso de cambios sin guardar, y un botón explícito).
+13. Fecha de operación en hora de Los Mochis. Antes el servidor decidía
+    "hoy" en UTC (`new Date().toISOString()`) o dejaba que Postgres lo
+    pusiera con `current_date` (también UTC en Neon): desde las 5:00 p.m. las
+    facturas, vencimientos por plazo, pagos de devolución, movimientos de
+    kardex y cortes por omisión quedaban fechados al día siguiente. Ahora hay
+    UNA función, `todayMx()` en `src/lib/utils.ts`, que es el único lugar que
+    decide qué día es (America/Mazatlan, UTC-7 sin horario de verano), y
+    todos los inserts a tablas con `date` la mandan explícita. Los sellos de
+    auditoría (`created_at`, bitácora) siguen en UTC y solo se convierten al
+    mostrar con `dateTimeMx()`.
 
 Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 200 hoy)
 y pasa `npx tsc --noEmit` limpio.
@@ -248,6 +258,11 @@ No importar facturas en ceros ni hojas de utilidad.
 
 - `withTx()` funciona igual sobre Neon y PGLite; producción usa Neon con
   `DATABASE_URL` configurado.
+- Fechas: fecha de negocio = `todayMx()` (`src/lib/utils.ts`), nunca
+  `new Date().toISOString().slice(0,10)` ni `current_date` en SQL (hay
+  pruebas que lo vigilan en `scripts/erp-fecha-operacion.test.mjs`). Sello
+  de tiempo = `timestamptz default now()` en UTC, mostrado con
+  `dateTimeMx()`.
 - Bitácora `/bitacora`, ahora con filtros por folio/texto, tipo, usuario y
   fecha.
 - Archivos en el folio (CFDI/guía). Respaldo JSON.

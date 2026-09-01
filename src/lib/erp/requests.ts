@@ -4,6 +4,8 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { activeMember, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
+import { addDays } from "@/lib/erp/credit";
+import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
 import { policy } from "@/lib/erp/ops";
 import { rememberTrade } from "@/lib/erp/links";
@@ -273,8 +275,8 @@ export const createRequest = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from customer_requests where company_id = ${companyId}`;
     const name = `SOL-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const row = await sql<{ id: number }>`
-      insert into customer_requests (company_id, name, partner_id, delivery_mode, delivery_to, notes, state, location_id)
-      values (${companyId}, ${name}, ${data.partnerId}, ${data.deliveryMode}, ${data.deliveryTo ?? ""}, ${data.notes ?? ""}, 'open', ${data.locationId ?? null})
+      insert into customer_requests (company_id, name, partner_id, date, delivery_mode, delivery_to, notes, state, location_id)
+      values (${companyId}, ${name}, ${data.partnerId}, ${todayMx()}, ${data.deliveryMode}, ${data.deliveryTo ?? ""}, ${data.notes ?? ""}, 'open', ${data.locationId ?? null})
       returning id
     `;
     for (const line of data.lines) {
@@ -711,8 +713,8 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     const total = priced.reduce((s, l) => s + l.qty * l.unitPrice, 0);
     const n = await sql<{ c: number }>`select count(*)::int as c from quotes where company_id = ${companyId}`;
     const name = `COT-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-    const until = new Date();
-    until.setDate(until.getDate() + 15);
+    const today = todayMx();
+    const until = addDays(today, 15);
     const mode = req[0].delivery_mode === "campo" ? "Puesta en campo" : req[0].delivery_mode === "pickup" ? "Recolección del cliente" : "Entrega en bodega";
     const notes = `${mode}${req[0].delivery_to ? ` · ${req[0].delivery_to}` : ""}${data.creditDays ? ` · contado y crédito ${data.creditDays} d` : " · contado"}`;
     const offer = data.creditDays > 0 ? "both" : "cash";
@@ -727,8 +729,8 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     await sql`alter table quote_lines add column if not exists credit_price numeric(14,4) not null default 0`;
     await sql`alter table quotes add column if not exists request_id integer`;
     const q = await sql<{ id: number }>`
-      insert into quotes (company_id, name, partner_id, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, request_id)
-      values (${companyId}, ${name}, ${req[0].partner_id}, ${until.toISOString().slice(0, 10)}, ${data.currency}, ${data.fxRate},
+      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, request_id)
+      values (${companyId}, ${name}, ${req[0].partner_id}, ${today}, ${until}, ${data.currency}, ${data.fxRate},
         ${data.send ? "sent" : "draft"}, ${notes}, ${req[0].delivery_to}, ${total}, ${context.userId}, ${data.tiie}, ${data.spread}, ${data.creditDays}, ${offer}, ${data.requestId})
       returning id
     `;

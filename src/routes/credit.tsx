@@ -9,7 +9,7 @@ import { listInvoices, registerPayment } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
 import { computeMora, exactClock, explainInterest, nearestRate, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
-import { dateDMY, money, moneyIn, num, todayISO } from "@/lib/utils";
+import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/credit")({
   validateSearch: (raw: Record<string, unknown>) => ({
@@ -89,7 +89,7 @@ function Page() {
             <option value="overdue">Vencidas</option>
             <option value="paid">Pagadas</option>
           </select>
-          <button type="button" className="erp-btn-primary" onClick={() => filtered[0] && setPay({ id: filtered[0].id, amount: num(filtered[0].residual), bankId: banks[0]?.id ?? 0, memo: "", date: todayISO() })}>
+          <button type="button" className="erp-btn-primary" onClick={() => filtered[0] && setPay({ id: filtered[0].id, amount: num(filtered[0].residual), bankId: banks[0]?.id ?? 0, memo: "", date: todayMx() })}>
             Registrar {lado === "pagar" ? "pago" : "cobro"}
           </button>
         </div>
@@ -181,7 +181,7 @@ function Page() {
                       )}
                       {r.state !== "paid" && (
                         <>
-                          <button type="button" className="erp-btn h-8 text-[12px]" onClick={() => setPay({ id: r.id, amount: num(r.residual), bankId: banks[0]?.id ?? 0, memo: "", date: todayISO() })}>
+                          <button type="button" className="erp-btn h-8 text-[12px]" onClick={() => setPay({ id: r.id, amount: num(r.residual), bankId: banks[0]?.id ?? 0, memo: "", date: todayMx() })}>
                             Pago
                           </button>
                           <button
@@ -310,7 +310,7 @@ function Page() {
               const mora = computeMora({
                 capital: num(inv.residual),
                 dueDate: inv.due_date,
-                asOf: pay.date || todayISO(),
+                asOf: pay.date || todayMx(),
                 tiieAtDue: tiie,
                 spread: settings?.collectionSpread ?? 0.09,
                 fegaRate: settings?.fegaRate ?? 0.0304,
@@ -345,7 +345,7 @@ function Page() {
               <input
                 type="date"
                 className="erp-input"
-                value={pay.date || todayISO()}
+                value={pay.date || todayMx()}
                 onChange={(e) => setPay({ ...pay, date: e.target.value })}
               />
             </label>

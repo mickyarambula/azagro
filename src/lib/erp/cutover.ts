@@ -4,6 +4,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { dbSource, getSql, withTx, type Sql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
+import { todayMx } from "@/lib/utils";
 import { foldName } from "@/lib/erp/catalog";
 import { ensureInvoiceExtras, postStock } from "@/lib/erp/stock";
 
@@ -97,8 +98,8 @@ export function parseOpenInvoices(raw: string): z.infer<typeof invRow>[] {
     out.push({
       partnerCode: (c[0] || "").toUpperCase(),
       folio,
-      date: (c[2] || c[3] || new Date().toISOString().slice(0, 10)).slice(0, 10),
-      due: (c[3] || c[4] || c[2] || new Date().toISOString().slice(0, 10)).slice(0, 10),
+      date: (c[2] || c[3] || todayMx()).slice(0, 10),
+      due: (c[3] || c[4] || c[2] || todayMx()).slice(0, 10),
       cargo: num(c[4] || c[5] || "0"),
       abono: num(c[5] || "0"),
       saldo,

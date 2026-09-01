@@ -7,6 +7,7 @@ import { getSettings, saveFx, saveSettings, saveTiie } from "@/lib/erp/ops";
 import { BUSINESS_RULES, YEAR_DAYS } from "@/lib/erp/rules";
 import { dbStatus, exportBackup } from "@/lib/erp/cutover";
 import { applyTheme, readThemePref, type ThemePref } from "@/lib/theme";
+import { todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/settings")({ component: Page });
 
@@ -44,9 +45,9 @@ function SettingsBody() {
   });
   const [tiie, setTiie] = useState<Array<{ date: string; rate: string }>>([]);
   const [fx, setFx] = useState<Array<{ date: string; usd_mxn: string }>>([]);
-  const [tDate, setTDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [tDate, setTDate] = useState(() => todayMx());
   const [tRate, setTRate] = useState(0.0706);
-  const [fDate, setFDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [fDate, setFDate] = useState(() => todayMx());
   const [fRate, setFRate] = useState(18);
   const [msg, setMsg] = useState<string | null>(null);
   const [theme, setTheme] = useState<ThemePref>("system");

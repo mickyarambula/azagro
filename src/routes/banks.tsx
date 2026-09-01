@@ -6,7 +6,7 @@ import { MoneyField } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { addBankMove, listBanks, reconcileMove, saveBankOpening } from "@/lib/erp/ops";
 import { exportCsv } from "@/lib/export-csv";
-import { cn, money, todayISO } from "@/lib/utils";
+import { cn, money, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/banks")({ component: Page });
 
@@ -38,7 +38,7 @@ function Page() {
   const [kind, setKind] = useState<Kind>("cobro");
   const [bankId, setBankId] = useState("");
   const [bankToId, setBankToId] = useState("");
-  const [date, setDate] = useState(todayISO);
+  const [date, setDate] = useState(todayMx);
   const [amount, setAmount] = useState(0);
   const [memo, setMemo] = useState("");
   const [partnerId, setPartnerId] = useState("");

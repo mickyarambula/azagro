@@ -9,7 +9,7 @@ import { SendButton } from "@/components/send-doc";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
-import { moneyIn, num, todayISO } from "@/lib/utils";
+import { moneyIn, num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/purchases")({
   validateSearch: (s: Record<string, unknown>): { tab: "all" | "new" } => ({
@@ -24,7 +24,7 @@ function Page() {
   const [data, setData] = useState<Awaited<ReturnType<typeof listPurchases>> | null>(null);
   const [partnerId, setPartnerId] = useState(0);
   const [locationId, setLocationId] = useState(0);
-  const [date, setDate] = useState(todayISO);
+  const [date, setDate] = useState(todayMx);
   const [notes, setNotes] = useState("");
   const [currency, setCurrency] = useState<"MXN" | "USD">("MXN");
   const [fulfillKind, setFulfillKind] = useState<"inventory" | "direct">("inventory");

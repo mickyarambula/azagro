@@ -2,11 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
-import { computeMora, computeStatementLine, DEFAULT_POLICY, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, moraBilling, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
+import { addDays, computeMora, computeStatementLine, DEFAULT_POLICY, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, moraBilling, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
-import { dateDMY } from "@/lib/utils";
+import { dateDMY, todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 
@@ -442,7 +442,7 @@ export const createQuote = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "quotes", "edit");
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayMx();
     if (data.validUntil < today) {
       throw new Error(`La vigencia ya venció (${data.validUntil}). Elige hoy o una fecha posterior.`);
     }
@@ -470,8 +470,8 @@ export const createQuote = createServerFn({ method: "POST" })
     const total = priced.reduce((s, l) => s + l.qty * l.unit, 0);
     const state = data.send ? "sent" : "draft";
     const q = await sql<{ id: number }>`
-      insert into quotes (company_id, name, partner_id, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer)
-      values (${cid}, ${name}, ${data.partnerId}, ${data.validUntil}, ${data.currency}, ${data.fxRate}, ${state},
+      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer)
+      values (${cid}, ${name}, ${data.partnerId}, ${today}, ${data.validUntil}, ${data.currency}, ${data.fxRate}, ${state},
         ${data.notes ?? ""}, ${data.deliveryTo ?? ""}, ${total}, ${context.userId}, ${data.tiie ?? 0}, ${data.spread ?? 0}, ${data.creditDays ?? 0}, ${offer})
       returning id
     `;
@@ -623,7 +623,7 @@ export const decideQuote = createServerFn({ method: "POST" })
       throw new Error("Esta cotización ya se cerró");
     }
     if (data.decision !== "reject") {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayMx();
       if (q[0].valid_until < today) {
         throw new Error(`La vigencia ya venció (${dateDMY(q[0].valid_until)}). Renegocia o emite otra cotización.`);
       }
@@ -673,7 +673,7 @@ export const decideQuote = createServerFn({ method: "POST" })
     const total = take.reduce((s, l) => s + l.qty * l.unitPrice, 0);
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${cid}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayMx();
     const days = offer === "credit" ? q[0].credit_days || 0 : 0;
     const termKind = days > 0 ? "credit_days" : "contado";
     const dues = computeDues({ date: today, termKind, invoiceDays: days, creditDays: days });
@@ -734,8 +734,8 @@ export const decideQuote = createServerFn({ method: "POST" })
         const poName = `OC-${String((poN[0]?.c ?? 0) + 1).padStart(4, "0")}`;
         const poTotal = lines.reduce((s, l) => s + Number(l.qty) * Number(l.cost), 0);
         const po = await sql<{ id: number }>`
-          insert into purchase_orders (company_id, name, partner_id, state, location_id, notes, total, currency, fx_rate, fulfill_kind, so_id)
-          values (${cid}, ${poName}, ${supplierId}, 'confirmed', ${data.locationId}, ${`Desde ${name}`}, ${poTotal},
+          insert into purchase_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, fulfill_kind, so_id)
+          values (${cid}, ${poName}, ${supplierId}, ${today}, 'confirmed', ${data.locationId}, ${`Desde ${name}`}, ${poTotal},
             ${q[0].currency}, ${Number(q[0].fx_rate)}, ${fulfillKind}, ${so[0]!.id})
           returning id
         `;
@@ -753,13 +753,12 @@ export const decideQuote = createServerFn({ method: "POST" })
           locationId: data.locationId,
         });
         const daysPay = await sql<{ payment_days: number }>`select coalesce(payment_days,0) as payment_days from partners where id = ${supplierId}`;
-        const due = new Date();
-        due.setDate(due.getDate() + (daysPay[0]?.payment_days ?? 0));
+        const due = addDays(today, daysPay[0]?.payment_days ?? 0);
         const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${cid} and kind = 'supplier'`;
         const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
         await sql`
-          insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, currency, created_by)
-          values (${cid}, 'supplier', ${iname}, ${supplierId}, ${due.toISOString().slice(0, 10)}, 'open', ${poTotal}, ${poTotal}, ${poName}, ${q[0].currency}, ${context.userId})
+          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, created_by)
+          values (${cid}, 'supplier', ${iname}, ${supplierId}, ${today}, ${due}, 'open', ${poTotal}, ${poTotal}, ${poName}, ${q[0].currency}, ${context.userId})
         `;
         pos.push(poName);
       }
@@ -959,7 +958,7 @@ export async function applyInvoicePayment(
     );
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayMx();
   const payDate = (opts.date || today).slice(0, 10);
   if (payDate < inv[0].date) {
     throw new Error(`La fecha del cobro (${payDate}) no puede ser anterior a la factura (${inv[0].date}).`);
@@ -1232,11 +1231,11 @@ export const getLiveStatement = createServerFn({ method: "POST" })
     }
     const pol = await policy(sql, cid);
     await ensureInvoiceExtras(sql);
-    const asOf = (data.asOf || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const asOf = (data.asOf || todayMx()).slice(0, 10);
     // Corte histórico: se reconstruye el estado REAL de ese día — solo las
     // facturas que existían, solo los abonos hasta esa fecha, y las FI
     // emitidas hasta entonces (con su desglose interés/FEGA guardado).
-    const historico = asOf < new Date().toISOString().slice(0, 10);
+    const historico = asOf < todayMx();
     const tiieRows = await sql<{ date: string; rate: string }>`
       select date::text, rate::text from tiie_rates where company_id = ${cid} order by date
     `;
@@ -1520,7 +1519,7 @@ export async function issueMoraInvoice(
 ) {
   const pol = await policy(sql, companyId);
   await ensureInvoiceExtras(sql);
-  const asOf = (opts?.asOf || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const asOf = (opts?.asOf || todayMx()).slice(0, 10);
   const inv = await sql<{
     id: number;
     partner_id: number;

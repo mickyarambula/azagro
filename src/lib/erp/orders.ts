@@ -4,6 +4,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
+import { todayMx } from "@/lib/utils";
 import { computeDues } from "@/lib/erp/order-terms";
 import { computeDealPnl } from "@/lib/erp/reports";
 import { assertDueOk, validateDueDates } from "@/lib/erp/credit";
@@ -526,7 +527,7 @@ export const markReceived = createServerFn({ method: "POST" })
     if (!so[0]) throw new Error("Pedido no encontrado");
     if (so[0].state !== "done") throw new Error("Primero entrega y factura. Luego se marca recibido en destino.");
     await sql`
-      update sales_orders set received_at = current_date
+      update sales_orders set received_at = ${todayMx()}::date
       where id = ${data.soId} and company_id = ${companyId}
     `;
     return { ok: true };

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan, canSeeMargins } from "@/lib/erp/acl";
+import { todayMx } from "@/lib/utils";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
 
@@ -54,7 +55,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
     order by id desc limit 1
   `;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayMx();
   const issueDate = fv[0]?.date ?? so[0].date;
   // Si la factura guardó su foto de parámetros al emitirse, la utilidad se
   // calcula con ESOS valores: cambiar Ajustes o la tabla TIIE después no
@@ -563,7 +564,7 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       where company_id = ${companyId} and kind = 'customer' and coalesce(inv_class,'product') = 'product'
         and state = 'open' and residual > 0.009 and amount > 0
     `;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayMx();
     type Bucket = { month: string; n: number; saldo: number; saldoMxnDocs: number; saldoUsdDocs: number; interesMensual: number };
     const buckets = new Map<string, Bucket>();
     const vencido: Bucket = { month: "vencido", n: 0, saldo: 0, saldoMxnDocs: 0, saldoUsdDocs: 0, interesMensual: 0 };

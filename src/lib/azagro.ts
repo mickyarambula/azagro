@@ -9,9 +9,10 @@ import { rememberTrade } from "@/lib/erp/links";
 import { seedAcl, type AppRole } from "@/lib/erp/acl";
 import { activeMember, assertCan, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
 import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
-import { nearestRate } from "@/lib/erp/credit";
+import { addDays, nearestRate } from "@/lib/erp/credit";
 import { ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
+import { todayMx } from "@/lib/utils";
 
 export type Role = AppRole;
 
@@ -300,10 +301,11 @@ export const getDashboard = createServerFn({ method: "GET" })
     const me = await activeMember(sql, context.userId);
     const cid = me.company_id;
     await ensureStock(sql);
+    const today = todayMx();
     const ar = await sql<{ total: string; overdue: string }>`
       select
         coalesce(sum(residual),0)::text as total,
-        coalesce(sum(case when due_date < current_date then residual else 0 end),0)::text as overdue
+        coalesce(sum(case when due_date < ${today}::date then residual else 0 end),0)::text as overdue
       from invoices
       where company_id = ${cid} and kind = 'customer' and state = 'open'
     `;
@@ -337,9 +339,9 @@ export const getDashboard = createServerFn({ method: "GET" })
       select bucket, coalesce(sum(residual),0)::text as amount from (
         select residual,
           case
-            when due_date >= current_date then 'Por vencer'
-            when current_date - due_date <= 30 then '1-30'
-            when current_date - due_date <= 60 then '31-60'
+            when due_date >= ${today}::date then 'Por vencer'
+            when ${today}::date - due_date <= 30 then '1-30'
+            when ${today}::date - due_date <= 60 then '31-60'
             else '61+'
           end as bucket
         from invoices
@@ -378,7 +380,7 @@ export const getDashboard = createServerFn({ method: "GET" })
       select
         (select count(*)::int from purchase_orders where company_id = ${cid} and state <> 'done') as po,
         (select count(*)::int from sales_orders where company_id = ${cid} and state <> 'done') as so,
-        (select count(*)::int from invoices where company_id = ${cid} and kind = 'customer' and state = 'open' and due_date < current_date) as overdue_n
+        (select count(*)::int from invoices where company_id = ${cid} and kind = 'customer' and state = 'open' and due_date < ${today}::date) as overdue_n
     `;
     const cash = await sql<{ total: string }>`
       select coalesce(sum(
@@ -1074,12 +1076,13 @@ export const createPurchase = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from purchase_orders where company_id = ${m.company_id}`;
     const name = `OC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const total = data.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
+    const today = todayMx();
     await sql`alter table purchase_orders add column if not exists fulfill_kind text not null default 'inventory'`;
     await sql`alter table purchase_lines add column if not exists uom text not null default ''`;
     await sql`alter table purchase_lines add column if not exists deliver_to text not null default ''`;
     const po = await sql<{ id: number }>`
-      insert into purchase_orders (company_id, name, partner_id, state, location_id, notes, total, currency, fx_rate, fulfill_kind)
-      values (${m.company_id}, ${name}, ${data.partnerId}, 'confirmed', ${data.locationId}, ${data.notes ?? ""}, ${total},
+      insert into purchase_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, fulfill_kind)
+      values (${m.company_id}, ${name}, ${data.partnerId}, ${today}, 'confirmed', ${data.locationId}, ${data.notes ?? ""}, ${total},
         ${data.currency ?? "MXN"}, ${data.fxRate ?? 1}, ${data.fulfillKind ?? "inventory"})
       returning id
     `;
@@ -1098,13 +1101,12 @@ export const createPurchase = createServerFn({ method: "POST" })
       locationId: data.locationId,
     });
     const days = await sql<{ payment_days: number }>`select coalesce(payment_days,0) as payment_days from partners where id = ${data.partnerId}`;
-    const due = new Date();
-    due.setDate(due.getDate() + (days[0]?.payment_days ?? 0));
+    const due = addDays(today, days[0]?.payment_days ?? 0);
     const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'supplier'`;
     const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     await sql`
-      insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, currency, created_by)
-      values (${m.company_id}, 'supplier', ${iname}, ${data.partnerId}, ${due.toISOString().slice(0, 10)}, 'open', ${total}, ${total}, ${name}, ${data.currency ?? "MXN"}, ${context.userId})
+      insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, created_by)
+      values (${m.company_id}, 'supplier', ${iname}, ${data.partnerId}, ${today}, ${due}, 'open', ${total}, ${total}, ${name}, ${data.currency ?? "MXN"}, ${context.userId})
     `;
     await writeAudit(sql, {
       companyId: m.company_id,
@@ -1162,13 +1164,13 @@ export const receivePurchase = createServerFn({ method: "POST" })
       const days = await sql<{ payment_days: number }>`
         select payment_days from partners where id = ${partner[0]!.partner_id}
       `;
-      const due = new Date();
-      due.setDate(due.getDate() + (days[0]?.payment_days ?? 30));
+      const today = todayMx();
+      const due = addDays(today, days[0]?.payment_days ?? 30);
       const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'supplier'`;
       const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
       await sql`
-        insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, created_by)
-        values (${m.company_id}, 'supplier', ${iname}, ${partner[0]!.partner_id}, ${due.toISOString().slice(0, 10)}, 'open', ${Number(total[0]?.total ?? 0)}, ${Number(total[0]?.total ?? 0)}, ${po[0].name}, ${context.userId})
+        insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, created_by)
+        values (${m.company_id}, 'supplier', ${iname}, ${partner[0]!.partner_id}, ${today}, ${due}, 'open', ${Number(total[0]?.total ?? 0)}, ${Number(total[0]?.total ?? 0)}, ${po[0].name}, ${context.userId})
       `;
     }
     await writeAudit(sql, {
@@ -1303,8 +1305,8 @@ export const createSale = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${m.company_id}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const so = await sql<{ id: number }>`
-      insert into sales_orders (company_id, name, partner_id, state, location_id, notes, total, currency, fx_rate, delivery_to, owner_id)
-      values (${m.company_id}, ${name}, ${data.partnerId}, 'confirmed', ${data.locationId}, ${data.notes ?? ""}, ${total},
+      insert into sales_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, delivery_to, owner_id)
+      values (${m.company_id}, ${name}, ${data.partnerId}, ${todayMx()}, 'confirmed', ${data.locationId}, ${data.notes ?? ""}, ${total},
         ${data.currency ?? "MXN"}, ${data.fxRate ?? 1}, ${data.deliveryTo ?? ""}, ${context.userId})
       returning id
     `;
@@ -1376,7 +1378,7 @@ export const deliverSale = createServerFn({ method: "POST" })
       await sql`update sales_lines set qty_delivered = qty where id = ${line.id}`;
     }
     await sql`update sales_orders set state = 'done' where id = ${so[0].id}`;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayMx();
     const invoiceDue = so[0].invoice_due || today;
     const creditDue = so[0].credit_due || invoiceDue;
     const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'customer'`;
@@ -1412,12 +1414,12 @@ export const deliverSale = createServerFn({ method: "POST" })
     });
     const inv = await sql<{ id: number }>`
       insert into invoices (
-        company_id, kind, name, partner_id, due_date, credit_due, state, amount, residual, origin,
+        company_id, kind, name, partner_id, date, due_date, credit_due, state, amount, residual, origin,
         currency, amount_fx, fx_agreed, inv_class, order_id, invoice_days, credit_days, policy_code,
         created_by, params_snap
       )
       values (
-        ${m.company_id}, 'customer', ${iname}, ${so[0].partner_id}, ${invoiceDue}, ${creditDue}, 'open',
+        ${m.company_id}, 'customer', ${iname}, ${so[0].partner_id}, ${today}, ${invoiceDue}, ${creditDue}, 'open',
         ${mxn}, ${mxn}, ${so[0].name}, ${currency}, ${currency === "USD" && fx ? mxn / fx : 0}, ${fx}, 'product', ${so[0].id},
         ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${so[0].policy_code ?? "NONE"},
         ${context.userId}, ${snap}
@@ -1493,6 +1495,7 @@ export const returnSale = createServerFn({ method: "POST" })
       from sales_lines where so_id = ${so[0].id}
     `;
     const direct = so[0].route_kind === "supplier" || so[0].route_kind === "asr";
+    const today = todayMx();
     let credit = 0;
     const posted: string[] = [];
     for (const take of data.lines) {
@@ -1511,7 +1514,7 @@ export const returnSale = createServerFn({ method: "POST" })
           productId: take.productId,
           quantity: take.qty,
           locationTo: so[0].location_id,
-          date: new Date().toISOString().slice(0, 10),
+          date: today,
         });
         posted.push(mv.ref);
       }
@@ -1525,11 +1528,11 @@ export const returnSale = createServerFn({ method: "POST" })
     const note = (data.reason || "").trim() || `Devolución de ${so[0].name}`;
     const nc = await sql<{ id: number }>`
       insert into invoices (
-        company_id, kind, name, partner_id, due_date, state, amount, residual, origin,
+        company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin,
         currency, order_id, inv_class, created_by
       )
       values (
-        ${m.company_id}, 'customer', ${ncName}, ${so[0].partner_id}, ${new Date().toISOString().slice(0, 10)},
+        ${m.company_id}, 'customer', ${ncName}, ${so[0].partner_id}, ${today}, ${today},
         'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product', ${context.userId}
       )
       returning id
@@ -1555,7 +1558,7 @@ export const returnSale = createServerFn({ method: "POST" })
       const payName = `PAG-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
       const pay = await sql<{ id: number }>`
         insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
-        values (${m.company_id}, 'inbound', ${payName}, ${so[0].partner_id}, ${applied}, ${`Devolución ${ncName}`}, ${context.userId}, ${new Date().toISOString().slice(0, 10)})
+        values (${m.company_id}, 'inbound', ${payName}, ${so[0].partner_id}, ${applied}, ${`Devolución ${ncName}`}, ${context.userId}, ${today})
         returning id
       `;
       await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${pay[0]!.id}, ${fv[0].id}, ${applied})`;
@@ -1563,7 +1566,7 @@ export const returnSale = createServerFn({ method: "POST" })
     }
     const leftover = credit - applied;
     if (leftover <= 0.009) {
-      await sql`update invoices set residual = 0, state = 'paid', paid_date = current_date where id = ${nc[0]!.id}`;
+      await sql`update invoices set residual = 0, state = 'paid', paid_date = ${today} where id = ${nc[0]!.id}`;
     } else {
       await sql`update invoices set residual = ${-leftover}, state = 'open' where id = ${nc[0]!.id}`;
     }
@@ -1597,6 +1600,7 @@ export const listInvoices = createServerFn({ method: "POST" })
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "credit", "view");
     const kind = data?.kind && data.kind !== "all" ? data.kind : null;
+    const today = todayMx();
     return sql<{
       id: number;
       kind: string;
@@ -1621,8 +1625,8 @@ export const listInvoices = createServerFn({ method: "POST" })
         i.date::text, i.due_date::text,
         i.state, i.amount::text, i.residual::text, i.late_amount::text, i.origin,
         coalesce(i.credit_days, 0)::int as credit_days,
-        greatest(0, (current_date - i.due_date))::int as days_overdue,
-        (i.due_date - current_date)::int as days_left,
+        greatest(0, (${today}::date - i.due_date))::int as days_overdue,
+        (i.due_date - ${today}::date)::int as days_left,
         coalesce(i.currency,'MXN') as currency
       from invoices i
       join partners p on p.id = i.partner_id

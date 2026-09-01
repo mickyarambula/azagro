@@ -1,4 +1,5 @@
 import type { getSql } from "@/lib/db";
+import { todayMx } from "@/lib/utils";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -184,7 +185,7 @@ export async function postStock(
   }
 
   const ref = await nextRef(sql, opts.companyId, opts.moveType);
-  const day = (opts.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const day = (opts.date || todayMx()).slice(0, 10);
 
   await sql`
     insert into stock_moves (
@@ -260,7 +261,7 @@ export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
     await sql`
       update invoices
       set residual = 0, state = 'paid',
-        paid_date = coalesce(paid_date, current_date)
+        paid_date = coalesce(paid_date, ${todayMx()}::date)
       where id = ${invoiceId}
     `;
     return 0;

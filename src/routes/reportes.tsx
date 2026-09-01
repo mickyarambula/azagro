@@ -4,18 +4,17 @@ import { AppShell } from "@/components/app-shell";
 import { Field, FinanceNav, StatusPill } from "@/components/erp";
 import { getCompanyPnl, getPanorama, listDealPnl } from "@/lib/erp/reports";
 import { exportCsv } from "@/lib/export-csv";
-import { money, todayISO } from "@/lib/utils";
+import { money, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/reportes")({ component: Page });
 
 function monthStart() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  return `${todayMx().slice(0, 7)}-01`;
 }
 
 function Page() {
   const [from, setFrom] = useState(monthStart);
-  const [to, setTo] = useState(todayISO);
+  const [to, setTo] = useState(todayMx);
   const [pnl, setPnl] = useState<Awaited<ReturnType<typeof getCompanyPnl>> | null>(null);
   const [deals, setDeals] = useState<Awaited<ReturnType<typeof listDealPnl>> | null>(null);
   const [pano, setPano] = useState<Awaited<ReturnType<typeof getPanorama>> | null>(null);

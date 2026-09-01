@@ -1,5 +1,5 @@
 import { COMMISSION_RATE, FEGA_BUNDLE_RATE, YEAR_DAYS } from "@/lib/erp/rules";
-import { dateDMY, moneyIn } from "@/lib/utils";
+import { dateDMY, moneyIn, todayMx } from "@/lib/utils";
 
 /** Motor de crédito Azagro — mismas reglas que los Excel de cartera (Grupo SL, no el export crudo de Compaq). */
 
@@ -30,9 +30,9 @@ export function daysBetween(from: string, to: string) {
 }
 
 export function addDays(iso: string, days: number) {
-  const d = new Date(iso.slice(0, 10) + "T00:00:00");
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  // Aritmética en UTC puro: el resultado no depende del timezone del servidor.
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(y!, m! - 1, d! + days)).toISOString().slice(0, 10);
 }
 
 export function nearestRate(table: Array<{ date: string; rate: number }>, asOf: string, fallback: number) {
@@ -213,7 +213,7 @@ export function validateDueDates(input: {
 }): DueCheck {
   const issue = (input.issue || "").slice(0, 10);
   const due = (input.due || "").slice(0, 10);
-  const asOf = (input.asOf || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const asOf = (input.asOf || todayMx()).slice(0, 10);
   const errors: string[] = [];
   const warnings: string[] = [];
   if (!issue || !due) {
@@ -380,7 +380,7 @@ export type ClockStatus = "overdue" | "today" | "open";
 
 /** Reloj de un vencimiento en días calendario exactos. */
 export function exactClock(due: string, asOf?: string) {
-  const today = (asOf || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const today = (asOf || todayMx()).slice(0, 10);
   const d = due.slice(0, 10);
   const delta = daysBetween(d, today);
   if (delta > 0) {

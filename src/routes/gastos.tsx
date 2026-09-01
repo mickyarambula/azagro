@@ -6,7 +6,7 @@ import { MoneyField } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { addExpenseCategory, createExpense, listExpenses } from "@/lib/erp/expenses";
 import { exportCsv } from "@/lib/export-csv";
-import { cn, money, todayISO } from "@/lib/utils";
+import { cn, money, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/gastos")({
   component: Page,
@@ -29,7 +29,7 @@ function Page() {
   const [data, setData] = useState<Awaited<ReturnType<typeof listExpenses>> | null>(null);
   const [cls, setCls] = useState<Cls>("operativo");
   const [categoryId, setCategoryId] = useState("");
-  const [date, setDate] = useState(todayISO);
+  const [date, setDate] = useState(todayMx);
   const [amount, setAmount] = useState(0);
   const [partnerId, setPartnerId] = useState("");
   const [soId, setSoId] = useState("");

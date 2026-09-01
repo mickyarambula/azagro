@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
+import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -175,7 +176,7 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
         currency, fx_rate, delivery_to, owner_id,
         term_kind, invoice_days, credit_days, route_kind, policy_code, oc_cliente, price_mode
       ) values (
-        ${companyId}, ${name}, ${cpo[0].partner_id}, current_date, 'draft', ${data.locationId},
+        ${companyId}, ${name}, ${cpo[0].partner_id}, ${todayMx()}, 'draft', ${data.locationId},
         ${cpo[0].notes}, ${total}, ${cpo[0].currency}, 1, '', ${context.userId},
         'credit_days', 0, 0, 'own', 'NONE', ${cpo[0].customer_po_number}, 'custom'
       )

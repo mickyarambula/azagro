@@ -8,7 +8,7 @@ import { SearchSelect, asOpts } from "@/components/search-select";
 import { convertCustomerPO, createCustomerPO, listCustomerPOs } from "@/lib/erp/cpo";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
-import { money, num, todayISO } from "@/lib/utils";
+import { money, num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/cpo")({ component: Page });
 
@@ -19,7 +19,7 @@ function Page() {
   const [locs, setLocs] = useState<Array<{ id: number }>>([]);
   const [partnerId, setPartnerId] = useState(0);
   const [customerPo, setCustomerPo] = useState("");
-  const [poDate, setPoDate] = useState(todayISO);
+  const [poDate, setPoDate] = useState(todayMx);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<Line[]>([]);

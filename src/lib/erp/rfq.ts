@@ -3,6 +3,8 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
+import { addDays } from "@/lib/erp/credit";
+import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -259,6 +261,7 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
       await sql`alter table purchase_orders add column if not exists rfq_id integer`;
       await sql`alter table purchase_lines add column if not exists uom text not null default ''`;
       await sql`alter table purchase_lines add column if not exists deliver_to text not null default ''`;
+      const today = todayMx();
       for (const [supplierId, wins] of bySup) {
         const lines = wins
           .map((w) => {
@@ -272,9 +275,9 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
         const poName = `OC-${String((poN[0]?.c ?? 0) + 1).padStart(4, "0")}`;
         const total = lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
         const po = await sql<{ id: number }>`
-          insert into purchase_orders (company_id, name, partner_id, state, location_id, notes, total, currency, fx_rate, fulfill_kind, rfq_id)
+          insert into purchase_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, fulfill_kind, rfq_id)
           values (
-            ${companyId}, ${poName}, ${supplierId}, 'confirmed', ${loc[0].id},
+            ${companyId}, ${poName}, ${supplierId}, ${today}, 'confirmed', ${loc[0].id},
             ${`Desde ${rfq[0].name} · inventario`}, ${total}, ${rfq[0].currency}, 1, 'inventory', ${data.rfqId}
           )
           returning id
@@ -295,13 +298,12 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
         const daysPay = await sql<{ payment_days: number }>`
           select coalesce(payment_days,0) as payment_days from partners where id = ${supplierId}
         `;
-        const due = new Date();
-        due.setDate(due.getDate() + (daysPay[0]?.payment_days ?? 0));
+        const due = addDays(today, daysPay[0]?.payment_days ?? 0);
         const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${companyId} and kind = 'supplier'`;
         const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
         await sql`
-          insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, currency)
-          values (${companyId}, 'supplier', ${iname}, ${supplierId}, ${due.toISOString().slice(0, 10)}, 'open', ${total}, ${total}, ${poName}, ${rfq[0].currency})
+          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency)
+          values (${companyId}, 'supplier', ${iname}, ${supplierId}, ${today}, ${due}, 'open', ${total}, ${total}, ${poName}, ${rfq[0].currency})
         `;
         pos.push(poName);
       }

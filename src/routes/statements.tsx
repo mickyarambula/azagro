@@ -9,7 +9,7 @@ import { getLiveStatement, saveDocument } from "@/lib/erp/ops";
 import { pctRate } from "@/lib/erp/credit";
 import { logoSrc, printHtml, statementSheet } from "@/lib/print-doc";
 import { listPartners } from "@/lib/azagro";
-import { dateDMY, money, moneyIn } from "@/lib/utils";
+import { dateDMY, money, moneyIn, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/statements")({ component: Page });
 
@@ -219,7 +219,7 @@ function Page() {
   const [partners, setPartners] = useState<Awaited<ReturnType<typeof listPartners>>>([]);
   const [partnerId, setPartnerId] = useState(0);
   const [group, setGroup] = useState("");
-  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [asOf, setAsOf] = useState(() => todayMx());
   const [st, setSt] = useState<Live | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);

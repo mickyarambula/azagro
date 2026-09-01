@@ -36,8 +36,32 @@ export function moneyIn(n: number | string | null | undefined, currency: string 
   }).format(Number.isFinite(v) ? v : 0);
 }
 
-export function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+/** Azagro opera en Sinaloa: UTC-7 todo el año, sin horario de verano. */
+const AZAGRO_TZ = "America/Mazatlan";
+
+/**
+ * Fecha de operación de Azagro (YYYY-MM-DD en hora de Los Mochis).
+ *
+ * ÚNICO lugar del sistema donde se decide "qué día es hoy" para una fecha
+ * de negocio: factura, vencimiento, pago, kardex, corte, vigencia. Nunca usar
+ * `new Date().toISOString().slice(0, 10)` (eso es el día en UTC: desde las
+ * 5:00 p.m. de Los Mochis ya marca mañana) ni `current_date` en SQL (depende
+ * del timezone de la sesión de Postgres, que en Neon es UTC).
+ *
+ * Los sellos de tiempo de auditoría (created_at, bitácora) NO pasan por aquí:
+ * siguen siendo instantes UTC y solo se convierten al mostrar (dateTimeMx).
+ *
+ * `now` es inyectable para pruebas; en producción se omite.
+ */
+export function todayMx(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: AZAGRO_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 /** Fecha como en los papeles de Azagro: 10/03/26 */
@@ -54,9 +78,6 @@ export function fmtDate(iso: string | null | undefined) {
   if (!y || !m || !d) return iso;
   return `${d}/${m}/${y}`;
 }
-
-/** Azagro opera en Sinaloa: UTC-7 todo el año, sin horario de verano. */
-const AZAGRO_TZ = "America/Mazatlan";
 
 /**
  * Fecha Y HORA tal como las vive Los Mochis — solo para MOSTRAR en pantalla

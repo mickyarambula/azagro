@@ -5,7 +5,7 @@ import { applyPartnerDefaults, duesPreview, OrderFields, type OrderDraft, type O
 import { orderLookups, saveOrder } from "@/lib/erp/orders";
 import { validateDueDates } from "@/lib/erp/credit";
 import { useAccess } from "@/lib/access";
-import { num, todayISO } from "@/lib/utils";
+import { num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/sales/nuevo")({
   component: Nuevo,
@@ -18,13 +18,13 @@ function empty(lookups: OrderLookups): OrderDraft {
   const base: OrderDraft = {
     name: lookups.nextName,
     partnerId: first?.id ?? 0,
-    date: todayISO(),
+    date: todayMx(),
     ocCliente: "",
     termKind: "credit_days",
     invoiceDays: 30,
     creditDays: 30,
-    invoiceDue: todayISO(),
-    creditDue: todayISO(),
+    invoiceDue: todayMx(),
+    creditDue: todayMx(),
     currency: "USD",
     fxRate: lookups.fxRate || 18,
     routeKind: "own",

@@ -7,7 +7,7 @@ import { getAlertDigest, sendDueAlerts, sendPartnerReminders } from "@/lib/erp/a
 import { getSettings } from "@/lib/erp/ops";
 import { getUpcomingDue } from "@/lib/erp/reports";
 import { exactClock, validateDueDates } from "@/lib/erp/credit";
-import { dateDMY, money, moneyIn, num } from "@/lib/utils";
+import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/vencimientos")({ component: Page });
 
@@ -35,7 +35,7 @@ function Page() {
   const [alerts, setAlerts] = useState({ cxc: 7, cxp: 7 });
   const [lado, setLado] = useState<"all" | "customer" | "supplier">("all");
   const [porMes, setPorMes] = useState<Awaited<ReturnType<typeof getUpcomingDue>> | null>(null);
-  const asOf = new Date().toISOString().slice(0, 10);
+  const asOf = todayMx();
 
   useEffect(() => {
     void listInvoices({ data: { kind: "all" } }).then(setRows);

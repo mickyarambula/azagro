@@ -8,13 +8,14 @@ import { MoneyField, QtyField, UomSelect } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { SendButton } from "@/components/send-doc";
 import { Expediente } from "@/components/expediente";
+import { addDays } from "@/lib/erp/credit";
 import { getDealTrail } from "@/lib/erp/deal";
 import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
 import { annualRate, creditFromCash } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
-import { dateDMY, humanError, moneyIn, num, qty, todayISO } from "@/lib/utils";
+import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/quotes")({ component: Page });
 
@@ -32,11 +33,7 @@ function Page() {
   const [partnerId, setPartnerId] = useState(0);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
   const [fxRate, setFxRate] = useState(18);
-  const [validUntil, setValidUntil] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 15);
-    return d.toISOString().slice(0, 10);
-  });
+  const [validUntil, setValidUntil] = useState(() => addDays(todayMx(), 15));
   const [priceOffer, setPriceOffer] = useState<Offer>("both");
   const [creditDays, setCreditDays] = useState(90);
   const [tiie, setTiie] = useState(0.0706);
@@ -84,7 +81,7 @@ function Page() {
     setError(null);
     setBusy(true);
     try {
-      if (validUntil < todayISO()) {
+      if (validUntil < todayMx()) {
         throw new Error(`La vigencia ya venció (${validUntil}). Elige hoy o una fecha posterior.`);
       }
       const priced = lines.filter((l) => l.productId && l.qty > 0);
@@ -399,7 +396,7 @@ function Page() {
               const closed = qrow.state === "accepted" || qrow.state === "rejected" || qrow.state === "partial";
               const cur = qrow.currency;
               const both = (qrow.price_offer || "both") === "both";
-              const expired = !closed && qrow.valid_until < todayISO();
+              const expired = !closed && qrow.valid_until < todayMx();
               return (
                 <Fragment key={qrow.id}>
                 <tr className="border-t border-line">
