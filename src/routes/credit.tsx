@@ -271,7 +271,8 @@ function Page() {
               });
               setPay(null);
               const extra = r.mora ? ` Mora ${r.mora} (${money(r.moraCharge)})${r.moraFormula ? ` · ${r.moraFormula}` : ""}.` : "";
-              setMsg(`Aplicado ${money(r.applied)} en ${r.bank}. Saldo factura ${money(r.residual)}. Caja ${money(r.cashAfter)}.${extra}`);
+              const desc = r.discount > 0 ? ` Pronto pago: se bonificaron ${money(r.discount)} y la factura quedó saldada.` : "";
+              setMsg(`Aplicado ${money(r.applied)} en ${r.bank}. Saldo factura ${money(r.residual)}. Caja ${money(r.cashAfter)}.${extra}${desc}`);
               await load();
             } catch (err) {
               setError(err instanceof Error ? err.message : "Error");

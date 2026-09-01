@@ -297,15 +297,24 @@ function Ficha() {
       <OrderFields form={form} setForm={setForm} lookups={lookups} locked={locked} />
       {pnl && (
         <div className="mt-4">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <PnlKpi label="Venta" value={money(pnl.revenue)} />
             <PnlKpi label="Costo mercancía" value={money(pnl.cogs)} hint="OC, si no cotización, si no catálogo" />
             <PnlKpi label="Flete / sobre pedido" value={money(pnl.freight)} />
             <PnlKpi label="Margen operación" value={money(pnl.margin)} hint={`${pnl.marginPct.toFixed(1)}% sobre venta`} />
-            <PnlKpi label="Costo de línea (info)" value={money(pnl.finance)} hint={pnl.creditDays ? `${pnl.creditDays} d exactos × TIIE+spread / 360. Ya va en el precio, no se resta otra vez.` : "Contado: no hay costo de línea"} />
+            <PnlKpi
+              label="Costo financiero"
+              value={money(pnl.finance)}
+              hint={`Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% + spread`}
+            />
+            <PnlKpi label="Utilidad final" value={money(pnl.netProfit)} hint={`${pnl.netProfitPct.toFixed(1)}% · venta + mora + dif. cambiario − costos financieros − pronto pago`} />
           </div>
-          {pnl.mora > 0 && (
-            <p className="mt-2 text-[12px] text-muted">Mora facturada de este pedido: {money(pnl.mora)} (factura de intereses, no del producto).</p>
+          {(pnl.mora > 0 || pnl.discount > 0 || pnl.fxIncome !== 0) && (
+            <p className="mt-2 text-[12px] text-muted">
+              {pnl.mora > 0 ? `Mora facturada: ${money(pnl.mora)} (entra como ingreso). ` : ""}
+              {pnl.discount > 0 ? `Descuento pronto pago: ${money(pnl.discount)}. ` : ""}
+              {pnl.fxIncome !== 0 ? `Diferencial cambiario: ${money(pnl.fxIncome)}.` : ""}
+            </p>
           )}
           <div className="mt-3 overflow-x-auto erp-card">
             <table className="w-full min-w-[860px] text-left text-[13px]">

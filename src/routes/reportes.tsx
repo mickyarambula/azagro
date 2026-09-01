@@ -80,8 +80,8 @@ function Page() {
           onClick={() =>
             exportCsv(
               "utilidad-azagro",
-              ["Pedido", "Fecha", "Cliente", "Estado", "Venta", "Costo", "Flete", "Línea", "Margen", "%"],
-              (deals?.deals ?? []).map((d) => [d.name, d.date, d.partner, d.state, d.revenue, d.cogs, d.freight, d.finance, d.margin, d.marginPct]),
+              ["Pedido", "Fecha", "Cliente", "Estado", "Venta", "Costo", "Flete", "Costo financiero", "Margen", "%", "Utilidad final"],
+              (deals?.deals ?? []).map((d) => [d.name, d.date, d.partner, d.state, d.revenue, d.cogs, d.freight, d.finance, d.margin, d.marginPct, d.netProfit]),
             )
           }
         >
@@ -99,8 +99,9 @@ function Page() {
               <th className="px-3 py-3 text-right font-medium">Venta</th>
               <th className="px-3 py-3 text-right font-medium">Costo</th>
               <th className="px-3 py-3 text-right font-medium">Flete</th>
-              <th className="px-3 py-3 text-right font-medium">Línea (info)</th>
-              <th className="px-4 py-3 text-right font-medium">Margen</th>
+              <th className="px-3 py-3 text-right font-medium">Costo financiero</th>
+              <th className="px-3 py-3 text-right font-medium">Margen</th>
+              <th className="px-4 py-3 text-right font-medium">Utilidad final</th>
             </tr>
           </thead>
           <tbody>
@@ -120,15 +121,19 @@ function Page() {
                 <td className="px-3 py-3 text-right tabular-nums">{money(d.cogs)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(d.freight)}</td>
                 <td className="px-3 py-3 text-right tabular-nums text-muted">{money(d.finance)}</td>
-                <td className="px-4 py-3 text-right tabular-nums font-medium">
+                <td className="px-3 py-3 text-right tabular-nums">
                   {money(d.margin)}
                   <span className="ml-1 text-[11px] text-muted">{d.marginPct.toFixed(1)}%</span>
+                </td>
+                <td className="px-4 py-3 text-right tabular-nums font-medium">
+                  {money(d.netProfit)}
+                  <span className="ml-1 text-[11px] text-muted">{d.netProfitPct.toFixed(1)}%</span>
                 </td>
               </tr>
             ))}
             {deals && deals.deals.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-4 py-12 text-center text-sm text-muted">
+                <td colSpan={10} className="px-4 py-12 text-center text-sm text-muted">
                   Sin pedidos en el periodo.
                 </td>
               </tr>
@@ -144,7 +149,8 @@ function Page() {
                 <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.cogs)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.freight)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.finance)}</td>
-                <td className="px-4 py-3 text-right tabular-nums">{money(deals.totals.margin)}</td>
+                <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.margin)}</td>
+                <td className="px-4 py-3 text-right tabular-nums">{money(deals.totals.netProfit)}</td>
               </tr>
             </tfoot>
           )}

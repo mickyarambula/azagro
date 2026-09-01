@@ -20,7 +20,7 @@ async function companyOf(sql: Sql, userId: string) {
   return rows[0].company_id;
 }
 
-async function policy(sql: Sql, companyId: number) {
+export async function policy(sql: Sql, companyId: number) {
   await sql`alter table company_settings add column if not exists finance_spread numeric(8,4) not null default 0.045`;
   await sql`alter table company_settings add column if not exists alert_days_cxc integer not null default 7`;
   await sql`alter table company_settings add column if not exists alert_days_cxp integer not null default 7`;
@@ -844,12 +844,15 @@ export async function applyInvoicePayment(
     id: number;
     kind: string;
     residual: string;
+    amount: string;
+    inv_class: string;
     partner_id: number;
     name: string;
     date: string;
     due_date: string;
   }>`
-    select id, kind, residual::text, partner_id, name, date::text, due_date::text from invoices
+    select id, kind, residual::text, amount::text, coalesce(inv_class,'product') as inv_class,
+      partner_id, name, date::text, due_date::text from invoices
     where id = ${opts.invoiceId} and company_id = ${opts.companyId}
     for update
   `;
@@ -897,7 +900,7 @@ export async function applyInvoicePayment(
     insert into payment_allocs (payment_id, invoice_id, amount)
     values (${pay[0]!.id}, ${inv[0].id}, ${applied})
   `;
-  const newRes = await refreshInvoiceResidual(sql, inv[0].id);
+  let newRes = await refreshInvoiceResidual(sql, inv[0].id);
   const signed = inv[0].kind === "customer" ? applied : -applied;
   const moveKind = inv[0].kind === "customer" ? "cobro" : "pago";
   await sql`
@@ -908,6 +911,54 @@ export async function applyInvoicePayment(
       ${inv[0].partner_id}, ${moveKind}, ${inv[0].id}, ${pay[0]!.id}, ${opts.userId}
     )
   `;
+
+  // Descuento REAL por pronto pago: si pagó antes del umbral y lo que falta
+  // del saldo cabe en la bonificación (días hasta el plazo financiero, a TIIE
+  // de emisión + spread de costo), ese resto se perdona y la factura se cierra.
+  let discount = 0;
+  let discountDetail = "";
+  if (inv[0].kind === "customer" && inv[0].inv_class === "product" && Number(inv[0].amount) > 0 && newRes > 0.009) {
+    const pol = await policy(sql, opts.companyId);
+    const tiieRows = await sql<{ date: string; rate: string }>`
+      select date::text, rate::text from tiie_rates where company_id = ${opts.companyId} order by date
+    `;
+    const bono = earlyPayBonus({
+      cargo: Number(inv[0].amount),
+      issueDate: inv[0].date,
+      payDate,
+      thresholdDays: pol.earlyPayDays,
+      financialDays: pol.creditDays,
+      tiieAtIssue: nearestRate(
+        tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
+        inv[0].date,
+        pol.defaultTiie,
+      ),
+      costSpread: pol.asrSpread,
+    });
+    if (bono.applies && newRes <= bono.bonus + 0.009) {
+      discount = Math.round(newRes * 100) / 100;
+      const dn = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${opts.companyId}`;
+      const dname = `PAG-${String((dn[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+      const dpay = await sql<{ id: number }>`
+        insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
+        values (${opts.companyId}, 'inbound', ${dname}, ${inv[0].partner_id}, ${discount}, ${`Pronto pago ${inv[0].name}`}, ${opts.userId}, ${payDate})
+        returning id
+      `;
+      await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${dpay[0]!.id}, ${inv[0].id}, ${discount})`;
+      newRes = await refreshInvoiceResidual(sql, inv[0].id);
+      discountDetail = `Pagó al día ${bono.lived} (umbral ${pol.earlyPayDays}). Bonificación ganada: ${Number(inv[0].amount).toFixed(2)} × ${(bono.rate * 100).toFixed(2)}% × ${bono.days} d / 360 = ${bono.bonus.toFixed(2)}. Aplicado al saldo: ${discount.toFixed(2)}.`;
+      await writeAudit(sql, {
+        companyId: opts.companyId,
+        userId: opts.userId,
+        action: "pronto-pago",
+        entity: "invoice",
+        entityId: inv[0].id,
+        name: inv[0].name,
+        detail: discountDetail,
+      });
+    }
+  }
+
   if (newRes <= 0.009) {
     await sql`update invoices set paid_date = coalesce(paid_date, ${payDate}::date) where id = ${inv[0].id}`;
   }
@@ -928,6 +979,8 @@ export async function applyInvoicePayment(
     mora: mora.name,
     moraCharge: mora.charge,
     moraFormula: mora.formula ?? "",
+    discount,
+    discountDetail,
     bank: bank[0].name,
     cashAfter,
   };

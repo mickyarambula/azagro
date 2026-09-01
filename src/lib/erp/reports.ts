@@ -3,8 +3,8 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan, canSeeMargins } from "@/lib/erp/acl";
-import { DEFAULT_POLICY } from "@/lib/erp/credit";
-import { YEAR_DAYS } from "@/lib/erp/rules";
+import { daysBetween, earlyPayBonus, financeCost, fxDifferential, nearestRate } from "@/lib/erp/credit";
+import { policy } from "@/lib/erp/ops";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -17,26 +17,54 @@ async function cid(sql: Sql, userId: string) {
 export async function computeDealPnl(sql: Sql, companyId: number, soId: number) {
   await sql`alter table purchase_orders add column if not exists so_id integer`;
   await sql`alter table sales_orders add column if not exists quote_id integer`;
-  await sql`alter table company_settings add column if not exists finance_spread numeric(8,4) not null default 0.045`;
   await sql`alter table quote_lines add column if not exists cost numeric(14,4) not null default 0`;
   await sql`alter table quote_lines add column if not exists freight numeric(14,4) not null default 0`;
   await sql`alter table quote_lines add column if not exists other_cost numeric(14,4) not null default 0`;
   const so = await sql<{
     name: string;
     currency: string;
+    date: string;
     credit_days: number;
     quote_id: number | null;
   }>`
-    select name, currency, coalesce(credit_days,0)::int as credit_days, quote_id
+    select name, currency, date::text, coalesce(credit_days,0)::int as credit_days, quote_id
     from sales_orders where id = ${soId} and company_id = ${companyId}
   `;
   if (!so[0]) throw new Error("Pedido no encontrado");
-  const pol = await sql<{ finance_spread: string; default_tiie: string }>`
-    select coalesce(finance_spread, 0.045)::text as finance_spread, coalesce(default_tiie, 0.0706)::text as default_tiie
-    from company_settings where company_id = ${companyId}
+  const pol = await policy(sql, companyId);
+  // La factura de venta manda: su fecha de emisión fija la TIIE de costo, y
+  // sus fechas de pago/plazo financiero fijan la Capa 2 y el pronto pago.
+  const fv = await sql<{
+    date: string;
+    due_date: string;
+    credit_due: string | null;
+    paid_date: string | null;
+    amount: string;
+    amount_fx: string;
+    fx_agreed: string;
+    fx_paid: string | null;
+  }>`
+    select date::text, due_date::text, credit_due::text, paid_date::text,
+      amount::text, coalesce(amount_fx,0)::text as amount_fx, coalesce(fx_agreed,0)::text as fx_agreed, fx_paid::text
+    from invoices
+    where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
+    order by id desc limit 1
   `;
-  const financeRate = Number(pol[0]?.default_tiie ?? DEFAULT_POLICY.defaultTiie) + Number(pol[0]?.finance_spread ?? DEFAULT_POLICY.financeSpread);
-  const days = so[0].credit_days;
+  const today = new Date().toISOString().slice(0, 10);
+  const issueDate = fv[0]?.date ?? so[0].date;
+  const tiieRows = await sql<{ date: string; rate: string }>`
+    select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
+  `;
+  const tiieIssue = nearestRate(
+    tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
+    issueDate,
+    pol.defaultTiie,
+  );
+  const financialDays = pol.creditDays;
+  const exceededEnd = fv[0]?.paid_date && fv[0].paid_date < today ? fv[0].paid_date : today;
+  const daysExceeded = fv[0]
+    ? Math.max(0, daysBetween(fv[0].credit_due || fv[0].due_date, exceededEnd))
+    : 0;
   const raw = await sql<{
     product_id: number;
     code: string;
@@ -81,7 +109,18 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     const cogs = qty * costUnit;
     const freight = qty * freightUnit;
     const other = qty * otherUnit;
-    const finance = days > 0 ? (cogs * financeRate * days) / YEAR_DAYS : 0;
+    // Costo financiero real del circuito hermana: comisión + Capa 1 (plazo
+    // completo, siempre) + Capa 2 (días excedidos), a TIIE de emisión + spread.
+    const fin = financeCost({
+      supplierCost: cogs,
+      saleCapital: sale,
+      commissionRate: pol.asrCommission,
+      costSpread: pol.asrSpread,
+      tiieAtIssue: tiieIssue,
+      financialDays,
+      daysExceeded,
+    });
+    const finance = fin.total;
     const margin = sale - cogs - freight - other;
     return {
       productId: l.product_id,
@@ -98,6 +137,9 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       freight,
       other,
       finance,
+      commission: fin.commission,
+      layer1: fin.layer1,
+      layer2: fin.layer2,
       margin,
       marginPct: sale > 0 ? (margin / sale) * 100 : 0,
     };
@@ -127,14 +169,41 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const cogs = lines.reduce((s, l) => s + l.cogs, 0);
   const freightQuote = lines.reduce((s, l) => s + l.freight, 0);
   const otherQuote = lines.reduce((s, l) => s + l.other, 0);
-  const finance = lines.reduce((s, l) => s + l.finance, 0);
+  const commission = lines.reduce((s, l) => s + l.commission, 0);
+  const layer1 = lines.reduce((s, l) => s + l.layer1, 0);
+  const layer2 = lines.reduce((s, l) => s + l.layer2, 0);
+  const finance = commission + layer1 + layer2;
   const freight = freightQuote + expPedido;
+  // Descuento por pronto pago: si la factura se liquidó antes del umbral,
+  // se bonifican los días hasta el plazo financiero a la tasa de costo.
+  const bono = fv[0]?.paid_date
+    ? earlyPayBonus({
+        cargo: Number(fv[0].amount),
+        issueDate: fv[0].date,
+        payDate: fv[0].paid_date,
+        thresholdDays: pol.earlyPayDays,
+        financialDays,
+        tiieAtIssue: tiieIssue,
+        costSpread: pol.asrSpread,
+      })
+    : { applies: false, bonus: 0, days: 0, lived: 0, rate: 0 };
+  const discount = bono.applies ? bono.bonus : 0;
+  const fxIncome = fv[0] && so[0].currency === "USD"
+    ? fxDifferential(Number(fv[0].amount_fx), Number(fv[0].fx_agreed), fv[0].fx_paid ? Number(fv[0].fx_paid) : null)
+    : 0;
   const margin = revenue - cogs - freight - otherQuote - expOther;
+  // Utilidad real de la operación, como el Excel:
+  // + venta + mora + diferencial cambiario
+  // − costo proveedor − comisión − Capa 1 − Capa 2 − descuento pronto pago.
+  const netProfit = margin + mora + fxIncome - finance - discount;
   return {
     name: so[0].name,
     currency: so[0].currency,
-    creditDays: days,
-    financeRate,
+    creditDays: so[0].credit_days,
+    financeRate: tiieIssue + pol.asrSpread,
+    tiieIssue,
+    financialDays,
+    daysExceeded,
     lines,
     expenses,
     revenue,
@@ -143,10 +212,17 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     freightQuote,
     expPedido,
     other: otherQuote + expOther,
+    commission,
+    layer1,
+    layer2,
     finance,
+    discount,
+    fxIncome,
     margin,
     marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
-    marginAfterFinance: margin - finance,
+    marginAfterFinance: netProfit,
+    netProfit,
+    netProfitPct: revenue > 0 ? (netProfit / revenue) * 100 : 0,
     mora,
   };
 }
@@ -193,6 +269,8 @@ export const listDealPnl = createServerFn({ method: "POST" })
         finance: d.finance,
         margin: d.margin,
         marginPct: d.marginPct,
+        netProfit: d.netProfit,
+        netProfitPct: d.netProfitPct,
       });
     }
     const totals = deals.reduce(
@@ -202,8 +280,9 @@ export const listDealPnl = createServerFn({ method: "POST" })
         freight: s.freight + d.freight,
         finance: s.finance + d.finance,
         margin: s.margin + d.margin,
+        netProfit: s.netProfit + d.netProfit,
       }),
-      { revenue: 0, cogs: 0, freight: 0, finance: 0, margin: 0 },
+      { revenue: 0, cogs: 0, freight: 0, finance: 0, margin: 0, netProfit: 0 },
     );
     return { from, to, deals, totals };
   });

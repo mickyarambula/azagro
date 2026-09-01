@@ -321,6 +321,35 @@ export function earlyPayBonus(input: {
   return { applies: days > 0, lived, days, rate, bonus };
 }
 
+/**
+ * Costo financiero PROPIO de Azagro por operación (circuito con la empresa
+ * hermana, hoja RUTA del Excel):
+ * - Comisión sobre el costo de proveedor (hoy 1%).
+ * - Capa 1 = costo × (1 + comisión) × (TIIE de emisión + spread de costo)
+ *   × plazo financiero / 360. Corre SIEMPRE, sobre el plazo completo.
+ * - Capa 2 = capital de la venta × la misma tasa × días excedidos / 360.
+ *   Solo cuando el cliente se pasa del plazo financiero.
+ * La TIIE de emisión (mes en que se facturó) es distinta de la TIIE con la
+ * que se cobra al cliente (mes del vencimiento financiero).
+ */
+export function financeCost(input: {
+  supplierCost: number;
+  saleCapital: number;
+  commissionRate: number;
+  costSpread: number;
+  tiieAtIssue: number;
+  financialDays: number;
+  daysExceeded: number;
+}) {
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const cost = Math.max(0, input.supplierCost);
+  const rate = input.tiieAtIssue + input.costSpread;
+  const commission = round2(cost * Math.max(0, input.commissionRate));
+  const layer1 = round2((cost * (1 + Math.max(0, input.commissionRate)) * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
+  const layer2 = round2((Math.max(0, input.saleCapital) * rate * Math.max(0, input.daysExceeded)) / YEAR_DAYS);
+  return { rate, commission, layer1, layer2, total: round2(commission + layer1 + layer2) };
+}
+
 export type ClockStatus = "overdue" | "today" | "open";
 
 /** Reloj de un vencimiento en días calendario exactos. */
