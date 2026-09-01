@@ -221,3 +221,16 @@ test("los recordatorios de cobro quedan registrados (enviado vs borrador abierto
   const ui = src("src/routes/bitacora.tsx");
   assert.ok(ui.includes("Recordatorio de cobro"), "la pantalla lo traduce");
 });
+
+test("bitácora: el filtro de fechas no truena cuando 'Desde'/'Hasta' vienen vacíos", () => {
+  const audit = src("src/lib/erp/audit.ts");
+  const list = fnBody(audit, "listAudit");
+  // El bug real: concatenar "" + "T00:00:00" y castear siempre a timestamptz
+  // tronaba con "invalid input syntax" aunque el filtro no se usara.
+  assert.ok(!list.includes('${from} = \'\' or a.created_at'), "ya no debe castear la cadena vacía concatenada");
+  assert.ok(!list.includes('${to} = \'\' or a.created_at'), "ya no debe castear la cadena vacía concatenada");
+  assert.ok(list.includes("const fromTs = from ?"), "null explícito cuando no hay 'Desde'");
+  assert.ok(list.includes("const toTs = to ?"), "null explícito cuando no hay 'Hasta'");
+  assert.ok(list.includes("${fromTs}::timestamptz is null or"), "compara contra null, nunca castea una cadena vacía");
+  assert.ok(list.includes("${toTs}::timestamptz is null or"), "compara contra null, nunca castea una cadena vacía");
+});

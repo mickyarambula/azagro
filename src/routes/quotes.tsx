@@ -476,9 +476,13 @@ function Page() {
                   <tr className="border-t border-line bg-paper">
                     <td colSpan={7} className="px-4 py-4">
                       <Expediente kind="quote" id={qrow.id} />
-                      <p className="mb-1 text-sm font-semibold">Documento al cliente</p>
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold">Documento al cliente</p>
+                        <span className="erp-chip">Revisión {qrow.revision}</span>
+                      </div>
                       <p className="mb-3 text-[12px] text-muted">
                         {both ? "Van los dos precios: contado y crédito." : offerLabel(qrow.price_offer) + "."} {cur === "USD" ? `Dólar pactado ${Number(qrow.fx_rate)} MXN.` : "Moneda MXN."} Azagro vende: no aparece el proveedor ni tu costo.
+                        {!closed ? " Edita el precio abajo y guarda para crear la siguiente revisión." : ""}
                       </p>
                       <table className="mb-4 w-full text-left text-[13px]">
                         <thead className="text-[11px] uppercase tracking-wide text-muted">
@@ -537,6 +541,56 @@ function Page() {
                           })}
                         </tbody>
                       </table>
+                      {!closed && (() => {
+                        const priceDirty = qlines.some((l) => {
+                          const rp = revPrices[l.product_id];
+                          if (!rp) return false;
+                          return Math.abs(rp.cash - Number(l.cash_price)) > 0.009 || Math.abs(rp.credit - Number(l.credit_price)) > 0.009;
+                        });
+                        return (
+                          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-cream px-3 py-2">
+                            <p className="text-[12px]">
+                              {priceDirty ? (
+                                <span className="font-medium text-warn">Cambiaste precios — todavía no se guardan.</span>
+                              ) : (
+                                <span className="text-muted">Sin cambios de precio.</span>
+                              )}{" "}
+                              Al guardar, la Revisión {qrow.revision} con estos precios de hoy queda en la bitácora, y el
+                              documento pasa a la Revisión {qrow.revision + 1}.
+                            </p>
+                            <button
+                              type="button"
+                              className="erp-btn-primary h-9 shrink-0 text-[12px]"
+                              disabled={!priceDirty}
+                              onClick={() =>
+                                reviseQuote({
+                                  data: {
+                                    quoteId: qrow.id,
+                                    priceOffer: (qrow.price_offer as Offer) || "both",
+                                    creditDays: qrow.credit_days,
+                                    lines: qlines.map((l) => {
+                                      const rp = revPrices[l.product_id];
+                                      return {
+                                        productId: l.product_id,
+                                        qty: rp?.qty ?? Number(l.qty),
+                                        cashPrice: rp?.cash ?? Number(l.cash_price),
+                                        creditPrice: rp?.credit ?? Number(l.credit_price),
+                                      };
+                                    }),
+                                  },
+                                })
+                                  .then(() => {
+                                    setError(null);
+                                    return load();
+                                  })
+                                  .catch((e) => setError(humanError(e)))
+                              }
+                            >
+                              Guardar como Revisión {qrow.revision + 1}
+                            </button>
+                          </div>
+                        );
+                      })()}
                       <p className="mb-1 text-sm font-semibold">Tu costo y margen (no sale en el documento)</p>
                       <p className="mb-2 text-[12px] text-muted">
                         Para renegociar sin volver a la solicitud. Costo = lo que te cotizó el proveedor ganador + flete.
@@ -585,40 +639,6 @@ function Page() {
                           })}
                         </tbody>
                       </table>
-                      {!closed && (
-                        <div className="mb-4">
-                          <button
-                            type="button"
-                            className="erp-btn"
-                            onClick={() =>
-                              reviseQuote({
-                                data: {
-                                  quoteId: qrow.id,
-                                  priceOffer: (qrow.price_offer as Offer) || "both",
-                                  creditDays: qrow.credit_days,
-                                  lines: qlines.map((l) => {
-                                    const rp = revPrices[l.product_id];
-                                    return {
-                                      productId: l.product_id,
-                                      qty: rp?.qty ?? Number(l.qty),
-                                      cashPrice: rp?.cash ?? Number(l.cash_price),
-                                      creditPrice: rp?.credit ?? Number(l.credit_price),
-                                    };
-                                  }),
-                                },
-                              })
-                                .then(() => {
-                                  setError(null);
-                                  return load();
-                                })
-                                .catch((e) => setError(humanError(e)))
-                            }
-                          >
-                            Renegociar precios (nueva revisión)
-                          </button>
-                          <p className="mt-1 text-[12px] text-muted">Guarda los precios nuevos, sube Rev. y queda lista para reimprimir / reenviar.</p>
-                        </div>
-                      )}
                       <p className="mb-2 text-sm font-semibold">¿Qué respondió el cliente?</p>
                       <p className="mb-3 text-[12px] text-muted">
                         Si aceptó, se abre el pedido. Si cotizaste ambos precios, indica si aceptó de contado o a crédito. Mora no entra aquí: corre del vencimiento al día de pago.

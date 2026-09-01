@@ -160,7 +160,7 @@ export function RequestFields({
                       onChange={(uom) => setDraft({ ...draft, lines: draft.lines.map((x, j) => (j === i ? { ...x, uom } : x)) })}
                     />
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-2 text-right">
                     <QtyField
                       value={line.qty}
                       onChange={(qtyN) => setDraft({ ...draft, lines: draft.lines.map((x, j) => (j === i ? { ...x, qty: qtyN } : x)) })}

@@ -73,6 +73,10 @@ export const listAudit = createServerFn({ method: "POST" })
     const userId = (data?.userId ?? "").trim();
     const from = (data?.from ?? "").slice(0, 10);
     const to = (data?.to ?? "").slice(0, 10);
+    // null (no cadena vacía concatenada) para que Postgres no intente castear
+    // "T00:00:00" a timestamptz cuando no hay filtro de fecha.
+    const fromTs = from ? `${from}T00:00:00` : null;
+    const toTs = to ? `${to}T23:59:59` : null;
     const limit = data?.limit ?? 100;
     const offset = data?.offset ?? 0;
     const rows = await sql<{
@@ -95,8 +99,8 @@ export const listAudit = createServerFn({ method: "POST" })
         and (${q} = '' or a.name ilike ${"%" + q + "%"} or a.detail ilike ${"%" + q + "%"})
         and (${action} = '' or a.action = ${action})
         and (${userId} = '' or a.user_id = ${userId})
-        and (${from} = '' or a.created_at >= ${from + "T00:00:00"}::timestamptz)
-        and (${to} = '' or a.created_at <= ${to + "T23:59:59"}::timestamptz)
+        and (${fromTs}::timestamptz is null or a.created_at >= ${fromTs}::timestamptz)
+        and (${toTs}::timestamptz is null or a.created_at <= ${toTs}::timestamptz)
       order by a.id desc
       limit ${limit} offset ${offset}
     `;
