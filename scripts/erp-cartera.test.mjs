@@ -177,7 +177,7 @@ test("cableado: el estado de cuenta calcula sobre cargo y muestra lo mismo que f
   assert.ok(ops.includes("capital: Math.max(0, cargo)"), "computeMora del estado de cuenta debe usar el cargo");
   assert.ok(!/const capital = saldo > 0\.009 \? saldo : cargo/.test(ops), "ya no debe alternar entre saldo y cargo");
   assert.ok(
-    ops.includes("Math.max(0, mora.interest - Number(inv.interest_invoiced)) + mora.fega"),
+    ops.includes("Math.max(0, mora.interest - intInvoiced) + mora.fega"),
     "liveMora debe ser interés nuevo + FEGA pendiente (lo mismo que facturaría la FI)",
   );
   // Un abono parcial no congela los días: solo la liquidación total detiene el interés.

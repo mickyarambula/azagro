@@ -98,9 +98,10 @@ test("cableado: el P&L por pedido usa TIIE de emisión y parámetros de Ajustes"
   const rep = src("src/lib/erp/reports.ts");
   assert.ok(rep.includes("financeCost({"), "computeDealPnl debe usar financeCost (comisión + Capa 1 + Capa 2)");
   assert.ok(rep.includes("issueDate"), "la TIIE de costo se toma de la fecha de emisión de la factura");
-  assert.ok(rep.includes("commissionRate: pol.asrCommission"), "la comisión sale de Ajustes, no quemada");
-  assert.ok(rep.includes("costSpread: pol.asrSpread"), "el spread de costo sale de Ajustes, no quemado");
-  assert.ok(rep.includes("financialDays = pol.creditDays"), "el plazo financiero sale de Ajustes");
+  // Primero la foto guardada en la factura; si no hay, los Ajustes de hoy.
+  assert.ok(rep.includes("snap.commissionRate ?? pol.asrCommission"), "la comisión sale de la foto de la factura o de Ajustes, no quemada");
+  assert.ok(rep.includes("snap.costSpread ?? pol.asrSpread"), "el spread de costo sale de la foto de la factura o de Ajustes");
+  assert.ok(rep.includes("snap.financialDays ?? pol.creditDays"), "el plazo financiero sale de la foto de la factura o de Ajustes");
   assert.ok(rep.includes("margin + mora + fxIncome - finance - discount"), "utilidad = margen + mora + dif. − financiero − descuento");
   assert.ok(!rep.includes("finance_spread"), "ya no debe usarse el spread de línea como costo del circuito");
 });

@@ -265,6 +265,15 @@ export const saveOrder = createServerFn({ method: "POST" })
       if (limit > 0 && used + total > limit) {
         // Solo un administrador puede autorizar exceder el límite, y queda en bitácora.
         if (!(data.overrideCredit && member.role === "admin")) {
+          // El rechazo también deja rastro: quién intentó y con qué números.
+          await writeAudit(sql, {
+            companyId,
+            userId: context.userId,
+            action: "rechazado-credito",
+            entity: "partner",
+            entityId: data.partnerId,
+            detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+          });
           throw new Error(
             `Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}. Un administrador puede autorizar el exceso.`,
           );
@@ -284,9 +293,23 @@ export const saveOrder = createServerFn({ method: "POST" })
     let name = (data.name ?? "").trim().toUpperCase();
     const state = data.confirm ? "confirmed" : "draft";
 
+    let auditEdit: { detail: string; folio: string } | null = null;
     if (id) {
-      const current = await sql<{ state: string; name: string }>`
-        select state, name from sales_orders where id = ${id} and company_id = ${companyId}
+      const current = await sql<{
+        state: string;
+        name: string;
+        partner_id: number;
+        date: string;
+        total: string;
+        currency: string;
+        fx_rate: string;
+        credit_due: string | null;
+        invoice_due: string | null;
+        delivery_to: string;
+      }>`
+        select state, name, partner_id, date::text, total::text, currency, fx_rate::text,
+          credit_due::text, invoice_due::text, coalesce(delivery_to,'') as delivery_to
+        from sales_orders where id = ${id} and company_id = ${companyId}
       `;
       if (!current[0]) throw new Error("Pedido no encontrado");
       if (current[0].state !== "draft" && current[0].state !== "confirmed") {
@@ -296,6 +319,41 @@ export const saveOrder = createServerFn({ method: "POST" })
         throw new Error("Pedido confirmado: no vuelve a borrador");
       }
       if (!name) name = current[0].name;
+      // El pedido NO se congela, pero cada cambio queda con anterior → nuevo
+      // (crítico para pedidos ya confirmados: nadie mueve precios sin rastro).
+      const oldLines = await sql<{ product_id: number; code: string; qty: string; unit_price: string }>`
+        select sl.product_id, p.code, sl.qty::text, sl.unit_price::text
+        from sales_lines sl join products p on p.id = sl.product_id
+        where sl.so_id = ${id}
+      `;
+      const cambios: string[] = [];
+      if (current[0].partner_id !== data.partnerId) cambios.push(`cliente ${current[0].partner_id} → ${data.partnerId}`);
+      if (current[0].date !== data.date) cambios.push(`fecha ${current[0].date} → ${data.date}`);
+      if (Math.abs(Number(current[0].total) - total) > 0.009) cambios.push(`total ${Number(current[0].total)} → ${total}`);
+      if (current[0].currency !== data.currency) cambios.push(`moneda ${current[0].currency} → ${data.currency}`);
+      if (Number(current[0].fx_rate) !== data.fxRate) cambios.push(`TC ${Number(current[0].fx_rate)} → ${data.fxRate}`);
+      if ((current[0].credit_due ?? "") !== dues.creditDue) cambios.push(`plazo financiero ${current[0].credit_due ?? "—"} → ${dues.creditDue}`);
+      if ((current[0].invoice_due ?? "") !== dues.invoiceDue) cambios.push(`vencimiento ${current[0].invoice_due ?? "—"} → ${dues.invoiceDue}`);
+      for (const nl of data.lines) {
+        const ol = oldLines.find((o) => o.product_id === nl.productId);
+        if (!ol) {
+          cambios.push(`+ partida producto ${nl.productId} (${nl.qty} × ${nl.unitPrice})`);
+          continue;
+        }
+        if (Number(ol.qty) !== nl.qty) cambios.push(`${ol.code} cant ${Number(ol.qty)} → ${nl.qty}`);
+        if (Number(ol.unit_price) !== nl.unitPrice) cambios.push(`${ol.code} precio ${Number(ol.unit_price)} → ${nl.unitPrice}`);
+      }
+      for (const ol of oldLines) {
+        if (!data.lines.some((nl) => nl.productId === ol.product_id)) cambios.push(`− partida ${ol.code}`);
+      }
+      const nextState = data.confirm ? "confirmed" : current[0].state;
+      if (current[0].state !== nextState) cambios.push(`estado ${current[0].state} → ${nextState}`);
+      if (cambios.length) {
+        auditEdit = {
+          folio: name,
+          detail: `${current[0].state === "confirmed" ? "CONFIRMADO · " : ""}${cambios.join(" · ")}`,
+        };
+      }
       await sql`
         update sales_orders set
           name = ${name},
@@ -355,6 +413,27 @@ export const saveOrder = createServerFn({ method: "POST" })
       products: data.lines.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
       locationId: data.locationId,
     });
+    if (auditEdit) {
+      await writeAudit(sql, {
+        companyId,
+        userId: context.userId,
+        action: "editar-pedido",
+        entity: "sale",
+        entityId: id,
+        name: auditEdit.folio,
+        detail: auditEdit.detail,
+      });
+    } else if (!data.id) {
+      await writeAudit(sql, {
+        companyId,
+        userId: context.userId,
+        action: "crear-pedido",
+        entity: "sale",
+        entityId: id,
+        name,
+        detail: `Total ${total.toFixed(2)} ${data.currency} · ${data.lines.length} partidas${data.confirm ? " · confirmado" : ""}`,
+      });
+    }
     return { id, name, state: data.confirm ? "confirmed" : "draft" };
   });
 

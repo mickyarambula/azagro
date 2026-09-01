@@ -1,6 +1,24 @@
-import type { getSql } from "@/lib/db";
+import { getSql } from "@/lib/db";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
+
+/**
+ * Deja rastro de un intento RECHAZADO. Usa una conexión fresca (no la de la
+ * transacción en curso) para que el registro sobreviva al rollback que el
+ * propio rechazo va a provocar. Nunca debe romper el rechazo: si falla, se
+ * ignora.
+ */
+async function logDenied(companyId: number, userId: string, what: string) {
+  try {
+    const fresh = await getSql();
+    await fresh`
+      insert into audit_log (company_id, user_id, action, entity, name, detail)
+      values (${companyId}, ${userId}, 'rechazado-permiso', 'acceso', '', ${what})
+    `;
+  } catch {
+    /* la bitácora no debe impedir el rechazo */
+  }
+}
 
 export const MODULES = [
   { id: "dashboard", label: "Tablero" },
@@ -218,14 +236,23 @@ export async function loadAcl(sql: Sql, memberId: number, role: string) {
 }
 
 export async function assertCan(sql: Sql, userId: string, module: ModuleId, need: AclLevel) {
-  const m = await sql<{ id: number; role: string; status: string }>`
-    select id, role, status from members where user_id = ${userId} limit 1
+  const m = await sql<{ id: number; company_id: number; role: string; status: string }>`
+    select id, company_id, role, status from members where user_id = ${userId} limit 1
   `;
-  if (!m[0] || m[0].status !== "active") throw new Error("Sin acceso a la empresa");
+  if (!m[0] || m[0].status !== "active") {
+    if (m[0]) await logDenied(m[0].company_id, userId, `usuario desactivado intentó ${module}:${need}`);
+    throw new Error("Sin acceso a la empresa");
+  }
   const acl = await loadAcl(sql, m[0].id, m[0].role);
   const have = acl[module];
-  if (need === "view" && have === "none") throw new Error("Sin permiso para ver este módulo");
-  if (need === "edit" && have !== "edit") throw new Error("Sin permiso para editar este módulo");
+  if (need === "view" && have === "none") {
+    await logDenied(m[0].company_id, userId, `sin permiso de ver ${module} (rol ${m[0].role})`);
+    throw new Error("Sin permiso para ver este módulo");
+  }
+  if (need === "edit" && have !== "edit") {
+    await logDenied(m[0].company_id, userId, `sin permiso de editar ${module} (rol ${m[0].role})`);
+    throw new Error("Sin permiso para editar este módulo");
+  }
   return m[0];
 }
 

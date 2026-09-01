@@ -5,7 +5,7 @@ import { dbSource, getSql, withTx, type Sql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { foldName } from "@/lib/erp/catalog";
-import { postStock } from "@/lib/erp/stock";
+import { ensureInvoiceExtras, postStock } from "@/lib/erp/stock";
 
 async function cid(sql: Sql, userId: string) {
   const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
@@ -145,10 +145,12 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
     const boot = await getSql();
     await boot`alter table invoices add column if not exists cutover_key text`;
     await boot`alter table invoices add column if not exists opening_paid numeric(14,2) not null default 0`;
+    await ensureInvoiceExtras(boot);
     await boot.query(
       `create unique index if not exists invoices_cutover_key_uq on invoices (company_id, cutover_key) where cutover_key is not null`,
     );
-    return withTx(async (sql) => {
+    try {
+    return await withTx(async (sql) => {
       await assertCan(sql, context.userId, "settings", "edit");
       const companyId = await cid(sql, context.userId);
       const parsed = parseOpenInvoices(data.csv);
@@ -178,10 +180,10 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         // en adelante es cargo − abono de corte − pagos capturados en el sistema.
         const openingPaid = Math.max(0, cargo - r.saldo);
         await sql`
-          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid)
+          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, created_by)
           values (
             ${companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}, ${r.date}, ${r.due}, 'open',
-            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}
+            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${context.userId}
           )
         `;
         inserted += 1;
@@ -196,7 +198,32 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
       });
       return { inserted, skipped };
     });
+    } catch (err) {
+      // La importación fallida (que se revierte completa) también deja rastro.
+      await logImportFailure(boot, context.userId, "Saldos abiertos Compaq", err);
+      throw err;
+    }
   });
+
+/** Registra en bitácora una importación que tronó (fuera de la transacción que se revirtió). */
+async function logImportFailure(boot: Sql, userId: string, what: string, err: unknown) {
+  try {
+    const me = await boot<{ company_id: number }>`
+      select company_id from members where user_id = ${userId} and status = 'active' limit 1
+    `;
+    if (!me[0]) return;
+    await writeAudit(boot, {
+      companyId: me[0].company_id,
+      userId,
+      action: "importacion-fallida",
+      entity: "cutover",
+      name: what,
+      detail: (err instanceof Error ? err.message : "Error").slice(0, 400),
+    });
+  } catch {
+    /* el registro del fallo nunca debe tapar el error original */
+  }
+}
 
 const stockRow = z.object({
   productCode: z.string(),
@@ -232,7 +259,8 @@ export const applyStockSnap = createServerFn({ method: "POST" })
        on stock_moves (company_id, product_id, location_to)
        where move_type = 'opening' and origin = 'Corte Compaq'`,
     );
-    return withTx(async (sql) => {
+    try {
+    return await withTx(async (sql) => {
       await assertCan(sql, context.userId, "inventory", "edit");
       const companyId = await cid(sql, context.userId);
       const parsed = parseStockSnap(data.csv);
@@ -282,4 +310,8 @@ export const applyStockSnap = createServerFn({ method: "POST" })
       });
       return { inserted, skipped };
     });
+    } catch (err) {
+      await logImportFailure(boot, context.userId, "Existencias de corte", err);
+      throw err;
+    }
   });

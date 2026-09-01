@@ -289,6 +289,15 @@ export const createRequest = createServerFn({ method: "POST" })
       products: data.lines.map((l) => ({ productId: l.productId })),
       locationId: data.locationId ?? null,
     });
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "crear-solicitud",
+      entity: "request",
+      entityId: row[0]!.id,
+      name,
+      detail: `${data.lines.length} partidas · entrega ${data.deliveryMode}`,
+    });
     return { id: row[0]!.id, name };
   });
 
@@ -346,6 +355,14 @@ export const updateRequest = createServerFn({ method: "POST" })
       kind: "sell",
       products: data.lines.map((l) => ({ productId: l.productId })),
       locationId: data.locationId ?? null,
+    });
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "editar-solicitud",
+      entity: "request",
+      entityId: data.id,
+      detail: `${data.lines.length} partidas`,
     });
     return { id: data.id };
   });
@@ -455,6 +472,13 @@ export const pickVendor = createServerFn({ method: "POST" })
     const sql = await getSql();
     await assertCan(sql, context.userId, "purchases", "edit");
     const companyId = await cid(sql, context.userId);
+    const before = await sql<{ cost: string; supplier_id: number | null; name: string; code: string }>`
+      select l.cost::text, l.supplier_id, r.name, p.code
+      from customer_request_lines l
+      join customer_requests r on r.id = l.request_id
+      join products p on p.id = l.product_id
+      where l.request_id = ${data.requestId} and l.product_id = ${data.productId} and r.company_id = ${companyId}
+    `;
     await sql`
       update customer_request_lines set cost = ${data.unitPrice}, supplier_id = ${data.supplierId}
       where request_id = ${data.requestId} and product_id = ${data.productId}
@@ -466,6 +490,17 @@ export const pickVendor = createServerFn({ method: "POST" })
       kind: "buy",
       products: [{ productId: data.productId, unitPrice: data.unitPrice }],
     });
+    if (before[0]) {
+      await writeAudit(sql, {
+        companyId,
+        userId: context.userId,
+        action: "elegir-proveedor",
+        entity: "request",
+        entityId: data.requestId,
+        name: before[0].name,
+        detail: `${before[0].code}: proveedor ${before[0].supplier_id ?? "—"} → ${data.supplierId} · costo ${Number(before[0].cost)} → ${data.unitPrice}`,
+      });
+    }
     return { ok: true };
   });
 
@@ -487,12 +522,35 @@ export const saveLineMargin = createServerFn({ method: "POST" })
     if (me.acl.quotes !== "edit" || !canSeeMargins(me.role)) {
       throw new Error("Sin permiso para cambiar márgenes");
     }
+    const before = await sql<{ margin_mode: string; margin_pct: string; margin_nominal: string; name: string; code: string }>`
+      select coalesce(l.margin_mode,'pct') as margin_mode, coalesce(l.margin_pct,0)::text as margin_pct,
+        coalesce(l.margin_nominal,0)::text as margin_nominal, r.name, p.code
+      from customer_request_lines l
+      join customer_requests r on r.id = l.request_id
+      join products p on p.id = l.product_id
+      where l.request_id = ${data.requestId} and l.product_id = ${data.productId} and r.company_id = ${companyId}
+    `;
     await sql`
       update customer_request_lines
       set margin_mode = ${data.marginMode}, margin_pct = ${data.marginPct}, margin_nominal = ${data.marginNominal}
       where request_id = ${data.requestId} and product_id = ${data.productId}
         and request_id in (select id from customer_requests where company_id = ${companyId})
     `;
+    if (before[0]) {
+      const old = before[0].margin_mode === "nominal" ? `$${Number(before[0].margin_nominal)}` : `${Number(before[0].margin_pct)}%`;
+      const nuevo = data.marginMode === "nominal" ? `$${data.marginNominal}` : `${data.marginPct}%`;
+      if (old !== nuevo) {
+        await writeAudit(sql, {
+          companyId,
+          userId: context.userId,
+          action: "margen",
+          entity: "request",
+          entityId: data.requestId,
+          name: before[0].name,
+          detail: `${before[0].code}: margen ${old} → ${nuevo}`,
+        });
+      }
+    }
     return { ok: true };
   });
 
@@ -523,6 +581,16 @@ export const applyCheapest = createServerFn({ method: "POST" })
         set cost = ${w.unit_price}, supplier_id = ${w.partner_id}, pick_reason = 'precio'
         where request_id = ${data.requestId} and product_id = ${productId}
       `;
+    }
+    if (best.size > 0) {
+      await writeAudit(sql, {
+        companyId,
+        userId: context.userId,
+        action: "elegir-proveedor",
+        entity: "request",
+        entityId: data.requestId,
+        detail: `Automático (más barato): ${best.size} partidas asignadas al mejor postor del RFQ`,
+      });
     }
     return { ok: true, n: best.size };
   });

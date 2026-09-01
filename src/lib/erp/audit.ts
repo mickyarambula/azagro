@@ -48,13 +48,33 @@ export async function writeAudit(
   `;
 }
 
-export const listAudit = createServerFn({ method: "GET" })
+export const listAudit = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .handler(async ({ context }) => {
+  .validator(
+    z
+      .object({
+        q: z.string().optional(),
+        action: z.string().optional(),
+        userId: z.string().optional(),
+        from: z.string().optional(),
+        to: z.string().optional(),
+        limit: z.number().int().min(1).max(500).optional(),
+        offset: z.number().int().min(0).optional(),
+      })
+      .optional(),
+  )
+  .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
     await assertCan(sql, context.userId, "settings", "view");
     await ensureAudit(sql);
+    const q = (data?.q ?? "").trim();
+    const action = (data?.action ?? "").trim();
+    const userId = (data?.userId ?? "").trim();
+    const from = (data?.from ?? "").slice(0, 10);
+    const to = (data?.to ?? "").slice(0, 10);
+    const limit = data?.limit ?? 100;
+    const offset = data?.offset ?? 0;
     const rows = await sql<{
       id: number;
       user_id: string;
@@ -72,8 +92,20 @@ export const listAudit = createServerFn({ method: "GET" })
       from audit_log a
       left join members m on m.user_id = a.user_id and m.company_id = a.company_id
       where a.company_id = ${companyId}
+        and (${q} = '' or a.name ilike ${"%" + q + "%"} or a.detail ilike ${"%" + q + "%"})
+        and (${action} = '' or a.action = ${action})
+        and (${userId} = '' or a.user_id = ${userId})
+        and (${from} = '' or a.created_at >= ${from + "T00:00:00"}::timestamptz)
+        and (${to} = '' or a.created_at <= ${to + "T23:59:59"}::timestamptz)
       order by a.id desc
-      limit 200
+      limit ${limit} offset ${offset}
     `;
-    return { rows };
+    const actions = await sql<{ action: string }>`
+      select distinct action from audit_log where company_id = ${companyId} order by action
+    `;
+    const users = await sql<{ user_id: string; who: string }>`
+      select m.user_id, coalesce(nullif(m.display_name,''), nullif(m.email,''), m.user_id) as who
+      from members m where m.company_id = ${companyId} order by who
+    `;
+    return { rows, actions: actions.map((a) => a.action), users, limit, offset };
   });

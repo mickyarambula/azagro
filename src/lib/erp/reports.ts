@@ -35,6 +35,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   // La factura de venta manda: su fecha de emisión fija la TIIE de costo, y
   // sus fechas de pago/plazo financiero fijan la Capa 2 y el pronto pago.
   await sql`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
+  await sql`alter table invoices add column if not exists params_snap text not null default ''`;
   const fv = await sql<{
     date: string;
     due_date: string;
@@ -43,24 +44,39 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     amount: string;
     residual: string;
     fx_result: string;
+    params_snap: string;
   }>`
     select date::text, due_date::text, credit_due::text, paid_date::text,
-      amount::text, residual::text, coalesce(fx_result,0)::text as fx_result
+      amount::text, residual::text, coalesce(fx_result,0)::text as fx_result,
+      coalesce(params_snap,'') as params_snap
     from invoices
     where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
     order by id desc limit 1
   `;
   const today = new Date().toISOString().slice(0, 10);
   const issueDate = fv[0]?.date ?? so[0].date;
+  // Si la factura guardó su foto de parámetros al emitirse, la utilidad se
+  // calcula con ESOS valores: cambiar Ajustes o la tabla TIIE después no
+  // reescribe la historia de operaciones ya facturadas.
+  let snap: { tiieIssue?: number; costSpread?: number; commissionRate?: number; financialDays?: number; earlyPayDays?: number } = {};
+  try {
+    if (fv[0]?.params_snap) snap = JSON.parse(fv[0].params_snap) as typeof snap;
+  } catch {
+    snap = {};
+  }
   const tiieRows = await sql<{ date: string; rate: string }>`
     select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
   `;
-  const tiieIssue = nearestRate(
-    tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
-    issueDate,
-    pol.defaultTiie,
-  );
-  const financialDays = pol.creditDays;
+  const tiieIssue =
+    snap.tiieIssue ??
+    nearestRate(
+      tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
+      issueDate,
+      pol.defaultTiie,
+    );
+  const costSpread = snap.costSpread ?? pol.asrSpread;
+  const commissionRate = snap.commissionRate ?? pol.asrCommission;
+  const financialDays = snap.financialDays ?? pol.creditDays;
   const exceededEnd = fv[0]?.paid_date && fv[0].paid_date < today ? fv[0].paid_date : today;
   const daysExceeded = fv[0]
     ? Math.max(0, daysBetween(fv[0].credit_due || fv[0].due_date, exceededEnd))
@@ -114,8 +130,8 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     const fin = financeCost({
       supplierCost: cogs,
       saleCapital: sale,
-      commissionRate: pol.asrCommission,
-      costSpread: pol.asrSpread,
+      commissionRate,
+      costSpread,
       tiieAtIssue: tiieIssue,
       financialDays,
       daysExceeded,
@@ -184,10 +200,10 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
         cargo: Number(fv[0].amount),
         issueDate: fv[0].date,
         payDate: fv[0].paid_date,
-        thresholdDays: pol.earlyPayDays,
+        thresholdDays: snap.earlyPayDays ?? pol.earlyPayDays,
         financialDays,
         tiieAtIssue: tiieIssue,
-        costSpread: pol.asrSpread,
+        costSpread,
       })
     : { applies: false, bonus: 0, days: 0, lived: 0, rate: 0 };
   const discount = bono.applies ? bono.bonus : 0;
@@ -215,7 +231,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     name: so[0].name,
     currency: so[0].currency,
     creditDays: so[0].credit_days,
-    financeRate: tiieIssue + pol.asrSpread,
+    financeRate: tiieIssue + costSpread,
     tiieIssue,
     financialDays,
     daysExceeded,

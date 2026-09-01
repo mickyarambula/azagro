@@ -8,7 +8,7 @@ import { activeMember, assertAdmin, assertCan, canSeeCosts } from "@/lib/erp/acl
 import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
-import { refreshInvoiceResidual } from "@/lib/erp/stock";
+import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -488,6 +488,15 @@ export const createQuote = createServerFn({ method: "POST" })
       kind: "sell",
       products: priced.map((l) => ({ productId: l.productId, unitPrice: l.unit })),
     });
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "crear-cotizacion",
+      entity: "quote",
+      entityId: q[0]!.id,
+      name,
+      detail: `Total ${total.toFixed(2)} ${data.currency} · ${priced.length} partidas · ${state === "sent" ? "enviada" : "borrador"}`,
+    });
     return { id: q[0]!.id, name, state };
   });
 
@@ -525,6 +534,14 @@ export const reviseQuote = createServerFn({ method: "POST" })
     }
     const offer = data.priceOffer ?? q[0].price_offer;
     const total = data.lines.reduce((s, l) => s + l.qty * (offer === "cash" ? l.cashPrice : l.creditPrice || l.cashPrice), 0);
+    // Antes de sobreescribir, los precios de la revisión anterior quedan en
+    // bitácora: cada renegociación es reconstruible.
+    const oldLines = await sql<{ product_id: number; code: string; qty: string; cash_price: string; credit_price: string; unit_price: string }>`
+      select ql.product_id, p.code, ql.qty::text, coalesce(nullif(ql.cash_price,0), ql.unit_price)::text as cash_price,
+        coalesce(nullif(ql.credit_price,0), ql.unit_price)::text as credit_price, ql.unit_price::text
+      from quote_lines ql join products p on p.id = ql.product_id
+      where ql.quote_id = ${q[0].id}
+    `;
     await sql`
       update quotes
       set revision = ${q[0].revision + 1},
@@ -535,14 +552,31 @@ export const reviseQuote = createServerFn({ method: "POST" })
           state = 'sent'
       where id = ${q[0].id}
     `;
+    const cambios: string[] = [];
     for (const line of data.lines) {
       const unit = offer === "cash" ? line.cashPrice : line.creditPrice || line.cashPrice;
+      const prev = oldLines.find((o) => o.product_id === line.productId);
+      if (prev) {
+        if (Number(prev.qty) !== line.qty) cambios.push(`${prev.code} cant ${Number(prev.qty)} → ${line.qty}`);
+        if (Number(prev.cash_price) !== line.cashPrice || Number(prev.credit_price) !== line.creditPrice) {
+          cambios.push(`${prev.code} precio ${Number(prev.cash_price)}/${Number(prev.credit_price)} → ${line.cashPrice}/${line.creditPrice}`);
+        }
+      }
       await sql`
         update quote_lines
         set qty = ${line.qty}, unit_price = ${unit}, cash_price = ${line.cashPrice}, credit_price = ${line.creditPrice}
         where quote_id = ${q[0].id} and product_id = ${line.productId}
       `;
     }
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "renegociar-cotizacion",
+      entity: "quote",
+      entityId: q[0].id,
+      name: q[0].name,
+      detail: `Rev ${q[0].revision} → ${q[0].revision + 1}${cambios.length ? ` · ${cambios.join(" · ")}` : " · sin cambio de precios"}`,
+    });
     return { id: q[0].id, name: q[0].name, revision: q[0].revision + 1 };
   });
 
@@ -562,6 +596,7 @@ export const decideQuote = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "quotes", "edit");
+    await ensureInvoiceExtras(sql);
     await sql`alter table quotes add column if not exists price_offer text not null default 'both'`;
     await sql`alter table quotes add column if not exists credit_days integer not null default 0`;
     const q = await sql<{
@@ -723,8 +758,8 @@ export const decideQuote = createServerFn({ method: "POST" })
         const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${cid} and kind = 'supplier'`;
         const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
         await sql`
-          insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, currency)
-          values (${cid}, 'supplier', ${iname}, ${supplierId}, ${due.toISOString().slice(0, 10)}, 'open', ${poTotal}, ${poTotal}, ${poName}, ${q[0].currency})
+          insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, currency, created_by)
+          values (${cid}, 'supplier', ${iname}, ${supplierId}, ${due.toISOString().slice(0, 10)}, 'open', ${poTotal}, ${poTotal}, ${poName}, ${q[0].currency}, ${context.userId})
         `;
         pos.push(poName);
       }
@@ -818,7 +853,21 @@ export const saveBankOpening = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "banks", "edit");
+    const before = await sql<{ opening: string; name: string }>`
+      select opening::text, name from banks where id = ${data.bankId} and company_id = ${cid}
+    `;
     await sql`update banks set opening = ${data.opening} where id = ${data.bankId} and company_id = ${cid}`;
+    if (before[0] && Number(before[0].opening) !== data.opening) {
+      await writeAudit(sql, {
+        companyId: cid,
+        userId: context.userId,
+        action: "saldo-banco",
+        entity: "bank",
+        entityId: data.bankId,
+        name: before[0].name,
+        detail: `Saldo inicial ${Number(before[0].opening)} → ${data.opening}`,
+      });
+    }
     return { ok: true };
   });
 
@@ -920,6 +969,7 @@ export async function applyInvoicePayment(
       asOf: payDate,
       paidDate: payDate,
       requireCharge: false,
+      userId: opts.userId,
     });
   }
 
@@ -964,10 +1014,10 @@ export async function applyInvoicePayment(
       `;
       fxDoc = `ATC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
       await sql`
-        insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id)
+        insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id, created_by, calc)
         values (
           ${opts.companyId}, 'customer', ${fxDoc}, ${inv[0].partner_id}, ${payDate}, ${payDate}, 'open',
-          ${-fxDiff}, ${-fxDiff}, ${"Ajuste TC " + inv[0].name}, 'fx', 'MXN', ${inv[0].order_id}
+          ${-fxDiff}, ${-fxDiff}, ${"Ajuste TC " + inv[0].name}, 'fx', 'MXN', ${inv[0].order_id}, ${opts.userId}, ${calc}
         )
       `;
       fxNote = `${fxDiff < 0 ? "POR COBRAR" : "POR DEVOLVER"} ${fxDoc}: ${Math.abs(fxDiff).toFixed(2)}`;
@@ -1090,6 +1140,7 @@ export const addBankMove = createServerFn({ method: "POST" })
     const boot = await getSql();
     await boot`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
     await boot`alter table invoices add column if not exists fx_treatment text not null default ''`;
+    await ensureInvoiceExtras(boot);
     return withTx(async (sql) => {
       const cid = await companyOf(sql, context.userId);
       await assertCan(sql, context.userId, "banks", "edit");
@@ -1178,7 +1229,12 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       throw new Error("Sin permiso para ver la cartera");
     }
     const pol = await policy(sql, cid);
+    await ensureInvoiceExtras(sql);
     const asOf = (data.asOf || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    // Corte histórico: se reconstruye el estado REAL de ese día — solo las
+    // facturas que existían, solo los abonos hasta esa fecha, y las FI
+    // emitidas hasta entonces (con su desglose interés/FEGA guardado).
+    const historico = asOf < new Date().toISOString().slice(0, 10);
     const tiieRows = await sql<{ date: string; rate: string }>`
       select date::text, rate::text from tiie_rates where company_id = ${cid} order by date
     `;
@@ -1228,14 +1284,21 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         fx_invoiced: string;
         paid_date: string | null;
         credit_days: number;
+        opening_paid: string;
       }>`
         select id, name, kind, date::text, due_date::text, credit_due::text, amount::text, residual::text, state, origin,
           currency, amount_fx::text, fx_agreed::text, fx_paid::text, inv_class, fega_charged,
           interest_invoiced::text, fx_invoiced::text, paid_date::text,
-          coalesce(credit_days, 0)::int as credit_days
+          coalesce(credit_days, 0)::int as credit_days,
+          coalesce(opening_paid, 0)::text as opening_paid
         from invoices
         where company_id = ${cid} and partner_id = ${partner.id}
         order by date, id
+      `;
+      const fis = await sql<{ origin: string; date: string; int_part: string; fega_part: string }>`
+        select origin, date::text, coalesce(int_part,0)::text as int_part, coalesce(fega_part,0)::text as fega_part
+        from invoices
+        where company_id = ${cid} and partner_id = ${partner.id} and inv_class = 'interest'
       `;
       const lines = await sql<{
         invoice_id: number;
@@ -1268,7 +1331,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         order by p.date, pa.id
       `;
 
-      const rows = invoices.map((inv) => {
+      const visibles = historico ? invoices.filter((i) => i.date <= asOf) : invoices;
+      const rows = visibles.map((inv) => {
         // Dos fechas por factura: due_date es el vencimiento VISIBLE al cliente
         // (120 d); credit_due es el plazo financiero real (150 d) desde el que
         // corre la mora y del que se toma la TIIE. Sin credit_due (corte
@@ -1276,14 +1340,25 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         const moraDue = inv.credit_due || inv.due_date;
         const tiie = nearestRate(tiieTable, moraDue, pol.defaultTiie);
         const cargo = Number(inv.amount);
-        const saldo = Number(inv.residual);
         const productDoc = inv.kind === "customer" && (inv.inv_class || "product") === "product";
-        const allocs = pays.filter((p) => p.invoice_id === inv.id);
+        const allocsAll = pays.filter((p) => p.invoice_id === inv.id);
+        const allocs = historico ? allocsAll.filter((p) => p.date <= asOf) : allocsAll;
         const abono = allocs.reduce((s, p) => s + Number(p.amount), 0);
-        const fechaAbono = allocs.length ? allocs[allocs.length - 1]!.date : inv.paid_date;
+        // En corte histórico el saldo se reconstruye con los abonos de ESE día
+        // (cargo − abono del corte Compaq − pagos hasta la fecha).
+        const saldo = historico && cargo > 0
+          ? Math.max(0, cargo - Number(inv.opening_paid) - abono)
+          : Number(inv.residual);
+        const fechaAbono = allocs.length ? allocs[allocs.length - 1]!.date : historico ? null : inv.paid_date;
         // El interés corre sobre el CARGO original hasta la liquidación total:
         // un abono parcial no lo congela ni reduce la base (regla del Excel).
-        const paidForCalc = saldo <= 0.009 ? (inv.paid_date ?? fechaAbono) : null;
+        const paidForCalc = saldo <= 0.009 ? (historico ? fechaAbono : (inv.paid_date ?? fechaAbono)) : null;
+        // FI emitidas hasta el corte, con su desglose guardado interés/FEGA.
+        const misFis = fis.filter((f) => f.origin === "Mora " + inv.name && (!historico || f.date <= asOf));
+        const intInvoiced = historico
+          ? misFis.reduce((s, f) => s + Number(f.int_part), 0)
+          : Number(inv.interest_invoiced);
+        const fegaCharged = historico ? misFis.some((f) => Number(f.fega_part) > 0) : inv.fega_charged;
         const mora = productDoc
           ? computeMora({
               capital: Math.max(0, cargo),
@@ -1293,11 +1368,11 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               tiieAtDue: tiie,
               spread: pol.collectionSpread,
               fegaRate: pol.fegaRate,
-              fegaAlreadyCharged: inv.fega_charged,
+              fegaAlreadyCharged: fegaCharged,
             })
           : { daysOverdue: 0, annualRate: tiie + pol.collectionSpread, interest: 0, fega: 0, mora: 0, tiie, spread: pol.collectionSpread, capital: cargo, endDate: asOf };
         // Lo mismo que facturaría la FI hoy: interés nuevo + FEGA si falta.
-        const liveMora = Math.max(0, mora.interest - Number(inv.interest_invoiced)) + mora.fega;
+        const liveMora = Math.max(0, mora.interest - intInvoiced) + mora.fega;
         const fxDiff = inv.currency === "USD"
           ? fxDifferential(Number(inv.amount_fx), Number(inv.fx_agreed), inv.fx_paid ? Number(inv.fx_paid) : null)
           : 0;
@@ -1391,8 +1466,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       });
 
       const customerRows = rows.filter((r) => r.kind === "customer");
-      const ar = customerRows.reduce((s, r) => s + Number(r.residual), 0);
-      const ap = rows.filter((r) => r.kind === "supplier").reduce((s, r) => s + Number(r.residual), 0);
+      const ar = customerRows.reduce((s, r) => s + r.saldo, 0);
+      const ap = rows.filter((r) => r.kind === "supplier").reduce((s, r) => s + r.saldo, 0);
       const byCurrency = ["MXN", "USD"].map((cur) => {
         const set = customerRows.filter((r) => (r.currency || "MXN") === cur && (r.inv_class || "product") === "product");
         return {
@@ -1424,6 +1499,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
     const fegaSplit = splitFegaBundle(pol.fegaRate, pol.commissionRate);
     return {
       asOf,
+      historico,
       policy: {
         ...pol,
         commissionRate: fegaSplit.commission,
@@ -1438,9 +1514,10 @@ export async function issueMoraInvoice(
   sql: Sql,
   companyId: number,
   invoiceId: number,
-  opts?: { asOf?: string; paidDate?: string | null; requireCharge?: boolean },
+  opts?: { asOf?: string; paidDate?: string | null; requireCharge?: boolean; userId?: string },
 ) {
   const pol = await policy(sql, companyId);
+  await ensureInvoiceExtras(sql);
   const asOf = (opts?.asOf || new Date().toISOString().slice(0, 10)).slice(0, 10);
   const inv = await sql<{
     id: number;
@@ -1505,15 +1582,26 @@ export async function issueMoraInvoice(
     if (opts?.requireCharge !== false) throw new Error("No hay mora nueva por facturar");
     return { name: null as string | null, charge: 0, formula };
   }
+  // La FI guarda su cálculo COMPLETO: aunque mañana cambien la tabla TIIE o
+  // los parámetros, este número sigue siendo explicable tal como se emitió.
+  const calc = [
+    formula,
+    `TIIE ${(tiie * 100).toFixed(4)}% (al ${moraDue}) + spread ${(pol.collectionSpread * 100).toFixed(2)}%`,
+    `capital (cargo original) ${Number(inv[0].amount).toFixed(2)} · ${bill.daysOverdue} d vencidos`,
+    `interés nuevo ${bill.interestNew.toFixed(2)} (ya facturado antes: ${Number(inv[0].interest_invoiced).toFixed(2)})`,
+    `FEGA ${bill.fegaNew.toFixed(2)} (tasa ${(pol.fegaRate * 100).toFixed(2)}%${inv[0].fega_charged ? ", ya cobrado antes" : ""})`,
+  ].join(" · ");
   const n = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${companyId}`;
   const name = `FI-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
   await sql`
     insert into invoices (
-      company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id
+      company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id,
+      created_by, calc, int_part, fega_part
     )
     values (
       ${companyId}, 'customer', ${name}, ${inv[0].partner_id}, ${asOf}, ${asOf}, 'open',
-      ${bill.charge}, ${bill.charge}, ${"Mora " + inv[0].name}, 'interest', 'MXN', ${inv[0].order_id}
+      ${bill.charge}, ${bill.charge}, ${"Mora " + inv[0].name}, 'interest', 'MXN', ${inv[0].order_id},
+      ${opts?.userId ?? ""}, ${calc}, ${bill.interestNew}, ${bill.fegaNew}
     )
   `;
   // Acumulados por separado: el interés facturado no debe mezclarse con el
@@ -1524,6 +1612,17 @@ export async function issueMoraInvoice(
       fega_charged = fega_charged or ${bill.fegaNew > 0}
     where id = ${inv[0].id}
   `;
+  if (opts?.userId) {
+    await writeAudit(sql, {
+      companyId,
+      userId: opts.userId,
+      action: "facturar-mora",
+      entity: "invoice",
+      entityId: inv[0].id,
+      name,
+      detail: calc,
+    });
+  }
   return { name, charge: bill.charge, formula };
 }
 
@@ -1534,17 +1633,8 @@ export const invoiceLiveMora = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "credit", "edit");
-    const r = await issueMoraInvoice(sql, cid, data.invoiceId, { asOf: data.asOf, requireCharge: true });
-    await writeAudit(sql, {
-      companyId: cid,
-      userId: context.userId,
-      action: "facturar-mora",
-      entity: "invoice",
-      entityId: data.invoiceId,
-      name: r.name ?? "",
-      detail: `Cargo ${r.charge}`,
-    });
-    return r;
+    // issueMoraInvoice guarda el cálculo en la FI y escribe la bitácora.
+    return issueMoraInvoice(sql, cid, data.invoiceId, { asOf: data.asOf, requireCharge: true, userId: context.userId });
   });
 
 export const saveDocument = createServerFn({ method: "POST" })

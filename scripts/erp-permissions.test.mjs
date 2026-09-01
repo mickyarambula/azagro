@@ -85,15 +85,18 @@ test("bitácora: TIIE, tipo de cambio, conciliación, mora, usuarios y cotizacio
     [ops, "saveTiie", "cambio de TIIE"],
     [ops, "saveFx", "cambio de tipo de cambio"],
     [ops, "reconcileMove", "conciliar banco"],
-    [ops, "invoiceLiveMora", "facturar mora"],
     [ops, "decideQuote", "decidir cotización"],
-    [az, "applyLateInterest", "facturar mora"],
     [users, "approveAccess", "alta de usuario"],
     [users, "rejectAccess", "rechazo de solicitud"],
     [users, "updateMember", "cambio de rol/permisos"],
   ]) {
     assert.ok(fnBody(source, fn).includes("writeAudit("), `${fn}: falta bitácora de ${label}`);
   }
+  // Facturar mora: la bitácora vive centralizada en issueMoraInvoice (todas
+  // las FI — manuales o automáticas al cobrar — pasan por ahí con su cálculo).
+  const moraFn = ops.slice(ops.indexOf("export async function issueMoraInvoice"));
+  assert.ok(moraFn.includes("writeAudit("), "issueMoraInvoice: falta bitácora de facturar mora");
+  assert.ok(az.includes("issueMoraInvoice(sql, m.company_id, data.invoiceId, { requireCharge: true, userId: context.userId })"), "applyLateInterest debe pasar el usuario para la bitácora");
   // TIIE/FX guardan valor anterior → nuevo
   assert.ok(fnBody(ops, "saveTiie").includes("→"), "saveTiie: la bitácora debe llevar anterior → nuevo");
   assert.ok(fnBody(ops, "saveFx").includes("→"), "saveFx: la bitácora debe llevar anterior → nuevo");

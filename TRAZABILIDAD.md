@@ -1,5 +1,21 @@
 # Auditoría de trazabilidad y bitácora — Azagro ERP
 
+> **Estado (1 de septiembre de 2026):** corregidos los 2 CRÍTICOS y los
+> IMPORTANTES 2, 3, 5, 7, 8, 9, 10 y 14: toda edición de pedido (incluidos los
+> confirmados) queda con anterior → nuevo; cada FI guarda su cálculo completo
+> (TIIE, spread, días, capital, FEGA) con autor y desglose; la FV congela sus
+> parámetros al emitirse y el P&L usa esa foto; la bitácora tiene filtros por
+> folio/texto, tipo, usuario y fechas, con paginación; el ciclo comercial
+> completo deja huella (solicitud, margen, proveedor ganador, cotización y su
+> renegociación con precios anteriores, pedido, OC); límite de crédito,
+> costo/precio de producto y saldo inicial de banco quedan con anterior →
+> nuevo; los rechazos (permiso, límite de crédito, importaciones fallidas) se
+> registran; el estado de cuenta a fecha pasada reconstruye el estado real de
+> ese día; y todas las facturas llevan autor. Pruebas en
+> `scripts/erp-trazabilidad.test.mjs`. Quedan los MENORES 11–13, 15 y 16, y
+> el hallazgo 5 queda mitigado (la utilidad de facturas emitidas ya no cambia
+> con Ajustes; solo el costo de catálogo sigue vivo cuando no hay OC ligada).
+
 Fecha: 31 de agosto de 2026. Solo diagnóstico; no se cambió nada de código.
 La prueba aplicada: **¿puedo pararme en cualquier folio dentro de dos años y
 reconstruir su historia completa sin adivinar?**

@@ -22,9 +22,23 @@ export function movingAverage(oldQty: number, oldAvg: number, qtyIn: number, uni
   return (on * Math.max(0, oldAvg) + inn * Math.max(0, unitCost)) / next;
 }
 
+/**
+ * Columnas de trazabilidad de facturas: autor, cálculo guardado (fórmula con
+ * sus insumos), foto de parámetros al emitir, y el desglose interés/FEGA de
+ * cada FI (para reconstruir estados de cuenta a fecha pasada).
+ */
+export async function ensureInvoiceExtras(sql: Sql) {
+  await sql`alter table invoices add column if not exists created_by text not null default ''`;
+  await sql`alter table invoices add column if not exists calc text not null default ''`;
+  await sql`alter table invoices add column if not exists params_snap text not null default ''`;
+  await sql`alter table invoices add column if not exists int_part numeric(14,2) not null default 0`;
+  await sql`alter table invoices add column if not exists fega_part numeric(14,2) not null default 0`;
+}
+
 export async function ensureStock(sql: Sql) {
   await sql`alter table stock_moves add column if not exists unit_cost numeric(14,4) not null default 0`;
   await sql`alter table stock_quants add column if not exists avg_cost numeric(14,4) not null default 0`;
+  await ensureInvoiceExtras(sql);
   await sql`
     update stock_quants q
     set avg_cost = p.cost

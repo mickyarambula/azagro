@@ -8,8 +8,9 @@ import { syncCompaqCatalogs, linkSeedDestinos } from "@/lib/erp/compaq";
 import { rememberTrade } from "@/lib/erp/links";
 import { seedAcl, type AppRole } from "@/lib/erp/acl";
 import { activeMember, assertCan, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
-import { applyInvoicePayment, issueMoraInvoice } from "@/lib/erp/ops";
-import { ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
+import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
+import { nearestRate } from "@/lib/erp/credit";
+import { ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
 
 export type Role = AppRole;
@@ -460,6 +461,11 @@ export const savePartner = createServerFn({ method: "POST" })
       code = await nextCodeFor(sql, m.company_id, prefix);
     }
     if (data.id) {
+      // Los campos que mueven crédito quedan en bitácora con anterior → nuevo.
+      const before = await sql<{ credit_limit: string; payment_days: number; late_rate: string; name: string }>`
+        select credit_limit::text, payment_days, late_rate::text, name
+        from partners where id = ${data.id} and company_id = ${m.company_id}
+      `;
       await sql`
         update partners set
           code = ${code}, name = ${data.name}, rfc = ${data.rfc ?? ""},
@@ -471,6 +477,26 @@ export const savePartner = createServerFn({ method: "POST" })
           group_name = ${data.group_name ?? ""}, legal_name = ${data.legal_name ?? ""}
         where id = ${data.id} and company_id = ${m.company_id}
       `;
+      if (before[0]) {
+        const cambios: string[] = [];
+        if (Number(before[0].credit_limit) !== data.credit_limit)
+          cambios.push(`límite ${Number(before[0].credit_limit)} → ${data.credit_limit}`);
+        if (before[0].payment_days !== data.payment_days)
+          cambios.push(`plazo ${before[0].payment_days} → ${data.payment_days} d`);
+        if (Number(before[0].late_rate) !== data.late_rate)
+          cambios.push(`tasa mora ${Number(before[0].late_rate)} → ${data.late_rate}`);
+        if (cambios.length) {
+          await writeAudit(sql, {
+            companyId: m.company_id,
+            userId: context.userId,
+            action: "credito-cliente",
+            entity: "partner",
+            entityId: data.id,
+            name: data.name,
+            detail: cambios.join(" · "),
+          });
+        }
+      }
       return { id: data.id };
     }
     const row = await sql<{ id: number }>`
@@ -615,12 +641,33 @@ export const saveProduct = createServerFn({ method: "POST" })
     if (!code) code = await nextCodeFor(sql, m.company_id, "PRD-", "products");
     const category = data.category || (data.product_type === "INSUMO" ? "Insumos" : "Fertilizantes");
     if (data.id) {
+      // Costo y precio de lista son sensibles: cambios manuales a bitácora.
+      const before = await sql<{ cost: string; list_price: string }>`
+        select cost::text, list_price::text from products where id = ${data.id} and company_id = ${m.company_id}
+      `;
       await sql`
         update products set code=${code}, name=${data.name}, category=${category},
           product_type=${data.product_type}, uom=${data.uom}, cost=${data.cost},
           list_price=${data.list_price}, min_stock=${data.min_stock}
         where id = ${data.id} and company_id = ${m.company_id}
       `;
+      if (before[0]) {
+        const cambios: string[] = [];
+        if (Number(before[0].cost) !== data.cost) cambios.push(`costo ${Number(before[0].cost)} → ${data.cost}`);
+        if (Number(before[0].list_price) !== data.list_price)
+          cambios.push(`precio lista ${Number(before[0].list_price)} → ${data.list_price}`);
+        if (cambios.length) {
+          await writeAudit(sql, {
+            companyId: m.company_id,
+            userId: context.userId,
+            action: "precio-producto",
+            entity: "product",
+            entityId: data.id,
+            name: `${code} ${data.name}`,
+            detail: cambios.join(" · "),
+          });
+        }
+      }
       return { id: data.id };
     }
     const row = await sql<{ id: number }>`
@@ -995,6 +1042,7 @@ export const createPurchase = createServerFn({ method: "POST" })
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "purchases", "edit");
+    await ensureInvoiceExtras(sql);
     const n = await sql<{ c: number }>`select count(*)::int as c from purchase_orders where company_id = ${m.company_id}`;
     const name = `OC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const total = data.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
@@ -1027,9 +1075,18 @@ export const createPurchase = createServerFn({ method: "POST" })
     const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'supplier'`;
     const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     await sql`
-      insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, currency)
-      values (${m.company_id}, 'supplier', ${iname}, ${data.partnerId}, ${due.toISOString().slice(0, 10)}, 'open', ${total}, ${total}, ${name}, ${data.currency ?? "MXN"})
+      insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, currency, created_by)
+      values (${m.company_id}, 'supplier', ${iname}, ${data.partnerId}, ${due.toISOString().slice(0, 10)}, 'open', ${total}, ${total}, ${name}, ${data.currency ?? "MXN"}, ${context.userId})
     `;
+    await writeAudit(sql, {
+      companyId: m.company_id,
+      userId: context.userId,
+      action: "crear-oc",
+      entity: "purchase",
+      entityId: po[0]!.id,
+      name,
+      detail: `Total ${total.toFixed(2)} ${data.currency ?? "MXN"} · genera ${iname} por pagar`,
+    });
     return { id: po[0]!.id, name };
   });
 
@@ -1082,8 +1139,8 @@ export const receivePurchase = createServerFn({ method: "POST" })
       const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'supplier'`;
       const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
       await sql`
-        insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin)
-        values (${m.company_id}, 'supplier', ${iname}, ${partner[0]!.partner_id}, ${due.toISOString().slice(0, 10)}, 'open', ${Number(total[0]?.total ?? 0)}, ${Number(total[0]?.total ?? 0)}, ${po[0].name})
+        insert into invoices (company_id, kind, name, partner_id, due_date, state, amount, residual, origin, created_by)
+        values (${m.company_id}, 'supplier', ${iname}, ${partner[0]!.partner_id}, ${due.toISOString().slice(0, 10)}, 'open', ${Number(total[0]?.total ?? 0)}, ${Number(total[0]?.total ?? 0)}, ${po[0].name}, ${context.userId})
       `;
     }
     await writeAudit(sql, {
@@ -1193,6 +1250,15 @@ export const createSale = createServerFn({ method: "POST" })
     const used = Number(ar[0]?.ar ?? 0);
     if (limit > 0 && used + total > limit) {
       if (!(data.overrideCredit && member.role === "admin")) {
+        // El rechazo también deja rastro: quién intentó, con qué números.
+        await writeAudit(sql, {
+          companyId: m.company_id,
+          userId: context.userId,
+          action: "rechazado-credito",
+          entity: "partner",
+          entityId: data.partnerId,
+          detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+        });
         throw new Error(
           `Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}. Un administrador puede autorizar el exceso.`,
         );
@@ -1293,15 +1359,38 @@ export const deliverSale = createServerFn({ method: "POST" })
     const currency = soMeta[0]?.currency ?? "MXN";
     const fx = Number(soMeta[0]?.fx_rate ?? 1);
     const mxn = Number(so[0].total);
+    // Foto de parámetros al emitir: TIIE del mes de emisión y las tasas
+    // vigentes hoy. Con esto la utilidad y el costo financiero de ESTA
+    // factura siguen siendo explicables aunque después cambien Ajustes.
+    const pol = await policy(sql, m.company_id);
+    const tiieRows = await sql<{ date: string; rate: string }>`
+      select date::text, rate::text from tiie_rates where company_id = ${m.company_id} order by date
+    `;
+    const tiieIssue = nearestRate(
+      tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
+      today,
+      pol.defaultTiie,
+    );
+    const snap = JSON.stringify({
+      tiieIssue,
+      costSpread: pol.asrSpread,
+      commissionRate: pol.asrCommission,
+      financialDays: pol.creditDays,
+      collectionSpread: pol.collectionSpread,
+      fegaRate: pol.fegaRate,
+      earlyPayDays: pol.earlyPayDays,
+    });
     const inv = await sql<{ id: number }>`
       insert into invoices (
         company_id, kind, name, partner_id, due_date, credit_due, state, amount, residual, origin,
-        currency, amount_fx, fx_agreed, inv_class, order_id, invoice_days, credit_days, policy_code
+        currency, amount_fx, fx_agreed, inv_class, order_id, invoice_days, credit_days, policy_code,
+        created_by, params_snap
       )
       values (
         ${m.company_id}, 'customer', ${iname}, ${so[0].partner_id}, ${invoiceDue}, ${creditDue}, 'open',
         ${mxn}, ${mxn}, ${so[0].name}, ${currency}, ${currency === "USD" && fx ? mxn / fx : 0}, ${fx}, 'product', ${so[0].id},
-        ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${so[0].policy_code ?? "NONE"}
+        ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${so[0].policy_code ?? "NONE"},
+        ${context.userId}, ${snap}
       )
       returning id
     `;
@@ -1407,11 +1496,11 @@ export const returnSale = createServerFn({ method: "POST" })
     const nc = await sql<{ id: number }>`
       insert into invoices (
         company_id, kind, name, partner_id, due_date, state, amount, residual, origin,
-        currency, order_id, inv_class
+        currency, order_id, inv_class, created_by
       )
       values (
         ${m.company_id}, 'customer', ${ncName}, ${so[0].partner_id}, ${new Date().toISOString().slice(0, 10)},
-        'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product'
+        'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product', ${context.userId}
       )
       returning id
     `;
@@ -1533,6 +1622,7 @@ export const registerPayment = createServerFn({ method: "POST" })
     await boot`alter table bank_moves add column if not exists payment_id integer`;
     await boot`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
     await boot`alter table invoices add column if not exists fx_treatment text not null default ''`;
+    await ensureInvoiceExtras(boot);
     return withTx(async (sql) => {
       const m = await requireCompany(sql, context.userId);
       await assertCan(sql, context.userId, "banks", "edit");
@@ -1558,16 +1648,8 @@ export const applyLateInterest = createServerFn({ method: "POST" })
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "credit", "edit");
-    const r = await issueMoraInvoice(sql, m.company_id, data.invoiceId, { requireCharge: true });
-    await writeAudit(sql, {
-      companyId: m.company_id,
-      userId: context.userId,
-      action: "facturar-mora",
-      entity: "invoice",
-      entityId: data.invoiceId,
-      name: r.name ?? "",
-      detail: `Cargo ${r.charge}`,
-    });
+    // issueMoraInvoice guarda el cálculo en la FI y escribe la bitácora.
+    const r = await issueMoraInvoice(sql, m.company_id, data.invoiceId, { requireCharge: true, userId: context.userId });
     return { charge: r.charge, name: r.name };
   });
 
