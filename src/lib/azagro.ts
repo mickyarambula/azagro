@@ -1403,7 +1403,9 @@ export const deliverSale = createServerFn({ method: "POST" })
       tiieIssue,
       costSpread: pol.asrSpread,
       commissionRate: pol.asrCommission,
-      financialDays: pol.creditDays,
+      // Los días financiados de ESTE pedido: los mismos que fueron cobrados
+      // al cliente dentro del precio (0 = contado, sin circuito).
+      financialDays: so[0].credit_days ?? 0,
       collectionSpread: pol.collectionSpread,
       fegaRate: pol.fegaRate,
       earlyPayDays: pol.earlyPayDays,

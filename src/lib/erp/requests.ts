@@ -5,6 +5,7 @@ import { getSql } from "@/lib/db";
 import { activeMember, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { priceSale } from "@/lib/erp/pricing";
+import { policy } from "@/lib/erp/ops";
 import { rememberTrade } from "@/lib/erp/links";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -672,14 +673,18 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       from customer_request_lines where request_id = ${data.requestId}
     `;
     if (!lines.length) throw new Error("Sin partidas");
-    const annual = Math.max(0, data.tiie) + Math.max(0, data.spread);
+    // El financiamiento va DENTRO del precio a crédito: comisión + Capa 1 con
+    // los días de crédito de este pedido. La comisión sale de Ajustes.
+    const pol = await policy(sql, companyId);
     const priced = lines.map((l) => {
       const cashCalc = priceSale({
         cost: Number(l.cost),
         freight: Number(l.freight),
         other: 0,
         days: 0,
-        annualRate: annual,
+        tiie: Math.max(0, data.tiie),
+        costSpread: Math.max(0, data.spread),
+        commissionRate: pol.asrCommission,
         marginMode: l.margin_mode === "nominal" ? "nominal" : "pct",
         marginPct: Number(l.margin_pct),
         marginNominal: Number(l.margin_nominal),
@@ -690,7 +695,9 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         freight: Number(l.freight),
         other: 0,
         days: data.creditDays,
-        annualRate: annual,
+        tiie: Math.max(0, data.tiie),
+        costSpread: Math.max(0, data.spread),
+        commissionRate: pol.asrCommission,
         marginMode: l.margin_mode === "nominal" ? "nominal" : "pct",
         marginPct: Number(l.margin_pct),
         marginNominal: Number(l.margin_nominal),

@@ -907,10 +907,11 @@ export async function applyInvoicePayment(
     date: string;
     due_date: string;
     order_id: number | null;
+    credit_days: number;
   }>`
     select id, kind, residual::text, amount::text, coalesce(inv_class,'product') as inv_class,
       coalesce(currency,'MXN') as currency, coalesce(amount_fx,0)::text as amount_fx, coalesce(fx_agreed,0)::text as fx_agreed,
-      partner_id, name, date::text, due_date::text, order_id from invoices
+      partner_id, name, date::text, due_date::text, order_id, coalesce(credit_days,0)::int as credit_days from invoices
     where id = ${opts.invoiceId} and company_id = ${opts.companyId}
     for update
   `;
@@ -1056,7 +1057,8 @@ export async function applyInvoicePayment(
       issueDate: inv[0].date,
       payDate,
       thresholdDays: pol.earlyPayDays,
-      financialDays: pol.creditDays,
+      // Se bonifican los días no usados del plazo de ESTE pedido.
+      financialDays: inv[0].credit_days || pol.creditDays,
       tiieAtIssue: nearestRate(
         tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
         inv[0].date,
@@ -1400,7 +1402,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               issueDate: inv.date,
               payDate: paidForCalc,
               thresholdDays: pol.earlyPayDays,
-              financialDays: pol.creditDays,
+              financialDays: inv.credit_days || pol.creditDays,
               tiieAtIssue: nearestRate(tiieTable, inv.date, pol.defaultTiie),
               costSpread: pol.asrSpread,
             })

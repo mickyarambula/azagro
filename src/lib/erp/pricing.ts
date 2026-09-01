@@ -1,8 +1,18 @@
+import { financeCost } from "@/lib/erp/credit";
 import { YEAR_DAYS } from "@/lib/erp/rules";
 
-/** Precio Azagro: costo puesto + costo de la LÍNEA (TIIE + 4.5%), sin mora.
- *  El 9% + FEGA no entra aquí: es factura de intereses al vencimiento, no del producto.
- *  Días de crédito: calendario exacto. Factor: días / 360.
+/**
+ * Precio Azagro — el costo financiero NO lo absorbe Azagro: se le pasa al
+ * cliente dentro del precio. Orden del cálculo (regla del dueño):
+ *
+ *   1. Costo de mercancía puesto (costo + flete + otros).
+ *   2. Margen elegido por el usuario (sobre ese costo).
+ *   3. Financiamiento ENCIMA: comisión + Capa 1 con los días de crédito de
+ *      ESTE pedido (no 150 fijos), a TIIE + spread de costo. Se reparte por
+ *      unidad y se suma al precio.
+ *
+ * Al contado (0 días) no hay circuito de financiamiento: precio = costo + margen.
+ * El 9% de mora NO va aquí: es factura de intereses al vencimiento.
  */
 
 export type PriceInput = {
@@ -10,7 +20,9 @@ export type PriceInput = {
   freight: number;
   other: number;
   days: number;
-  annualRate: number;
+  tiie: number;
+  costSpread: number;
+  commissionRate: number;
   marginMode: "pct" | "nominal";
   marginPct: number;
   marginNominal: number;
@@ -19,47 +31,57 @@ export type PriceInput = {
 
 export type PriceResult = {
   landedUnit: number;
-  financeUnit: number;
-  totalCostUnit: number;
-  priceUnit: number;
   marginUnit: number;
+  commissionUnit: number;
+  layer1Unit: number;
+  financeUnit: number;
+  priceUnit: number;
   marginPct: number;
   marginNominal: number;
   landed: number;
-  finance: number;
-  totalCost: number;
-  price: number;
   margin: number;
+  finance: number;
+  price: number;
+  rate: number;
 };
 
 export function priceSale(i: PriceInput): PriceResult {
   const qty = i.qty || 0;
   const landedUnit = Math.max(0, i.cost) + Math.max(0, i.freight) + Math.max(0, i.other);
-  const financeUnit = i.days > 0 ? landedUnit * Math.max(0, i.annualRate) * (i.days / YEAR_DAYS) : 0;
-  const totalCostUnit = landedUnit + financeUnit;
-  let priceUnit: number;
   let marginUnit: number;
   if (i.marginMode === "nominal") {
     marginUnit = Math.max(0, i.marginNominal);
-    priceUnit = totalCostUnit + marginUnit;
   } else {
-    priceUnit = totalCostUnit * (1 + Math.max(0, i.marginPct) / 100);
-    marginUnit = priceUnit - totalCostUnit;
+    marginUnit = landedUnit * (Math.max(0, i.marginPct) / 100);
   }
-  const marginPct = totalCostUnit > 0 ? (marginUnit / totalCostUnit) * 100 : 0;
+  const fin =
+    i.days > 0
+      ? financeCost({
+          supplierCost: landedUnit,
+          saleCapital: 0,
+          commissionRate: Math.max(0, i.commissionRate),
+          costSpread: Math.max(0, i.costSpread),
+          tiieAtIssue: Math.max(0, i.tiie),
+          financialDays: i.days,
+          daysExceeded: 0,
+        })
+      : { rate: Math.max(0, i.tiie) + Math.max(0, i.costSpread), commission: 0, layer1: 0, layer2: 0, total: 0 };
+  const financeUnit = fin.commission + fin.layer1;
+  const priceUnit = landedUnit + marginUnit + financeUnit;
   return {
     landedUnit,
-    financeUnit,
-    totalCostUnit,
-    priceUnit,
     marginUnit,
-    marginPct,
+    commissionUnit: fin.commission,
+    layer1Unit: fin.layer1,
+    financeUnit,
+    priceUnit,
+    marginPct: landedUnit > 0 ? (marginUnit / landedUnit) * 100 : 0,
     marginNominal: marginUnit,
     landed: landedUnit * qty,
-    finance: financeUnit * qty,
-    totalCost: totalCostUnit * qty,
-    price: priceUnit * qty,
     margin: marginUnit * qty,
+    finance: financeUnit * qty,
+    price: priceUnit * qty,
+    rate: fin.rate,
   };
 }
 

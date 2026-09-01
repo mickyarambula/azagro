@@ -45,10 +45,11 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     residual: string;
     fx_result: string;
     params_snap: string;
+    credit_days: number;
   }>`
     select date::text, due_date::text, credit_due::text, paid_date::text,
       amount::text, residual::text, coalesce(fx_result,0)::text as fx_result,
-      coalesce(params_snap,'') as params_snap
+      coalesce(params_snap,'') as params_snap, coalesce(credit_days,0)::int as credit_days
     from invoices
     where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
     order by id desc limit 1
@@ -76,7 +77,9 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     );
   const costSpread = snap.costSpread ?? pol.asrSpread;
   const commissionRate = snap.commissionRate ?? pol.asrCommission;
-  const financialDays = snap.financialDays ?? pol.creditDays;
+  // Los días financiados son los de ESTE pedido (los mismos que se cobraron
+  // dentro del precio), no un plazo fijo. Al contado no hay circuito.
+  const financialDays = snap.financialDays ?? (fv[0] ? fv[0].credit_days : so[0].credit_days);
   const exceededEnd = fv[0]?.paid_date && fv[0].paid_date < today ? fv[0].paid_date : today;
   const daysExceeded = fv[0]
     ? Math.max(0, daysBetween(fv[0].credit_due || fv[0].due_date, exceededEnd))
@@ -125,17 +128,21 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     const cogs = qty * costUnit;
     const freight = qty * freightUnit;
     const other = qty * otherUnit;
-    // Costo financiero real del circuito hermana: comisión + Capa 1 (plazo
-    // completo, siempre) + Capa 2 (días excedidos), a TIIE de emisión + spread.
-    const fin = financeCost({
-      supplierCost: cogs,
-      saleCapital: sale,
-      commissionRate,
-      costSpread,
-      tiieAtIssue: tiieIssue,
-      financialDays,
-      daysExceeded,
-    });
+    // Costo financiero del circuito hermana: comisión + Capa 1 con los días
+    // de crédito del pedido (los mismos cobrados al cliente en el precio) +
+    // Capa 2 (días excedidos, no previstos). Al contado no hay circuito.
+    const fin =
+      financialDays > 0 || daysExceeded > 0
+        ? financeCost({
+            supplierCost: financialDays > 0 ? cogs : 0,
+            saleCapital: sale,
+            commissionRate,
+            costSpread,
+            tiieAtIssue: tiieIssue,
+            financialDays: Math.max(0, financialDays),
+            daysExceeded,
+          })
+        : { rate: tiieIssue + costSpread, commission: 0, layer1: 0, layer2: 0, total: 0 };
     const finance = fin.total;
     const margin = sale - cogs - freight - other;
     return {

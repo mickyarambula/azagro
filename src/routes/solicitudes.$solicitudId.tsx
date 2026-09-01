@@ -35,6 +35,7 @@ function Page() {
   const [targets, setTargets] = useState<Record<string, boolean>>({});
   const [tiiePct, setTiiePct] = useState(0);
   const [spreadPct, setSpreadPct] = useState(0);
+  const [commissionPct, setCommissionPct] = useState(1);
   const [days, setDays] = useState(0);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
   const [fxRate, setFxRate] = useState(18);
@@ -78,7 +79,9 @@ function Page() {
       .then((s) => {
         const latest = s.tiie[0];
         setTiiePct(Number(((latest ? Number(latest.rate) : s.defaultTiie) * 100).toFixed(2)));
-        setSpreadPct(Number((s.financeSpread * 100).toFixed(2)));
+        // El spread del precio es el de COSTO (circuito hermana), no el de línea.
+        setSpreadPct(Number((s.asrSpread * 100).toFixed(2)));
+        setCommissionPct(Number((s.asrCommission * 100).toFixed(2)));
       })
       .catch(() => undefined);
   }, [id]);
@@ -482,16 +485,19 @@ function Page() {
           <HeadBox label="TIIE %">
             <QtyField className="w-full border-0 bg-transparent px-0" value={tiiePct} onChange={setTiiePct} />
           </HeadBox>
-          <HeadBox label="Spread línea %">
+          <HeadBox label="Spread costo %">
             <QtyField className="w-full border-0 bg-transparent px-0" value={spreadPct} onChange={setSpreadPct} />
+          </HeadBox>
+          <HeadBox label="Comisión %">
+            <QtyField className="w-full border-0 bg-transparent px-0" value={commissionPct} onChange={setCommissionPct} />
           </HeadBox>
         </div>
         <p className="mb-3 text-[13px] text-muted">
-          Costo de línea = TIIE {tiiePct.toFixed(2)}% + spread {spreadPct.toFixed(2)}% = <strong>{(rate * 100).toFixed(2)}%</strong>
-          {days === 0 ? " · contado, sin financiero." : ` · se prorratea a ${days} días.`} El 9% de mora NO va aquí: es factura de intereses al vencimiento.
+          Precio = costo + margen + <strong>financiamiento encima</strong> (comisión {commissionPct.toFixed(2)}% + Capa 1: TIIE {tiiePct.toFixed(2)}% + spread costo {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}% × {days} d / 360).
+          {days === 0 ? " Contado: sin financiamiento, precio = costo + margen." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El 9% de mora NO va aquí: es factura de intereses al vencimiento.
         </p>
         <div className="overflow-x-auto erp-card">
-          <table className="w-full min-w-[900px] text-left text-[13px]">
+          <table className="w-full min-w-[980px] text-left text-[13px]">
             <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
               <tr>
                 <th className="px-4 py-2.5 font-medium">Producto</th>
@@ -499,6 +505,7 @@ function Page() {
                 <th className="px-3 py-2.5 font-medium">Margen</th>
                 <th className="px-3 py-2.5 text-right font-medium">Valor</th>
                 <th className="px-3 py-2.5 text-right font-medium">Equivale</th>
+                <th className="px-3 py-2.5 text-right font-medium">Financiero /u</th>
                 <th className="px-3 py-2.5 text-right font-medium">Precio / UoM</th>
                 <th className="px-3 py-2.5 text-right font-medium">Importe</th>
               </tr>
@@ -511,7 +518,9 @@ function Page() {
                   freight: num(l.freight),
                   other: 0,
                   days,
-                  annualRate: rate,
+                  tiie: tiiePct / 100,
+                  costSpread: spreadPct / 100,
+                  commissionRate: commissionPct / 100,
                   marginMode: mode,
                   marginPct: num(l.margin_pct) || 12,
                   marginNominal: num(l.margin_nominal),
@@ -572,7 +581,24 @@ function Page() {
                     <td className="px-3 py-2.5 text-right text-[12px] text-muted tabular-nums">
                       {mode === "pct" ? `${money(calc.marginUnit)} / ${l.uom} · total ${money(calc.margin)}` : `${calc.marginPct.toFixed(1)}% · total ${money(calc.margin)}`}
                     </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">{money(calc.priceUnit)}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">
+                      {calc.financeUnit > 0.009 ? (
+                        <>
+                          {money(calc.financeUnit)}
+                          <span className="block text-[11px] text-muted">
+                            com {money(calc.commissionUnit)} + C1 {money(calc.layer1Unit)}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">
+                      {money(calc.priceUnit)}
+                      <span className="block text-[11px] text-muted">
+                        costo {money(calc.landedUnit)} + margen {money(calc.marginUnit)}{calc.financeUnit > 0.009 ? ` + fin ${money(calc.financeUnit)}` : ""}
+                      </span>
+                    </td>
                     <td className="px-3 py-2.5 text-right font-medium tabular-nums">{money(calc.price)}</td>
                   </tr>
                 );

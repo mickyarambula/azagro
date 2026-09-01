@@ -305,9 +305,13 @@ function Ficha() {
             <PnlKpi
               label="Costo financiero"
               value={money(pnl.finance)}
-              hint={`Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% + spread`}
+              hint={`Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% + spread. Comisión y Capa 1 van cobradas al cliente dentro del precio.`}
             />
-            <PnlKpi label="Utilidad final" value={money(pnl.netProfit)} hint={`${pnl.netProfitPct.toFixed(1)}% · venta + mora + dif. cambiario − costos financieros − pronto pago`} />
+            <PnlKpi
+              label="Utilidad final"
+              value={money(pnl.netProfit)}
+              hint={`${pnl.netProfitPct.toFixed(1)}% · ≈ el margen elegido: el financiamiento cobrado en el precio se netea contra el pagado. Solo restan de verdad la Capa 2 y el pronto pago; la mora suma.`}
+            />
           </div>
           {(pnl.mora > 0 || pnl.discount > 0 || pnl.fxIncome !== 0) && (
             <p className="mt-2 text-[12px] text-muted">

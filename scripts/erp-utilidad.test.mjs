@@ -101,7 +101,10 @@ test("cableado: el P&L por pedido usa TIIE de emisión y parámetros de Ajustes"
   // Primero la foto guardada en la factura; si no hay, los Ajustes de hoy.
   assert.ok(rep.includes("snap.commissionRate ?? pol.asrCommission"), "la comisión sale de la foto de la factura o de Ajustes, no quemada");
   assert.ok(rep.includes("snap.costSpread ?? pol.asrSpread"), "el spread de costo sale de la foto de la factura o de Ajustes");
-  assert.ok(rep.includes("snap.financialDays ?? pol.creditDays"), "el plazo financiero sale de la foto de la factura o de Ajustes");
+  assert.ok(
+    rep.includes("snap.financialDays ?? (fv[0] ? fv[0].credit_days : so[0].credit_days)"),
+    "el plazo financiado es el del PEDIDO (foto de la factura, o sus días de crédito), no un fijo de Ajustes",
+  );
   assert.ok(rep.includes("margin + mora + fxIncome - finance - discount"), "utilidad = margen + mora + dif. − financiero − descuento");
   assert.ok(!rep.includes("finance_spread"), "ya no debe usarse el spread de línea como costo del circuito");
 });
