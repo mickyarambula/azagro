@@ -1,13 +1,14 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { OrderFields, stateLabel, type OrderDraft, type OrderLookups } from "@/components/order-form";
+import { OFFER_LABEL, marginText } from "@/lib/erp/margins";
 import { BackBar, StatusPill } from "@/components/erp";
 import { Expediente } from "@/components/expediente";
 import { DocFiles } from "@/components/doc-files";
 import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
 import { deliverSale, receivePurchase, returnSale } from "@/lib/azagro";
-import { getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
+import { changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
 import { duesPreview } from "@/components/order-form";
 import { QtyField } from "@/components/fields";
 import { validateDueDates } from "@/lib/erp/credit";
@@ -53,6 +54,11 @@ function Ficha() {
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [overrideCredit, setOverrideCredit] = useState(false);
+  // Origen del pedido (cotización): plazo y precio heredados, por partida.
+  const [origin, setOrigin] = useState<Awaited<ReturnType<typeof getOrder>>["origin"]>(null);
+  const [originLines, setOriginLines] = useState<Awaited<ReturnType<typeof getOrder>>["lines"]>([]);
+  const [changeTerm, setChangeTerm] = useState(false);
+  const [newDays, setNewDays] = useState(0);
 
   async function load() {
     const [d, l, p] = await Promise.all([getOrder({ data: { id } }), orderLookups(), getDealPnl({ data: { soId: id } }).catch(() => null)]);
@@ -63,6 +69,10 @@ function Ficha() {
     setInvoices(d.invoices);
     setPurchases(d.purchases ?? []);
     setSold(d.lines);
+    setOrigin(d.origin);
+    setOriginLines(d.lines);
+    setChangeTerm(false);
+    setNewDays(o.credit_days);
     setRetQty((cur) => {
       const next = { ...cur };
       for (const l of d.lines) {
@@ -142,6 +152,25 @@ function Ficha() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyTerm() {
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const r = await changeOrderTerm({ data: { id, creditDays: newDays } });
+      setMsg(
+        r.creditDays > 0
+          ? `Plazo cambiado a ${r.creditDays} d. Precios rehechos con el financiamiento a ese plazo; total ${money(r.total)}. Quedó en bitácora.`
+          : `Pedido pasado a contado: precios de contado de la cotización; total ${money(r.total)}. Quedó en bitácora.`,
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo cambiar el plazo");
     } finally {
       setBusy(false);
     }
@@ -294,7 +323,104 @@ function Ficha() {
         </label>
       )}
       {msg && <p className="mb-3 text-sm text-ok">{msg}</p>}
-      <OrderFields form={form} setForm={setForm} lookups={lookups} locked={locked} />
+      <OrderFields
+        form={form}
+        setForm={setForm}
+        lookups={lookups}
+        locked={locked}
+        inherited={
+          origin
+            ? {
+                quoteName: origin.quote_name,
+                requestName: origin.request_name,
+                days: form.creditDays,
+                offer: origin.accepted_offer === "cash" || origin.accepted_offer === "credit" ? origin.accepted_offer : null,
+                onChange: editable ? () => setChangeTerm((v) => !v) : undefined,
+              }
+            : null
+        }
+      />
+      {origin && changeTerm && editable && (
+        <div className="mt-4 erp-card border-warn p-4">
+          <h2 className="text-sm font-semibold">Cambiar el plazo de {form.name}</h2>
+          <p className="mt-1 text-[12px] text-muted">
+            El precio de cada partida se armó con el plazo de {origin.quote_name} ({origin.credit_days} d). Con otro plazo ese precio ya no
+            corresponde: se rehace partida por partida con la misma fórmula (costo puesto + margen crédito + financiamiento a los días nuevos,
+            con la TIIE y el spread de la cotización). A 0 días queda el precio de contado. El vencimiento de factura y el plazo financiero se
+            recalculan y todo queda en bitácora, anterior → nuevo.
+          </p>
+          <div className="mt-3 flex flex-wrap items-end gap-3">
+            <label className="grid gap-1 text-[12px] font-medium uppercase tracking-wide text-muted">
+              Días de crédito nuevos
+              <input
+                className="erp-input w-32"
+                type="number"
+                min={0}
+                value={newDays}
+                onChange={(e) => setNewDays(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+              />
+            </label>
+            <button type="button" className="erp-btn-primary" disabled={busy || newDays === form.creditDays} onClick={() => void applyTerm()}>
+              Aplicar plazo y rehacer precios
+            </button>
+            <button type="button" className="erp-btn" disabled={busy} onClick={() => setChangeTerm(false)}>
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+      {origin && originLines.some((l) => l.origin) && (
+        <div className="mt-4 overflow-x-auto erp-card">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 pt-3">
+            <h2 className="text-sm font-semibold">Heredado de {origin.quote_name}</h2>
+            <p className="text-[12px] text-muted">
+              Precio {OFFER_LABEL[origin.accepted_offer === "cash" ? "cash" : "credit"]}
+              {origin.accepted_offer !== "cash" && form.creditDays > 0 ? ` a ${form.creditDays} d` : ""}
+              {origin.request_name ? ` · ${origin.request_name} → ${origin.quote_name} → ${form.name}` : ` · ${origin.quote_name} → ${form.name}`}
+            </p>
+          </div>
+          <table className="w-full min-w-[720px] text-left text-[13px]">
+            <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+              <tr>
+                <th className="px-3 py-2 font-medium">Producto</th>
+                <th className="px-3 py-2 text-right font-medium">Precio cotizado</th>
+                <th className="px-3 py-2 text-right font-medium">Precio pedido</th>
+                <th className="px-3 py-2 text-right font-medium">Costo puesto</th>
+                <th className="px-3 py-2 text-right font-medium">Financiamiento</th>
+                <th className="px-3 py-2 text-right font-medium">Utilidad u.</th>
+                <th className="px-3 py-2 text-right font-medium">Margen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {originLines.map((l) => {
+                const o = l.origin;
+                if (!o) return null;
+                const unit = num(l.unit_price);
+                const util = o.landed != null ? unit - o.landed - o.fin_unit : null;
+                return (
+                  <tr key={l.product_id} className="border-t border-line">
+                    <td className="px-3 py-2">
+                      <span className="font-medium">{l.name}</span>
+                      <span className="ml-2 font-mono text-[11px] text-muted">{l.code}</span>
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{moneyIn(o.quoted_price, form.currency)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {moneyIn(unit, form.currency)}
+                      {Math.abs(unit - o.quoted_price) > 0.009 ? <span className="ml-1 text-[11px] text-warn">≠ cotizado</span> : null}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{o.landed != null ? moneyIn(o.landed, form.currency) : "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{o.which === "credit" ? moneyIn(o.fin_unit, form.currency) : "—"}</td>
+                    <td className={`px-3 py-2 text-right tabular-nums ${util != null && util < 0 ? "text-danger" : ""}`}>
+                      {util != null ? moneyIn(util, form.currency) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{o.margin ? marginText(o.margin) : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
       {pnl && (
         <div className="mt-4">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">

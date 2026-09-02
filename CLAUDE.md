@@ -10,7 +10,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 - Postgres: Neon si hay `DATABASE_URL`, si no PGLite embebido (`src/lib/db.ts`)
 - better-auth
 - Server functions: `createServerFn` + `authMiddleware`
-- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`)
+- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud — columnas nulas, sin rellenar)
 
 ## No romper
 
@@ -35,6 +35,8 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 | Bitácora | `src/lib/erp/audit.ts`, ruta `/bitacora` |
 | Archivos del folio | `src/lib/erp/files.ts` |
 | RFQ sin pedido de cliente | `src/lib/erp/rfq.ts`, `/rfq/nuevo` |
+| Dos márgenes (contado/crédito), precio↔margen | `src/lib/erp/margins.ts` |
+| Candado de solicitud ya cotizada | `src/lib/erp/request-lock.ts` |
 | Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
 | Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |
 

@@ -82,7 +82,8 @@ test("crear solicitud/cotización/OC, margen y proveedor ganador dejan bitácora
   const az = src("src/lib/azagro.ts");
   assert.ok(fnBody(req, "createRequest").includes(`"crear-solicitud"`), "crear solicitud");
   assert.ok(fnBody(req, "updateRequest").includes(`"editar-solicitud"`), "editar solicitud");
-  assert.ok(fnBody(req, "saveLineMargin").includes("margen ${old} → ${nuevo}"), "margen con anterior → nuevo");
+  // Dos márgenes por partida: la bitácora dice cuál (contado / crédito) y anterior → nuevo.
+  assert.ok(fnBody(req, "saveLineMargin").includes("margen ${etiqueta} ${old} → ${nuevo}"), "margen con cuál, anterior → nuevo");
   assert.ok(fnBody(req, "pickVendor").includes(`"elegir-proveedor"`), "proveedor ganador manual");
   assert.ok(fnBody(req, "applyCheapest").includes(`"elegir-proveedor"`), "proveedor ganador automático");
   assert.ok(fnBody(ops, "createQuote").includes(`"crear-cotizacion"`), "crear cotización");

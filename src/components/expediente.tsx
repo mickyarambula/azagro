@@ -25,7 +25,7 @@ function HopLink({ hop, current }: { hop: DealHop; current: boolean }) {
   }
   if (hop.kind === "quote") {
     return (
-      <Link to="/quotes" className={cls}>
+      <Link to="/quotes" search={{ ver: hop.id }} className={cls}>
         {hop.name}
       </Link>
     );

@@ -119,8 +119,50 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
     todos los inserts a tablas con `date` la mandan explícita. Los sellos de
     auditoría (`created_at`, bitácora) siguen en UTC y solo se convierten al
     mostrar con `dateTimeMx()`.
+14. **Dos precios por partida, solicitud bloqueada y plazo heredado**
+    (2-sep, migración `0017_dos_precios.sql`, lógica en
+    `src/lib/erp/margins.ts` y `request-lock.ts`, pruebas en
+    `scripts/erp-dos-precios.test.mjs`):
+    - Cada partida lleva **dos márgenes independientes**: contado y crédito,
+      cada uno % o $ fijo (`margin_cash_*` / `margin_credit_*` en
+      `customer_request_lines` y `quote_lines`). Precio contado = costo
+      puesto + margen contado, sin financiamiento ni comisión. Precio crédito
+      = costo puesto + margen crédito + financiamiento (fórmula intacta).
+    - **Captura inversa** en la cotización (`/quotes`, panel "Ver"): se
+      escribe el precio, la utilidad o el margen % de cualquiera de las dos
+      columnas y lo demás se despeja; al guardar la revisión, el margen
+      guardado de la partida se recalcula (`marginFromPrice`). Utilidad
+      negativa: aviso en rojo, no candado.
+    - La cotización guarda **cuál precio aceptó el cliente**
+      (`quotes.accepted_offer`, copiado a `sales_orders.accepted_offer`); el
+      pedido lee costo/margen/financiamiento de `quote_lines` por
+      `quote_id + product_id` (no hay columnas nuevas en `sales_lines`).
+    - Bitácora: "margen contado" / "margen crédito" por separado, anterior →
+      nuevo, al salir del campo (`onCommit`), nunca por tecla.
+    - **La solicitud que ya generó cotización se bloquea**
+      (`assertRequestOpen` en todas las escrituras de `requests.ts`,
+      `assertRfqOpen` en las ofertas del RFQ). La pantalla muestra
+      "Generó COT-… → PV-…" con ligas (`/quotes?ver=<id>`); los cambios se
+      hacen desde la cotización (revisión).
+    - Bug corregido: los **días de crédito, moneda y TC de la solicitud**
+      vivían solo en memoria del navegador (`useState` sin columna) y se
+      perdían al salir. Ahora se guardan al salir del campo
+      (`saveRequestTerms`, bitácora `plazo-solicitud`) en
+      `customer_requests.credit_days/currency/fx_rate`. Era el único dato de
+      la pantalla con ese patrón; márgenes, ofertas y flete ya persistían.
+    - **El pedido hereda el plazo de la cotización** y lo muestra como dato
+      heredado con origen; los campos de días quedan apagados. Cambiarlo es
+      una acción explícita ("Cambiar plazo") que avisa que el precio ya no
+      corresponde, rehace precio por partida (costo + margen crédito +
+      financiamiento a los días nuevos con la TIIE/spread de la COT; a 0
+      días vuelve al precio de contado), recalcula vencimientos y deja
+      bitácora `cambiar-plazo-pedido`. Solo en borrador.
+    - Valores por omisión del pedido al aceptar: días factura = "plazo
+      factura" de Ajustes sin pasar del plazo de la COT, plazo financiero =
+      días de la COT, política de mora = GRUPO_SL si el cliente es del grupo,
+      si no ESTANDAR; de contado NONE.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 200 hoy)
+Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 260 hoy)
 y pasa `npx tsc --noEmit` limpio.
 
 ## Decisiones de negocio confirmadas por el dueño
@@ -173,6 +215,19 @@ natural de trabajo grande.
 
 ## Qué falta
 
+- **Dos decisiones del dueño pendientes (2-sep):**
+  1. *Migración de los márgenes viejos (A6).* La 0017 solo agrega columnas
+     nulas; no se rellenó nada. Mientras tanto el código cae al margen único
+     anterior (`marginOf` → `legacy: true`, la pantalla lo marca como "margen
+     único anterior") o al 12% por omisión. Falta que el dueño diga si las
+     partidas existentes copian el margen viejo a las dos columnas, solo a
+     crédito, o se dejan vacías.
+  2. *"Agregar partida" en un pedido que viene de cotización (C3).* Hoy la
+     partida nueva entra con el precio de lista del producto, sin costo,
+     margen ni financiamiento ligados (no hay `quote_line` de dónde
+     leerlos), y no aparece en la tabla "Heredado de COT-…". No se tocó:
+     esperar la decisión de cómo cerrarlo (bloquear, pedir precio manual con
+     aviso, o mandar a revisión de la COT).
 - **Sesión D pendiente**: un barrido de uso real, simplificación de
   pantallas y detección de huecos operativos — no se ha hecho todavía.
 - **INCOMPLETOS de `LOGICA.md` sin tocar**: no hay forma de revertir un pago

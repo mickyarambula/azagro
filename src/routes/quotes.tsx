@@ -10,6 +10,7 @@ import { SendButton } from "@/components/send-doc";
 import { Expediente } from "@/components/expediente";
 import { addDays } from "@/lib/erp/credit";
 import { getDealTrail } from "@/lib/erp/deal";
+import { OFFER_LABEL } from "@/lib/erp/margins";
 import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
 import { creditFromCash, type FinanceBase } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
@@ -17,7 +18,13 @@ import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
 
-export const Route = createFileRoute("/quotes")({ component: Page });
+export const Route = createFileRoute("/quotes")({
+  // ?ver=<id> abre esa cotización al entrar (ligas desde la solicitud y el pedido).
+  validateSearch: (s: Record<string, unknown>): { ver?: number } => ({
+    ver: typeof s.ver === "number" ? s.ver : typeof s.ver === "string" && s.ver ? Number(s.ver) : undefined,
+  }),
+  component: Page,
+});
 
 /** fin = base del financiamiento que manda el servidor (calculada con el costo real, igual para todos los roles). */
 type Line = { productId: number; qty: number; cashPrice: number; creditPrice: number; uom: string; fin: FinanceBase };
@@ -26,6 +33,65 @@ type Offer = "cash" | "credit" | "both";
 
 function offerLabel(o: string) {
   return o === "cash" ? "Contado" : o === "credit" ? "Crédito" : "Contado y crédito";
+}
+
+function round4(n: number) {
+  return Math.round(n * 10000) / 10000;
+}
+
+/**
+ * Una columna de precio (contado o crédito) con captura inversa: se escribe el
+ * precio, la utilidad o el margen %, y las otras dos se despejan al momento.
+ *   utilidad = precio − costo puesto − financiamiento (0 al contado)
+ *   margen % = utilidad / costo puesto
+ * Sin costo visible (rol sin costos o partida sin costo) solo se captura el precio.
+ * Utilidad negativa: se pinta en rojo y se avisa, no se bloquea.
+ */
+function OfferCells({
+  price,
+  landed,
+  fin,
+  cur,
+  editable,
+  onPrice,
+}: {
+  price: number;
+  landed: number;
+  fin: number;
+  cur: string;
+  editable: boolean;
+  onPrice: (p: number) => void;
+}) {
+  const hasCost = landed > 0.009;
+  const util = price - landed - fin;
+  const pct = hasCost ? (util / landed) * 100 : 0;
+  const neg = hasCost && util < -0.009;
+  const tone = neg ? "text-danger" : "text-ok";
+  return (
+    <>
+      <td className="py-1.5 text-right">
+        {editable ? <MoneyField value={price} onChange={(p) => onPrice(round4(p))} /> : <span className="tabular-nums">{moneyIn(price, cur)}</span>}
+      </td>
+      <td className={`py-1.5 text-right tabular-nums ${tone}`}>
+        {!hasCost ? (
+          "—"
+        ) : editable ? (
+          <MoneyField className={`w-24 ${neg ? "text-danger" : ""}`} value={round4(util)} onChange={(u) => onPrice(round4(landed + fin + u))} />
+        ) : (
+          moneyIn(util, cur)
+        )}
+      </td>
+      <td className={`py-1.5 text-right tabular-nums ${neg ? "text-danger" : ""}`}>
+        {!hasCost ? (
+          "—"
+        ) : editable ? (
+          <QtyField className={`w-20 ${neg ? "text-danger" : ""}`} value={Math.round(pct * 100) / 100} onChange={(m) => onPrice(round4(landed + fin + (landed * m) / 100))} />
+        ) : (
+          `${pct.toFixed(1)}%`
+        )}
+      </td>
+    </>
+  );
 }
 
 function Page() {
@@ -78,6 +144,28 @@ function Page() {
   useEffect(() => {
     void load().catch((e) => setError(humanError(e)));
   }, []);
+
+  /** Abre (o cierra) el panel de un folio y deja listos los precios/cantidades para revisar o aceptar. */
+  function openQuote(id: number | null, qlines: NonNullable<typeof data>["lines"]) {
+    setViewId(id);
+    if (!id) return;
+    const next: Record<number, number> = {};
+    const prices: Record<number, { cash: number; credit: number; qty: number }> = {};
+    for (const l of qlines) {
+      next[l.product_id] = Number(l.qty);
+      prices[l.product_id] = { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
+    }
+    setTake(next);
+    setRevPrices(prices);
+  }
+
+  // Llegó con ?ver=<id> (liga desde la solicitud o el pedido): abrir ese folio al cargar.
+  const { ver } = Route.useSearch();
+  useEffect(() => {
+    if (!data || !ver || viewId === ver) return;
+    if (!data.quotes.some((q) => q.id === ver)) return;
+    openQuote(ver, (data.lines ?? []).filter((l) => l.quote_id === ver));
+  }, [data, ver]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -460,21 +548,7 @@ function Page() {
                       <button
                         type="button"
                         className="erp-btn h-8 text-[12px]"
-                        onClick={() => {
-                          setViewId(open ? null : qrow.id);
-                          const next: Record<number, number> = {};
-                          const prices: Record<number, { cash: number; credit: number; qty: number }> = {};
-                          for (const l of qlines) {
-                            next[l.product_id] = Number(l.qty);
-                            prices[l.product_id] = {
-                              cash: Number(l.cash_price),
-                              credit: Number(l.credit_price),
-                              qty: Number(l.qty),
-                            };
-                          }
-                          setTake(next);
-                          setRevPrices(prices);
-                        }}
+                        onClick={() => openQuote(open ? null : qrow.id, qlines)}
                       >
                         {open ? "Cerrar" : "Ver"}
                       </button>
@@ -488,70 +562,143 @@ function Page() {
                       <div className="mb-1 flex flex-wrap items-center gap-2">
                         <p className="text-sm font-semibold">Documento al cliente</p>
                         <span className="erp-chip">Revisión {qrow.revision}</span>
+                        {qrow.accepted_offer === "cash" || qrow.accepted_offer === "credit" ? (
+                          <span className="erp-chip border-ok">El cliente aceptó el precio de {OFFER_LABEL[qrow.accepted_offer]}</span>
+                        ) : null}
+                        {qrow.request_name || qrow.order_name ? (
+                          <span className="text-[12px] text-muted">
+                            {qrow.request_name ? `${qrow.request_name} → ` : ""}
+                            {qrow.name}
+                            {qrow.order_name && qrow.order_id ? (
+                              <>
+                                {" → "}
+                                <Link to="/sales/$orderId" params={{ orderId: String(qrow.order_id) }} className="font-medium text-accent hover:underline">
+                                  {qrow.order_name}
+                                </Link>
+                              </>
+                            ) : null}
+                          </span>
+                        ) : null}
                       </div>
                       <p className="mb-3 text-[12px] text-muted">
-                        {both ? "Van los dos precios: contado y crédito." : offerLabel(qrow.price_offer) + "."} {cur === "USD" ? `Dólar pactado ${Number(qrow.fx_rate)} MXN.` : "Moneda MXN."} Azagro vende: no aparece el proveedor ni tu costo.
-                        {!closed ? " Edita el precio abajo y guarda para crear la siguiente revisión." : ""}
+                        {both ? "Van los dos precios: contado y crédito, cada uno con su propio margen." : offerLabel(qrow.price_offer) + "."}{" "}
+                        {cur === "USD" ? `Dólar pactado ${Number(qrow.fx_rate)} MXN.` : "Moneda MXN."} Al cliente solo le llega el precio: no ve proveedor, costo ni margen.
+                        {!closed
+                          ? " Escribe el precio, la utilidad o el margen % de cualquiera de las dos columnas y lo demás se despeja solo; al guardar queda como siguiente revisión y el margen guardado de la partida se recalcula."
+                          : ""}
                       </p>
-                      <table className="mb-4 w-full text-left text-[13px]">
-                        <thead className="text-[11px] uppercase tracking-wide text-muted">
-                          <tr>
-                            <th className="py-1 font-medium">Producto</th>
-                            <th className="py-1 text-right font-medium">Cant.</th>
-                            {both || qrow.price_offer === "cash" ? <th className="py-1 text-right font-medium">P. contado</th> : null}
-                            {both || qrow.price_offer === "credit" ? <th className="py-1 text-right font-medium">P. crédito</th> : null}
-                            <th className="py-1 text-right font-medium">Importe</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {qlines.map((l) => {
+                      {/* Precio · costo · utilidad · margen en una sola tabla. Captura inversa: cualquiera de los tres
+                          campos de una columna mueve a los otros dos. Contado y crédito son independientes: mover uno
+                          no toca el otro (cada columna guarda su propio margen). */}
+                      <div className="mb-4 overflow-x-auto">
+                        <table className="w-full min-w-[980px] text-left text-[13px]">
+                          <thead className="text-[11px] uppercase tracking-wide text-muted">
+                            <tr className="border-b border-line">
+                              <th className="py-1 font-medium" colSpan={3} />
+                              {both || qrow.price_offer === "cash" ? (
+                                <th className="py-1 text-center font-semibold" colSpan={3}>
+                                  Contado
+                                </th>
+                              ) : null}
+                              {both || qrow.price_offer === "credit" ? (
+                                <th className="py-1 text-center font-semibold" colSpan={4}>
+                                  Crédito {qrow.credit_days} d
+                                </th>
+                              ) : null}
+                              <th className="py-1 font-medium" colSpan={2} />
+                            </tr>
+                            <tr>
+                              <th className="py-1 font-medium">Producto</th>
+                              <th className="py-1 text-right font-medium">Cant.</th>
+                              <th className="py-1 text-right font-medium">Costo puesto</th>
+                              {both || qrow.price_offer === "cash" ? (
+                                <>
+                                  <th className="py-1 text-right font-medium">Precio</th>
+                                  <th className="py-1 text-right font-medium">Utilidad /u</th>
+                                  <th className="py-1 text-right font-medium">Margen %</th>
+                                </>
+                              ) : null}
+                              {both || qrow.price_offer === "credit" ? (
+                                <>
+                                  <th className="py-1 text-right font-medium">Financ. /u</th>
+                                  <th className="py-1 text-right font-medium">Precio</th>
+                                  <th className="py-1 text-right font-medium">Utilidad /u</th>
+                                  <th className="py-1 text-right font-medium">Margen %</th>
+                                </>
+                              ) : null}
+                              <th className="py-1 text-right font-medium">Importe</th>
+                              <th className="py-1 text-right font-medium">Stock</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {qlines.map((l) => {
+                              const rp = revPrices[l.product_id] ?? { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
+                              const cost = num(l.cost);
+                              const freight = num(l.freight);
+                              const landed = cost + freight;
+                              const fin = num(l.fin_unit);
+                              const short = Number(l.qty) > Number(l.on_hand_own) + 0.0001;
+                              const setPrice = (which: "cash" | "credit", p: number) =>
+                                setRevPrices((prev) => ({ ...prev, [l.product_id]: { ...(prev[l.product_id] ?? rp), [which]: p } }));
+                              return (
+                                <tr key={l.id} className="border-t border-line/60">
+                                  <td className="py-1.5">{l.product}</td>
+                                  <td className="py-1.5 text-right tabular-nums">{qty(l.qty)} {l.uom}</td>
+                                  <td className="py-1.5 text-right tabular-nums">
+                                    {landed > 0.009 ? (
+                                      <span title={freight > 0.009 ? `costo ${moneyIn(cost, cur)} + flete ${moneyIn(freight, cur)}` : undefined}>{moneyIn(landed, cur)}</span>
+                                    ) : (
+                                      <span className="text-muted">—</span>
+                                    )}
+                                  </td>
+                                  {both || qrow.price_offer === "cash" ? (
+                                    <OfferCells price={rp.cash} landed={landed} fin={0} cur={cur} editable={!closed} onPrice={(p) => setPrice("cash", p)} />
+                                  ) : null}
+                                  {both || qrow.price_offer === "credit" ? (
+                                    <>
+                                      <td className="py-1.5 text-right tabular-nums text-muted">{fin > 0.009 ? moneyIn(fin, cur) : "—"}</td>
+                                      <OfferCells price={rp.credit} landed={landed} fin={fin} cur={cur} editable={!closed} onPrice={(p) => setPrice("credit", p)} />
+                                    </>
+                                  ) : null}
+                                  <td className="py-1.5 text-right tabular-nums">
+                                    {qrow.price_offer === "credit" ? (
+                                      moneyIn(Number(l.qty) * rp.credit, cur)
+                                    ) : (
+                                      <>
+                                        {moneyIn(Number(l.qty) * rp.cash, cur)}
+                                        {both ? <div className="text-[11px] text-muted">crédito {moneyIn(Number(l.qty) * rp.credit, cur)}</div> : null}
+                                      </>
+                                    )}
+                                  </td>
+                                  <td className={`py-1.5 text-right text-[12px] tabular-nums ${short ? "text-warn" : "text-muted"}`}>
+                                    casa {qty(l.on_hand_own)} · prov {qty(l.on_hand_supplier)}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {(() => {
+                        // Aviso, no candado: se puede guardar con utilidad negativa, pero que se vea.
+                        const rojas = qlines
+                          .map((l) => {
                             const rp = revPrices[l.product_id] ?? { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
-                            const sale = qrow.price_offer === "credit" ? rp.credit : rp.cash;
-                            return (
-                              <tr key={l.id}>
-                                <td className="py-1.5">{l.product}</td>
-                                <td className="py-1.5 text-right tabular-nums">{qty(l.qty)} {l.uom}</td>
-                                {both || qrow.price_offer === "cash" ? (
-                                  <td className="py-1.5 text-right">
-                                    {closed ? (
-                                      <span className="tabular-nums">{moneyIn(l.cash_price, cur)}</span>
-                                    ) : (
-                                      <MoneyField
-                                        value={rp.cash}
-                                        onChange={(cash) =>
-                                          setRevPrices((p) => ({
-                                            ...p,
-                                            [l.product_id]: {
-                                              ...rp,
-                                              cash,
-                                              // Revisión = volver a cotizar hoy: el servidor ya trae la base
-                                              // del financiamiento de la partida con la TIIE y el spread vigentes.
-                                              credit: creditFromCash({ cash, fin: l.fin, days: qrow.credit_days }),
-                                            },
-                                          }))
-                                        }
-                                      />
-                                    )}
-                                  </td>
-                                ) : null}
-                                {both || qrow.price_offer === "credit" ? (
-                                  <td className="py-1.5 text-right">
-                                    {closed ? (
-                                      <span className="tabular-nums">{moneyIn(l.credit_price, cur)}</span>
-                                    ) : (
-                                      <MoneyField
-                                        value={rp.credit}
-                                        onChange={(credit) => setRevPrices((p) => ({ ...p, [l.product_id]: { ...rp, credit } }))}
-                                      />
-                                    )}
-                                  </td>
-                                ) : null}
-                                <td className="py-1.5 text-right tabular-nums">{moneyIn(Number(l.qty) * sale, cur)}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
+                            const landed = num(l.cost) + num(l.freight);
+                            if (landed <= 0.009) return null;
+                            const cashNeg = (both || qrow.price_offer === "cash") && rp.cash - landed < -0.009;
+                            const creditNeg = (both || qrow.price_offer === "credit") && rp.credit - landed - num(l.fin_unit) < -0.009;
+                            if (!cashNeg && !creditNeg) return null;
+                            return `${l.product} (${[cashNeg ? "contado" : "", creditNeg ? "crédito" : ""].filter(Boolean).join(" y ")})`;
+                          })
+                          .filter(Boolean);
+                        return rojas.length ? (
+                          <p className="mb-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+                            Utilidad negativa: el precio no cubre el costo puesto{both || qrow.price_offer === "credit" ? " más el financiamiento" : ""} en {rojas.join(", ")}. Se puede guardar
+                            así, pero revísalo.
+                          </p>
+                        ) : null;
+                      })()}
                       {!closed && (() => {
                         const priceDirty = qlines.some((l) => {
                           const rp = revPrices[l.product_id];
@@ -602,54 +749,6 @@ function Page() {
                           </div>
                         );
                       })()}
-                      <p className="mb-1 text-sm font-semibold">Tu costo y margen (no sale en el documento)</p>
-                      <p className="mb-2 text-[12px] text-muted">
-                        Para renegociar sin volver a la solicitud. Costo = lo que te cotizó el proveedor ganador + flete.
-                      </p>
-                      <table className="mb-4 w-full text-left text-[13px]">
-                        <thead className="text-[11px] uppercase tracking-wide text-muted">
-                          <tr>
-                            <th className="py-1 font-medium">Producto</th>
-                            <th className="py-1 text-right font-medium">Costo</th>
-                            <th className="py-1 text-right font-medium">Flete</th>
-                            <th className="py-1 text-right font-medium">P. venta</th>
-                            <th className="py-1 text-right font-medium">Margen</th>
-                            <th className="py-1 text-right font-medium">%</th>
-                            <th className="py-1 text-right font-medium">Stock</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {qlines.map((l) => {
-                            const rp = revPrices[l.product_id] ?? { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
-                            const sale = qrow.price_offer === "credit" ? rp.credit : rp.cash;
-                            const cost = num(l.cost);
-                            const freight = num(l.freight);
-                            const landed = cost + freight;
-                            const margin = sale - landed;
-                            const pct = landed > 0.009 ? (margin / landed) * 100 : 0;
-                            const short = Number(l.qty) > Number(l.on_hand_own) + 0.0001;
-                            return (
-                              <tr key={`m-${l.id}`}>
-                                <td className="py-1.5">{l.product}</td>
-                                <td className="py-1.5 text-right tabular-nums">
-                                  {cost > 0.009 ? moneyIn(cost, cur) : <span className="text-warn">Sin costo</span>}
-                                </td>
-                                <td className="py-1.5 text-right tabular-nums">{freight > 0.009 ? moneyIn(freight, cur) : "—"}</td>
-                                <td className="py-1.5 text-right tabular-nums">{moneyIn(sale, cur)}</td>
-                                <td className={`py-1.5 text-right tabular-nums ${margin < 0 ? "text-danger" : "text-ok"}`}>
-                                  {landed > 0.009 ? moneyIn(margin, cur) : "—"}
-                                </td>
-                                <td className={`py-1.5 text-right tabular-nums ${margin < 0 ? "text-danger" : ""}`}>
-                                  {landed > 0.009 ? `${pct.toFixed(1)}%` : "—"}
-                                </td>
-                                <td className={`py-1.5 text-right tabular-nums ${short ? "text-warn" : "text-muted"}`}>
-                                  casa {qty(l.on_hand_own)} · prov {qty(l.on_hand_supplier)}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
                       <p className="mb-2 text-sm font-semibold">¿Qué respondió el cliente?</p>
                       <p className="mb-3 text-[12px] text-muted">
                         Si aceptó, se abre el pedido. Si cotizaste ambos precios, indica si aceptó de contado o a crédito. Mora no entra aquí: corre del vencimiento al día de pago.

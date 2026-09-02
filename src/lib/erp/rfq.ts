@@ -6,6 +6,7 @@ import { assertCan } from "@/lib/erp/acl";
 import { addDays } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
+import { assertRfqOpen } from "@/lib/erp/request-lock";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 async function cid(sql: Sql, userId: string) {
@@ -186,6 +187,8 @@ export const saveRfqBid = createServerFn({ method: "POST" })
     const sql = await getSql();
     await assertCan(sql, context.userId, "purchases", "edit");
     await ensure(sql);
+    // Si la solicitud de esta SC ya cotizó al cliente, las ofertas se congelan.
+    await assertRfqOpen(sql, data.rfqId);
     await sql`
       insert into vendor_rfq_bids (rfq_id, partner_id, product_id, unit_price)
       values (${data.rfqId}, ${data.partnerId}, ${data.productId}, ${data.unitPrice})

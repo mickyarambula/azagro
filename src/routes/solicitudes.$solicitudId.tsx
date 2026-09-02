@@ -7,7 +7,20 @@ import { SendButton } from "@/components/send-doc";
 import { getSettings } from "@/lib/erp/ops";
 import { saveRfqBid } from "@/lib/erp/rfq";
 import { annualRate, priceSale } from "@/lib/erp/pricing";
-import { applyCheapest, deleteRequest, getRequest, listRequests, pickVendor, quoteFromRequest, saveLineFreight, saveLineMargin, sendVendorRfq, updateRequest } from "@/lib/erp/requests";
+import { marginOf, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
+import {
+  applyCheapest,
+  deleteRequest,
+  getRequest,
+  listRequests,
+  pickVendor,
+  quoteFromRequest,
+  saveLineFreight,
+  saveLineMargin,
+  saveRequestTerms,
+  sendVendorRfq,
+  updateRequest,
+} from "@/lib/erp/requests";
 import { destText, RequestFields, type RequestDraft } from "@/components/request-form";
 import { Expediente } from "@/components/expediente";
 import { listDeliveryPoints } from "@/lib/erp/locations";
@@ -20,6 +33,82 @@ const MODE_LABEL: Record<string, string> = {
   bodega: "En bodega",
   pickup: "El cliente recolecta",
 };
+
+type LineRow = Awaited<ReturnType<typeof getRequest>>["lines"][number];
+
+/**
+ * Una columna de margen (contado o crédito). Cada una guarda por su cuenta:
+ * cambiar el margen contado no mueve el de crédito ni al revés. Se guarda al
+ * salir del campo (onCommit), nunca por tecla; el selector de modo es aparte.
+ */
+function MarginCell({
+  requestId,
+  line,
+  which,
+  marginUnit,
+  disabled,
+  onSaved,
+  onError,
+}: {
+  requestId: number;
+  line: LineRow;
+  which: Offer;
+  marginUnit: number;
+  disabled: boolean;
+  onSaved: () => Promise<void>;
+  onError: (e: unknown) => void;
+}) {
+  const m = marginOf(line, which);
+  const save = (marginMode: "pct" | "nominal", marginPct: number, marginNominal: number) =>
+    saveLineMargin({ data: { requestId, productId: line.product_id, which, marginMode, marginPct, marginNominal } })
+      .then(onSaved)
+      .catch(onError);
+  if (disabled) {
+    return (
+      <span className="tabular-nums">
+        {m.mode === "nominal" ? `${money(m.nominal)} / ${line.uom}` : `${m.pct}%`}
+        {m.legacy ? <span className="block text-[11px] text-muted">margen único anterior</span> : null}
+      </span>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1">
+      <select
+        className="erp-input w-[5.5rem]"
+        value={m.mode}
+        onChange={(e) => {
+          const marginMode = e.target.value as "pct" | "nominal";
+          void save(marginMode, m.pct, m.nominal || marginUnit);
+        }}
+      >
+        <option value="pct">%</option>
+        <option value="nominal">$ / {line.uom}</option>
+      </select>
+      {m.mode === "pct" ? (
+        <QtyField
+          className="w-20"
+          value={m.pct}
+          onCommit={(n) => {
+            void saveLineMargin({ data: { requestId, productId: line.product_id, which, marginMode: "pct", marginPct: n, marginNominal: 0 } })
+              .then(onSaved)
+              .catch(onError);
+          }}
+        />
+      ) : (
+        <MoneyField
+          className="w-24"
+          value={m.nominal}
+          onCommit={(n) => {
+            void saveLineMargin({ data: { requestId, productId: line.product_id, which, marginMode: "nominal", marginPct: 0, marginNominal: n } })
+              .then(onSaved)
+              .catch(onError);
+          }}
+        />
+      )}
+      {m.legacy ? <span className="text-[11px] text-muted" title="Viene del margen único de antes; al guardar queda como margen propio de esta columna">*</span> : null}
+    </div>
+  );
+}
 
 function Page() {
   const { solicitudId } = Route.useParams();
@@ -55,6 +144,15 @@ function Page() {
       }
     }
     setTargets(next);
+    // Plazo, moneda y TC viven en la solicitud (se guardan al capturarlos) y,
+    // si ya cotizó, mandan los de la cotización. Antes solo estaban en memoria
+    // y se perdían al salir de la página.
+    const termDays = d.quote ? d.quote.credit_days : d.request.credit_days;
+    const termCur = d.quote ? d.quote.currency : d.request.currency;
+    const termFx = d.quote ? d.quote.fx_rate : d.request.fx_rate;
+    if (termDays != null) setDays(termDays);
+    if (termCur === "USD" || termCur === "MXN") setCurrency(termCur);
+    if (termFx != null && Number(termFx) > 0) setFxRate(Number(termFx));
     if (!d.request.quote_id) {
       setDraft({
         partnerId: String(d.request.partner_id),
@@ -103,8 +201,15 @@ function Page() {
     return <p className="text-sm text-muted">{error ?? "Cargando la solicitud…"}</p>;
   }
 
-  const { request, lines, suppliers } = data;
+  const { request, lines, suppliers, quote, orders } = data;
+  // Candado: en cuanto hay cotización la solicitud queda de solo lectura.
+  const locked = Boolean(request.quote_id);
   const deliveryNote = `${MODE_LABEL[request.delivery_mode] ?? request.delivery_mode}${request.delivery_to ? ` · ${request.delivery_to}` : ""}`;
+  const fail = (e: unknown) => setError(humanError(e));
+  const saveTerms = (patch: { creditDays?: number; currency?: "USD" | "MXN"; fxRate?: number }) => {
+    if (locked) return;
+    void saveRequestTerms({ data: { id, ...patch } }).catch(fail);
+  };
 
   return (
     <>
@@ -125,7 +230,7 @@ function Page() {
           <p className="mt-0.5 text-[12px] text-muted">El proveedor nunca ve el nombre del cliente. El cliente nunca ve el nombre del proveedor.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {!request.quote_id && (
+          {!locked && (
             <>
               <button
                 type="button"
@@ -158,10 +263,34 @@ function Page() {
           )}
         </div>
       </div>
+      {locked && (
+        <div className="mb-4 erp-card border-ok p-3 text-sm">
+          <p>
+            <strong>Esta solicitud ya generó</strong>{" "}
+            <Link to="/quotes" search={{ ver: request.quote_id ?? undefined }} className="font-semibold text-accent">
+              {quote?.name ?? request.quote_name ?? "una cotización"}
+            </Link>
+            {orders.map((o) => (
+              <span key={o.id}>
+                {" → "}
+                <Link to="/sales/$orderId" params={{ orderId: String(o.id) }} className="font-semibold text-accent">
+                  {o.name}
+                </Link>
+              </span>
+            ))}
+            {quote?.accepted_offer ? ` · el cliente aceptó el precio de ${OFFER_LABEL[quote.accepted_offer as Offer] ?? quote.accepted_offer}` : ""}
+            .
+          </p>
+          <p className="mt-1 text-[12px] text-muted">
+            Aquí ya no se cambia nada: costo, proveedor, flete, márgenes y plazo viven en la cotización. Los cambios se hacen desde ahí
+            (revisión antes de que el cliente acepte). Si el pedido necesita otro plazo, se cambia en el pedido.
+          </p>
+        </div>
+      )}
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}
       {msg && <p className="mb-3 text-sm text-ok">{msg}</p>}
 
-      {editing && draft && lookups && !request.quote_id ? (
+      {editing && draft && lookups && !locked ? (
         <form
           className="mb-6"
           onSubmit={async (e) => {
@@ -274,6 +403,7 @@ function Page() {
                       <td key={s.id} className="px-3 py-2 text-center">
                         <input
                           type="checkbox"
+                          disabled={locked}
                           checked={!!targets[k]}
                           onChange={(e) => setTargets((t) => ({ ...t, [k]: e.target.checked }))}
                         />
@@ -289,7 +419,7 @@ function Page() {
           <button
             type="button"
             className="erp-btn-primary"
-            disabled={busy || invitedIds.length === 0}
+            disabled={busy || locked || invitedIds.length === 0}
             onClick={async () => {
               setBusy(true);
               setError(null);
@@ -348,8 +478,9 @@ function Page() {
         <h2 className="mb-1 text-sm font-semibold">3. Comparativa (interno)</h2>
         <p className="mb-3 text-[13px] text-muted">
           Escribe el precio que te cotizó cada proveedor, debajo de su nombre. El recuadro marcado es el ganador. El recomendado es el más barato; si eliges otro (crédito, servicio), se respeta.
+          {locked ? " Ya cotizó: el ganador y su precio quedaron fijos." : ""}
         </p>
-        {data.rfq ? (
+        {data.rfq && !locked ? (
           <button
             type="button"
             className="erp-btn mb-3"
@@ -412,6 +543,7 @@ function Page() {
                                   <MoneyField
                                     className="w-full max-w-[9rem]"
                                     placeholder="precio"
+                                    disabled={locked}
                                     value={price}
                                     onCommit={(n) => {
                                       void saveRfqBid({ data: { rfqId: data.rfq!.id, partnerId: s.id, productId: l.product_id, unitPrice: n } })
@@ -422,7 +554,7 @@ function Page() {
                                   <button
                                     type="button"
                                     className={win ? "text-[11px] font-semibold text-ok" : "text-[11px] text-accent hover:underline"}
-                                    disabled={busy}
+                                    disabled={busy || locked}
                                     onClick={() => {
                                       if (!price) {
                                         setError("Escribe el precio de ese proveedor antes de marcarlo ganador.");
@@ -446,6 +578,7 @@ function Page() {
                           <MoneyField
                             className="w-full"
                             placeholder="0"
+                            disabled={locked}
                             value={num(l.freight)}
                             onCommit={(n) => {
                               void saveLineFreight({ data: { requestId: id, productId: l.product_id, freight: n } })
@@ -466,53 +599,91 @@ function Page() {
 
       <section className="mb-6">
         <h2 className="mb-1 text-sm font-semibold">4. Cotización al cliente (lo que sí ve el cliente)</h2>
-        <p className="mb-3 text-[13px] text-muted">Azagro vende. No aparece quién nos cotizó. TIIE y spread van separados; la tasa es la suma.</p>
+        <p className="mb-3 text-[13px] text-muted">
+          Azagro vende. No aparece quién nos cotizó. Dos precios por partida, cada uno con su propio margen: <strong>contado</strong> = costo puesto + margen
+          contado; <strong>crédito</strong> = costo puesto + margen crédito + financiamiento. TIIE y spread van separados; la tasa es la suma.
+        </p>
         <div className="mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           <HeadBox label="Moneda">
-            <select className="erp-input w-full border-0 bg-transparent px-0" value={currency} onChange={(e) => setCurrency(e.target.value as "USD" | "MXN")}>
+            <select
+              className="erp-input w-full border-0 bg-transparent px-0"
+              value={currency}
+              disabled={locked}
+              onChange={(e) => {
+                const c = e.target.value as "USD" | "MXN";
+                setCurrency(c);
+                saveTerms({ currency: c });
+              }}
+            >
               <option value="USD">USD</option>
               <option value="MXN">MXN</option>
             </select>
           </HeadBox>
           {currency === "USD" ? (
             <HeadBox label="TC">
-              <MoneyField className="w-full border-0 bg-transparent px-0" value={fxRate} onChange={setFxRate} />
+              <MoneyField
+                className="w-full border-0 bg-transparent px-0"
+                value={fxRate}
+                disabled={locked}
+                onChange={setFxRate}
+                onCommit={(n) => saveTerms({ fxRate: n })}
+              />
             </HeadBox>
           ) : null}
           <HeadBox label="Plazo días">
-            <QtyField className="w-full border-0 bg-transparent px-0" value={days} onChange={setDays} />
+            <QtyField
+              className="w-full border-0 bg-transparent px-0"
+              value={days}
+              disabled={locked}
+              onChange={setDays}
+              onCommit={(n) => saveTerms({ creditDays: Math.max(0, Math.floor(n)) })}
+            />
           </HeadBox>
           <HeadBox label="TIIE %">
-            <QtyField className="w-full border-0 bg-transparent px-0" value={tiiePct} onChange={setTiiePct} />
+            <QtyField className="w-full border-0 bg-transparent px-0" value={tiiePct} disabled={locked} onChange={setTiiePct} />
           </HeadBox>
           <HeadBox label="Spread ASR %">
-            <QtyField className="w-full border-0 bg-transparent px-0" value={spreadPct} onChange={setSpreadPct} />
+            <QtyField className="w-full border-0 bg-transparent px-0" value={spreadPct} disabled={locked} onChange={setSpreadPct} />
           </HeadBox>
           <HeadBox label="Comisión ASR %">
-            <QtyField className="w-full border-0 bg-transparent px-0" value={commissionPct} onChange={setCommissionPct} />
+            <QtyField className="w-full border-0 bg-transparent px-0" value={commissionPct} disabled={locked} onChange={setCommissionPct} />
           </HeadBox>
         </div>
         <p className="mb-3 text-[13px] text-muted">
-          Precio = costo + margen + <strong>financiamiento encima</strong>, por unidad: costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × {(1 + commissionPct / 100).toFixed(2)} × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × {days} d / 360.
-          {days === 0 ? " Contado: sin financiamiento, precio = costo + margen." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El 9% de mora NO va aquí: es factura de intereses al vencimiento.
+          Financiamiento por unidad (solo en el precio a crédito): costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × {(1 + commissionPct / 100).toFixed(2)} × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × {days} d / 360.
+          {days === 0 ? " Con 0 días solo se ofrece contado." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El 9% de mora NO va aquí: es factura de intereses al vencimiento.
         </p>
         <div className="overflow-x-auto erp-card">
-          <table className="w-full min-w-[980px] text-left text-[13px]">
+          <table className="w-full min-w-[1180px] text-left text-[13px]">
             <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
               <tr>
                 <th className="px-4 py-2.5 font-medium">Producto</th>
-                <th className="px-3 py-2.5 text-right font-medium">Costo</th>
-                <th className="px-3 py-2.5 font-medium">Margen</th>
-                <th className="px-3 py-2.5 text-right font-medium">Valor</th>
-                <th className="px-3 py-2.5 text-right font-medium">Equivale</th>
+                <th className="px-3 py-2.5 text-right font-medium">Costo puesto</th>
+                <th className="px-3 py-2.5 font-medium">Margen contado</th>
+                <th className="px-3 py-2.5 text-right font-medium">Precio contado</th>
+                <th className="px-3 py-2.5 font-medium">Margen crédito</th>
                 <th className="px-3 py-2.5 text-right font-medium">Financiero /u</th>
-                <th className="px-3 py-2.5 text-right font-medium">Precio / UoM</th>
+                <th className="px-3 py-2.5 text-right font-medium">Precio crédito {days > 0 ? `${days} d` : ""}</th>
                 <th className="px-3 py-2.5 text-right font-medium">Importe</th>
               </tr>
             </thead>
             <tbody>
               {lines.map((l) => {
-                const mode = (l.margin_mode === "nominal" ? "nominal" : "pct") as "pct" | "nominal";
+                const mCash = marginOf(l, "cash");
+                const mCredit = marginOf(l, "credit");
+                const cashCalc = priceSale({
+                  cost: num(l.cost),
+                  freight: num(l.freight),
+                  other: 0,
+                  days: 0,
+                  tiie: tiiePct / 100,
+                  costSpread: spreadPct / 100,
+                  commissionRate: commissionPct / 100,
+                  marginMode: mCash.mode,
+                  marginPct: mCash.pct,
+                  marginNominal: mCash.nominal,
+                  qty: num(l.qty),
+                });
                 const calc = priceSale({
                   cost: num(l.cost),
                   freight: num(l.freight),
@@ -521,65 +692,36 @@ function Page() {
                   tiie: tiiePct / 100,
                   costSpread: spreadPct / 100,
                   commissionRate: commissionPct / 100,
-                  marginMode: mode,
-                  marginPct: num(l.margin_pct) || 12,
-                  marginNominal: num(l.margin_nominal),
+                  marginMode: mCredit.mode,
+                  marginPct: mCredit.pct,
+                  marginNominal: mCredit.nominal,
                   qty: num(l.qty),
                 });
                 return (
-                  <tr key={l.id} className="border-t border-line">
+                  <tr key={l.id} className="border-t border-line align-top">
                     <td className="px-4 py-2.5">
                       {l.product}
                       <span className="ml-2 text-[11px] text-muted">{qty(l.qty)} {l.uom}</span>
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
-                      {num(l.cost) > 0 ? money(num(l.cost)) : <span className="text-warn">Sin costo</span>}
-                      {num(l.freight) > 0 ? <span className="block text-[11px] text-muted">+ flete {money(num(l.freight))}</span> : null}
+                      {num(l.cost) > 0 ? money(cashCalc.landedUnit) : <span className="text-warn">Sin costo</span>}
+                      {num(l.freight) > 0 ? <span className="block text-[11px] text-muted">{money(num(l.cost))} + flete {money(num(l.freight))}</span> : null}
                     </td>
                     <td className="px-3 py-2">
-                      <select
-                        className="erp-input"
-                        value={mode}
-                        onChange={(e) => {
-                          const marginMode = e.target.value as "pct" | "nominal";
-                          void saveLineMargin({
-                            data: {
-                              requestId: id,
-                              productId: l.product_id,
-                              marginMode,
-                              marginPct: num(l.margin_pct) || 12,
-                              marginNominal: num(l.margin_nominal) || calc.marginUnit,
-                            },
-                          }).then(load);
-                        }}
-                      >
-                        <option value="pct">% margen</option>
-                        <option value="nominal">$ por {l.uom}</option>
-                      </select>
+                      <MarginCell requestId={id} line={l} which="cash" marginUnit={cashCalc.marginUnit} disabled={locked} onSaved={load} onError={fail} />
+                      <span className="block text-[11px] text-muted tabular-nums">
+                        {mCash.mode === "pct" ? `${money(cashCalc.marginUnit)} / ${l.uom}` : `${cashCalc.marginPct.toFixed(1)}%`} · total {money(cashCalc.margin)}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">
+                      <span className={cashCalc.marginUnit < 0 ? "text-danger" : ""}>{money(cashCalc.priceUnit)}</span>
+                      <span className="block text-[11px] text-muted">costo {money(cashCalc.landedUnit)} + margen {money(cashCalc.marginUnit)}</span>
                     </td>
                     <td className="px-3 py-2">
-                      {mode === "pct" ? (
-                        <QtyField
-                          value={num(l.margin_pct) || 12}
-                          onCommit={(n) => {
-                            void saveLineMargin({
-                              data: { requestId: id, productId: l.product_id, marginMode: "pct", marginPct: n, marginNominal: 0 },
-                            }).then(load);
-                          }}
-                        />
-                      ) : (
-                        <MoneyField
-                          value={num(l.margin_nominal)}
-                          onCommit={(n) => {
-                            void saveLineMargin({
-                              data: { requestId: id, productId: l.product_id, marginMode: "nominal", marginPct: 0, marginNominal: n },
-                            }).then(load);
-                          }}
-                        />
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-[12px] text-muted tabular-nums">
-                      {mode === "pct" ? `${money(calc.marginUnit)} / ${l.uom} · total ${money(calc.margin)}` : `${calc.marginPct.toFixed(1)}% · total ${money(calc.margin)}`}
+                      <MarginCell requestId={id} line={l} which="credit" marginUnit={calc.marginUnit} disabled={locked} onSaved={load} onError={fail} />
+                      <span className="block text-[11px] text-muted tabular-nums">
+                        {mCredit.mode === "pct" ? `${money(calc.marginUnit)} / ${l.uom}` : `${calc.marginPct.toFixed(1)}%`} · total {money(calc.margin)}
+                      </span>
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
                       {calc.financeUnit > 0.009 ? (
@@ -594,12 +736,21 @@ function Page() {
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
-                      {money(calc.priceUnit)}
-                      <span className="block text-[11px] text-muted">
-                        costo {money(calc.landedUnit)} + margen {money(calc.marginUnit)}{calc.financeUnit > 0.009 ? ` + fin ${money(calc.financeUnit)}` : ""}
-                      </span>
+                      {days > 0 ? (
+                        <>
+                          <span className={calc.marginUnit < 0 ? "text-danger" : ""}>{money(calc.priceUnit)}</span>
+                          <span className="block text-[11px] text-muted">
+                            costo {money(calc.landedUnit)} + margen {money(calc.marginUnit)}{calc.financeUnit > 0.009 ? ` + fin ${money(calc.financeUnit)}` : ""}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
                     </td>
-                    <td className="px-3 py-2.5 text-right font-medium tabular-nums">{money(calc.price)}</td>
+                    <td className="px-3 py-2.5 text-right font-medium tabular-nums">
+                      {money(cashCalc.price)}
+                      {days > 0 ? <span className="block text-[11px] text-muted">crédito {money(calc.price)}</span> : null}
+                    </td>
                   </tr>
                 );
               })}
@@ -607,9 +758,9 @@ function Page() {
           </table>
         </div>
         <div className="mt-3 flex justify-end">
-          {request.quote_id ? (
-            <Link to="/quotes" className="erp-btn-primary grid place-items-center">
-              Ya existe {request.quote_name ?? "cotización"} — ver documento
+          {locked ? (
+            <Link to="/quotes" search={{ ver: request.quote_id ?? undefined }} className="erp-btn-primary grid place-items-center">
+              Ya existe {quote?.name ?? request.quote_name ?? "cotización"} — ver documento
             </Link>
           ) : (
           <button
@@ -644,13 +795,6 @@ function Page() {
           </button>
           )}
         </div>
-        {request.quote_id ? (
-          <p className="mt-2 text-right text-[13px]">
-            <Link to="/quotes" className="font-semibold text-accent">
-              Abrir {request.quote_name ?? "cotización"} →
-            </Link>
-          </p>
-        ) : null}
       </section>
     </>
   );

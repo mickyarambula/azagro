@@ -4,12 +4,13 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
 import { addDays, computeMora, computeStatementLine, DEFAULT_POLICY, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, moraBilling, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
-import { activeMember, assertAdmin, assertCan, canSeeCosts } from "@/lib/erp/acl";
+import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
-import { financeBase } from "@/lib/erp/pricing";
-import { assertCostForCredit, ensureRefCost, resolveCost } from "@/lib/erp/cost";
+import { financeBase, financeUnit } from "@/lib/erp/pricing";
+import { marginFromPrice, marginOf, marginText, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
+import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -20,6 +21,22 @@ async function companyOf(sql: Sql, userId: string) {
   `;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
+}
+
+/**
+ * Columnas de la migración 0017 (dos precios / dos márgenes / oferta
+ * aceptada) para bases que vienen de antes. Nulo = no capturado; no se
+ * rellena nada aquí.
+ */
+async function ensureTwoPrices(sql: Sql) {
+  for (const col of ["cash", "credit"]) {
+    await sql.query(`alter table quote_lines add column if not exists margin_${col}_mode text`);
+    await sql.query(`alter table quote_lines add column if not exists margin_${col}_pct numeric(8,4)`);
+    await sql.query(`alter table quote_lines add column if not exists margin_${col}_nominal numeric(14,4)`);
+  }
+  await sql`alter table quote_lines add column if not exists finance_unit numeric(14,4)`;
+  await sql`alter table quotes add column if not exists accepted_offer text`;
+  await sql`alter table sales_orders add column if not exists accepted_offer text`;
 }
 
 export async function policy(sql: Sql, companyId: number) {
@@ -330,6 +347,7 @@ export const listQuotes = createServerFn({ method: "GET" })
     await sql`alter table quote_lines add column if not exists credit_price numeric(14,4) not null default 0`;
     await sql`alter table quote_lines add column if not exists cost numeric(14,4) not null default 0`;
     await sql`alter table quote_lines add column if not exists freight numeric(14,4) not null default 0`;
+    await ensureTwoPrices(sql);
     const quotes = await sql<{
       id: number;
       name: string;
@@ -348,6 +366,10 @@ export const listQuotes = createServerFn({ method: "GET" })
       revision: number;
       tiie: string;
       spread: string;
+      accepted_offer: string | null;
+      request_name: string | null;
+      order_name: string | null;
+      order_id: number | null;
     }>`
       select q.id, q.name, q.partner_id, p.name as partner, q.date::text, q.valid_until::text,
         q.currency, q.fx_rate::text, q.state, q.total::text, q.notes, q.delivery_to,
@@ -355,7 +377,11 @@ export const listQuotes = createServerFn({ method: "GET" })
         coalesce(q.price_offer,'both') as price_offer,
         coalesce(q.revision,1) as revision,
         coalesce(q.tiie,0)::text as tiie,
-        coalesce(q.spread,0)::text as spread
+        coalesce(q.spread,0)::text as spread,
+        q.accepted_offer,
+        (select name from customer_requests r where r.quote_id = q.id limit 1) as request_name,
+        (select name from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_name,
+        (select id from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_id
       from quotes q join partners p on p.id = q.partner_id
       where q.company_id = ${cid}
       order by q.id desc
@@ -376,6 +402,16 @@ export const listQuotes = createServerFn({ method: "GET" })
       cost: string;
       ref_cost: string;
       freight: string;
+      margin_cash_mode: string | null;
+      margin_cash_pct: string | null;
+      margin_cash_nominal: string | null;
+      margin_credit_mode: string | null;
+      margin_credit_pct: string | null;
+      margin_credit_nominal: string | null;
+      finance_unit: string | null;
+      q_tiie: string;
+      q_spread: string;
+      q_days: number;
     }>`
       select ql.id, ql.quote_id, ql.product_id, (pr.code || ' — ' || pr.name) as product, ql.qty::text, ql.unit_price::text,
         coalesce(nullif(ql.cash_price,0), ql.unit_price)::text as cash_price,
@@ -386,7 +422,11 @@ export const listQuotes = createServerFn({ method: "GET" })
         coalesce((select sum(q.quantity) from stock_quants q join locations l on l.id = q.location_id where q.product_id = pr.id and l.loc_type = 'supplier'),0)::text as on_hand_supplier,
         coalesce(nullif(ql.cost,0), pr.cost)::text as cost,
         coalesce(pr.ref_cost,0)::text as ref_cost,
-        coalesce(ql.freight,0)::text as freight
+        coalesce(ql.freight,0)::text as freight,
+        ql.margin_cash_mode, ql.margin_cash_pct::text as margin_cash_pct, ql.margin_cash_nominal::text as margin_cash_nominal,
+        ql.margin_credit_mode, ql.margin_credit_pct::text as margin_credit_pct, ql.margin_credit_nominal::text as margin_credit_nominal,
+        ql.finance_unit::text as finance_unit,
+        coalesce(q.tiie,0)::text as q_tiie, coalesce(q.spread,0)::text as q_spread, coalesce(q.credit_days,0)::int as q_days
       from quote_lines ql
       join products pr on pr.id = ql.product_id
       join quotes q on q.id = ql.quote_id
@@ -418,7 +458,29 @@ export const listQuotes = createServerFn({ method: "GET" })
       };
     };
     const pricedProducts = products.map((p) => ({ ...p, ...baseOf(p) }));
-    const pricedLines = lines.map((l) => ({ ...l, ...baseOf(l) }));
+    // Financiamiento por unidad que quedó DENTRO del precio a crédito. Las
+    // cotizaciones nuevas lo traen guardado (finance_unit); las anteriores a
+    // la migración 0017 no, y se deriva con las tasas y el costo con que se
+    // cotizó (solo para mostrar, no se escribe).
+    const finUnitOf = (l: (typeof lines)[number]) => {
+      if (l.finance_unit != null) return { fin_unit: Number(l.finance_unit), fin_source: "guardado" as const };
+      const landed = Number(l.cost) + Number(l.freight);
+      return {
+        fin_unit: financeUnit({ cost: landed, days: l.q_days, tiie: Number(l.q_tiie), costSpread: Number(l.q_spread), commissionRate: pol.asrCommission }),
+        fin_source: "derivado" as const,
+      };
+    };
+    const linesWithBase = lines.map((l) => ({ ...l, ...baseOf(l), ...finUnitOf(l) }));
+    // Los márgenes solo los ve quien puede ver márgenes (no es el mismo grupo que costos).
+    const pricedLines = canSeeMargins(me.role)
+      ? linesWithBase
+      : linesWithBase.map((l) => ({
+          ...l,
+          margin_cash_pct: null,
+          margin_cash_nominal: null,
+          margin_credit_pct: null,
+          margin_credit_nominal: null,
+        }));
     // El costo de compra y el flete no son para ventas: solo quien puede ver costos.
     if (!canSeeCosts(me.role)) {
       return {
@@ -506,10 +568,27 @@ export const createQuote = createServerFn({ method: "POST" })
       returning id
     `;
     await sql`alter table quote_lines add column if not exists uom text not null default ''`;
+    await ensureTwoPrices(sql);
+    // Alta manual: el costo es el del producto (kardex o referencia, mismo orden
+    // que la pantalla) y los dos márgenes se despejan de los precios capturados
+    // (contado sin financiamiento; crédito restando el financiamiento que va
+    // dentro del precio con las tasas de esta cotización). Sin costo no hay
+    // margen que despejar y la partida queda sin margen guardado.
+    const pol = await policy(sql, cid);
+    const costs = await productCosts(sql, cid);
     for (const line of priced) {
+      const p = costs.find((c) => c.id === line.productId);
+      const cost = line.cost > 0 ? line.cost : resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost;
+      const landed = cost + (line.freight ?? 0) + (line.other ?? 0);
+      const fin = financeUnit({ cost: landed, days: plazo, tiie: data.tiie ?? 0, costSpread: data.spread ?? 0, commissionRate: pol.asrCommission });
+      const conMargen = landed > 0.0001;
+      const mCash = conMargen ? marginFromPrice({ price: line.cash, landed, finance: 0, mode: "pct" }) : null;
+      const mCredit = conMargen ? marginFromPrice({ price: line.credit, landed, finance: fin, mode: "pct" }) : null;
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price)
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${line.cost ?? 0}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit})
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price,
+          margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_credit_mode, margin_credit_pct, margin_credit_nominal, finance_unit)
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit},
+          ${mCash?.mode ?? null}, ${mCash?.pct ?? null}, ${mCash?.nominal ?? null}, ${mCredit?.mode ?? null}, ${mCredit?.pct ?? null}, ${mCredit?.nominal ?? null}, ${Number(fin.toFixed(4))})
       `;
     }
     await rememberTrade(sql, {
@@ -554,9 +633,10 @@ export const reviseQuote = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "quotes", "edit");
-    const q = await sql<{ id: number; state: string; name: string; revision: number; price_offer: string; credit_days: number }>`
+    await ensureTwoPrices(sql);
+    const q = await sql<{ id: number; state: string; name: string; revision: number; price_offer: string; credit_days: number; tiie: string; spread: string }>`
       select id, state, name, coalesce(revision,1) as revision, coalesce(price_offer,'both') as price_offer,
-        coalesce(credit_days,0)::int as credit_days
+        coalesce(credit_days,0)::int as credit_days, coalesce(tiie,0)::text as tiie, coalesce(spread,0)::text as spread
       from quotes where id = ${data.quoteId} and company_id = ${cid}
     `;
     if (!q[0]) throw new Error("Cotización no encontrada");
@@ -567,9 +647,28 @@ export const reviseQuote = createServerFn({ method: "POST" })
     const total = data.lines.reduce((s, l) => s + l.qty * (offer === "cash" ? l.cashPrice : l.creditPrice || l.cashPrice), 0);
     // Antes de sobreescribir, los precios de la revisión anterior quedan en
     // bitácora: cada renegociación es reconstruible.
-    const oldLines = await sql<{ product_id: number; code: string; qty: string; cash_price: string; credit_price: string; unit_price: string }>`
+    const oldLines = await sql<{
+      product_id: number;
+      code: string;
+      qty: string;
+      cash_price: string;
+      credit_price: string;
+      unit_price: string;
+      cost: string;
+      freight: string;
+      finance_unit: string | null;
+      margin_cash_mode: string | null;
+      margin_cash_pct: string | null;
+      margin_cash_nominal: string | null;
+      margin_credit_mode: string | null;
+      margin_credit_pct: string | null;
+      margin_credit_nominal: string | null;
+    }>`
       select ql.product_id, p.code, ql.qty::text, coalesce(nullif(ql.cash_price,0), ql.unit_price)::text as cash_price,
-        coalesce(nullif(ql.credit_price,0), ql.unit_price)::text as credit_price, ql.unit_price::text
+        coalesce(nullif(ql.credit_price,0), ql.unit_price)::text as credit_price, ql.unit_price::text,
+        coalesce(ql.cost,0)::text as cost, coalesce(ql.freight,0)::text as freight, ql.finance_unit::text as finance_unit,
+        ql.margin_cash_mode, ql.margin_cash_pct::text as margin_cash_pct, ql.margin_cash_nominal::text as margin_cash_nominal,
+        ql.margin_credit_mode, ql.margin_credit_pct::text as margin_credit_pct, ql.margin_credit_nominal::text as margin_credit_nominal
       from quote_lines ql join products p on p.id = ql.product_id
       where ql.quote_id = ${q[0].id}
     `;
@@ -597,6 +696,39 @@ export const reviseQuote = createServerFn({ method: "POST" })
     // necesita costo (kardex o de referencia) para poder financiar el precio.
     const plazoRev = offer === "cash" ? 0 : (data.creditDays ?? q[0].credit_days);
     await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev);
+    // Captura inversa: el precio que se manda es la verdad y el margen guardado
+    // de cada columna se despeja de él (contado sin financiamiento; crédito
+    // restando el financiamiento que va dentro del precio). Si el plazo cambió,
+    // el financiamiento se recalcula con las tasas de esta cotización. Una
+    // utilidad negativa se guarda tal cual: la pantalla avisa, no bloquea.
+    // Sin costo no hay margen que despejar y la partida se deja como estaba.
+    const pol = await policy(sql, cid);
+    const marginUpdates = new Map<number, { cash: ReturnType<typeof marginFromPrice>; credit: ReturnType<typeof marginFromPrice>; fin: number }>();
+    for (const line of data.lines) {
+      const prev = oldLines.find((o) => o.product_id === line.productId);
+      if (!prev) continue;
+      const landed = Number(prev.cost) + Number(prev.freight);
+      if (landed <= 0.0001) continue;
+      const fin =
+        plazoRev <= 0
+          ? 0
+          : plazoRev === q[0].credit_days && prev.finance_unit != null
+            ? Number(prev.finance_unit)
+            : financeUnit({ cost: landed, days: plazoRev, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: pol.asrCommission });
+      const before = { cash: marginOf(prev, "cash"), credit: marginOf(prev, "credit") };
+      const next = {
+        cash: marginFromPrice({ price: line.cashPrice, landed, finance: 0, mode: before.cash.mode }),
+        credit: marginFromPrice({ price: line.creditPrice, landed, finance: fin, mode: before.credit.mode }),
+        fin: Number(fin.toFixed(4)),
+      };
+      for (const which of ["cash", "credit"] as Offer[]) {
+        const old = before[which];
+        const oldTxt = old.legacy ? "—" : marginText(old);
+        const newTxt = marginText(next[which]);
+        if (oldTxt !== newTxt) cambios.push(`${prev.code} margen ${OFFER_LABEL[which]} ${oldTxt} → ${newTxt}`);
+      }
+      marginUpdates.set(line.productId, next);
+    }
     await sql`
       update quotes
       set revision = ${q[0].revision + 1},
@@ -614,6 +746,16 @@ export const reviseQuote = createServerFn({ method: "POST" })
         set qty = ${line.qty}, unit_price = ${unit}, cash_price = ${line.cashPrice}, credit_price = ${line.creditPrice}
         where quote_id = ${q[0].id} and product_id = ${line.productId}
       `;
+      const m = marginUpdates.get(line.productId);
+      if (m) {
+        await sql`
+          update quote_lines
+          set margin_cash_mode = ${m.cash.mode}, margin_cash_pct = ${m.cash.pct}, margin_cash_nominal = ${m.cash.nominal},
+              margin_credit_mode = ${m.credit.mode}, margin_credit_pct = ${m.credit.pct}, margin_credit_nominal = ${m.credit.nominal},
+              finance_unit = ${m.fin}
+          where quote_id = ${q[0].id} and product_id = ${line.productId}
+        `;
+      }
     }
     await writeAudit(sql, {
       companyId: cid,
@@ -721,23 +863,36 @@ export const decideQuote = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${cid}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const today = todayMx();
+    // El pedido hereda el plazo de la cotización: el precio a crédito se armó
+    // con esos días y por eso quedan como plazo financiero / mora. La factura
+    // vence a los días de Ajustes ("plazo factura"), sin pasar del plazo
+    // financiero (la mora no puede arrancar antes del vencimiento de factura).
+    // La política de mora sale del cliente: Grupo SL → GRUPO_SL, los demás →
+    // ESTANDAR; de contado no hay mora.
+    const pol = await policy(sql, cid);
     const days = offer === "credit" ? q[0].credit_days || 0 : 0;
     const termKind = days > 0 ? "credit_days" : "contado";
-    const dues = computeDues({ date: today, termKind, invoiceDays: days, creditDays: days });
+    const invoiceDays = days > 0 ? Math.min(pol.invoiceDays || days, days) : 0;
+    const dues = computeDues({ date: today, termKind, invoiceDays, creditDays: days });
+    const grp = await sql<{ group_name: string }>`select coalesce(group_name,'') as group_name from partners where id = ${q[0].partner_id}`;
+    const policyCode = days > 0 ? (grp[0]?.group_name === "Grupo SL" ? "GRUPO_SL" : "ESTANDAR") : "NONE";
+    const priceMode = days > 0 ? "financed" : "cash";
     const fulfillKind = data.fulfillKind ?? "inventory";
     const routeKind = fulfillKind === "direct" ? "supplier" : "own";
     await sql`alter table sales_orders add column if not exists term_kind text not null default 'contado'`;
     await sql`alter table sales_orders add column if not exists credit_days integer not null default 0`;
     await sql`alter table sales_orders add column if not exists invoice_days integer not null default 0`;
+    await ensureTwoPrices(sql);
     const so = await sql<{ id: number }>`
       insert into sales_orders (
         company_id, name, partner_id, state, location_id, notes, total, currency, fx_rate, quote_id, delivery_to,
-        term_kind, invoice_days, credit_days, invoice_due, credit_due, route_kind, date
+        term_kind, invoice_days, credit_days, invoice_due, credit_due, route_kind, date, policy_code, price_mode, accepted_offer
       )
       values (
         ${cid}, ${name}, ${q[0].partner_id}, 'draft', ${data.locationId}, ${q[0].notes}, ${total},
         ${q[0].currency}, ${Number(q[0].fx_rate)}, ${q[0].id}, ${q[0].delivery_to},
-        ${termKind}, ${dues.invoiceDays}, ${dues.creditDays}, ${dues.invoiceDue}, ${dues.creditDue}, ${routeKind}, ${today}
+        ${termKind}, ${dues.invoiceDays}, ${dues.creditDays}, ${dues.invoiceDue}, ${dues.creditDue}, ${routeKind}, ${today},
+        ${policyCode}, ${priceMode}, ${offer}
       )
       returning id
     `;
@@ -754,7 +909,7 @@ export const decideQuote = createServerFn({ method: "POST" })
       products: take.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
       locationId: data.locationId,
     });
-    await sql`update quotes set state = ${data.decision === "partial" ? "partial" : "accepted"}, total = ${total} where id = ${q[0].id}`;
+    await sql`update quotes set state = ${data.decision === "partial" ? "partial" : "accepted"}, total = ${total}, accepted_offer = ${offer} where id = ${q[0].id}`;
 
     const pos: string[] = [];
     const req = await sql<{ id: number; delivery_mode: string }>`
@@ -820,7 +975,7 @@ export const decideQuote = createServerFn({ method: "POST" })
       entity: "quote",
       entityId: q[0].id,
       name: q[0].name,
-      detail: `${data.decision === "partial" ? "Parcial" : "Aceptada"} · ${name}${pos.length ? ` · ${pos.join(", ")}` : ""}`,
+      detail: `${data.decision === "partial" ? "Parcial" : "Aceptada"} · precio ${OFFER_LABEL[offer as Offer]}${days > 0 ? ` ${days} d` : ""} · ${name}${pos.length ? ` · ${pos.join(", ")}` : ""}`,
     });
     return { soId: so[0]!.id, name, state: data.decision, pos };
   });

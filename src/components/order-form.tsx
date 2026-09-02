@@ -132,16 +132,31 @@ function ChipRow<T extends string>({
   );
 }
 
+/**
+ * Plazo heredado de la cotización. Cuando viene, el plazo no se captura aquí:
+ * se muestra con su origen y solo se cambia con la acción explícita
+ * (`onChange`), porque el precio a crédito se armó con esos días.
+ */
+export type InheritedTerm = {
+  quoteName: string;
+  requestName?: string | null;
+  days: number;
+  offer: "cash" | "credit" | null;
+  onChange?: () => void;
+};
+
 export function OrderFields({
   form,
   setForm,
   lookups,
   locked,
+  inherited,
 }: {
   form: OrderDraft;
   setForm: (f: OrderDraft) => void;
   lookups: OrderLookups;
   locked?: boolean;
+  inherited?: InheritedTerm | null;
 }) {
   const partner = lookups.customers.find((c) => c.id === form.partnerId);
   const preview = duesPreview(form);
@@ -232,6 +247,23 @@ export function OrderFields({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted">Plazo de este pedido</p>
+            {inherited ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="erp-chip">
+                  {inherited.days > 0 ? `Crédito ${inherited.days} d` : "Contado"}
+                  {inherited.offer ? ` · precio ${inherited.offer === "cash" ? "de contado" : "a crédito"}` : ""}
+                </span>
+                <span className="text-[12px] text-muted">
+                  Heredado de {inherited.quoteName}
+                  {inherited.requestName ? ` (${inherited.requestName})` : ""}. El precio se armó con este plazo.
+                </span>
+                {!locked && inherited.onChange ? (
+                  <button type="button" className="erp-btn h-8 text-[12px]" onClick={inherited.onChange}>
+                    Cambiar plazo
+                  </button>
+                ) : null}
+              </div>
+            ) : (
             <ChipRow
               value={form.termKind}
               disabled={locked}
@@ -255,6 +287,7 @@ export function OrderFields({
               }}
               options={TERMS}
             />
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             <input
@@ -297,7 +330,7 @@ export function OrderFields({
                 className="erp-input"
                 type="number"
                 min={0}
-                disabled={locked}
+                disabled={locked || Boolean(inherited)}
                 value={form.invoiceDays}
                 onChange={(e) => setForm({ ...form, invoiceDays: Number(e.target.value) })}
               />
@@ -307,7 +340,7 @@ export function OrderFields({
                 className="erp-input"
                 type="number"
                 min={0}
-                disabled={locked}
+                disabled={locked || Boolean(inherited)}
                 value={form.creditDays}
                 onChange={(e) => setForm({ ...form, creditDays: Number(e.target.value) })}
               />
