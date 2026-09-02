@@ -8,6 +8,7 @@ import { activeMember, assertAdmin, assertCan, canSeeCosts } from "@/lib/erp/acl
 import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
+import { financeBase } from "@/lib/erp/pricing";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -396,16 +397,25 @@ export const listQuotes = createServerFn({ method: "GET" })
     const products = await sql<{ id: number; code: string; name: string; list_price: string; uom: string; cost: string }>`
       select id, code, name, list_price::text, uom, coalesce(cost,0)::text as cost from products where company_id = ${cid} order by code
     `;
+    // El financiamiento se calcula SIEMPRE sobre el costo real, para cualquier
+    // rol: el precio no puede depender de quién cotiza. Lo que cambia con el
+    // rol es lo que se muestra (costo y flete), no el cálculo. Por eso la
+    // pantalla recibe la base del financiamiento y nunca el costo.
+    const pol = await policy(sql, cid);
+    const baseOf = (cost: string) =>
+      financeBase({ cost: Number(cost) || 0, tiie: pol.defaultTiie, costSpread: pol.asrSpread, commissionRate: pol.asrCommission });
+    const pricedProducts = products.map((p) => ({ ...p, fin: baseOf(p.cost) }));
+    const pricedLines = lines.map((l) => ({ ...l, fin: baseOf(l.cost) }));
     // El costo de compra y el flete no son para ventas: solo quien puede ver costos.
     if (!canSeeCosts(me.role)) {
       return {
         quotes,
-        lines: lines.map((l) => ({ ...l, cost: "0", freight: "0" })),
+        lines: pricedLines.map((l) => ({ ...l, cost: "0", freight: "0" })),
         customers,
-        products: products.map((p) => ({ ...p, cost: "0" })),
+        products: pricedProducts.map((p) => ({ ...p, cost: "0" })),
       };
     }
-    return { quotes, lines, customers, products };
+    return { quotes, lines: pricedLines, customers, products: pricedProducts };
   });
 
 export const createQuote = createServerFn({ method: "POST" })

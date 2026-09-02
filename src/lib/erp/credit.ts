@@ -349,11 +349,18 @@ export function earlyPayBonus(input: {
  * Costo financiero PROPIO de Azagro por operación (línea ASR):
  * - Comisión ASR sobre el capital (costo de proveedor), una sola vez (hoy 1%).
  *   No depende de los días.
- * - Capa 1 = capital × (TIIE de emisión + spread ASR) × plazo financiero / 360.
- *   Corre SIEMPRE, sobre el plazo completo. La base es el costo SOLO: la
- *   comisión no se capitaliza (decisión del dueño, 2026-09-01; la hoja
- *   DIF_TC del Excel viejo sí usaba costo × 1.01 porque en el circuito con
- *   la hermana se adelantaba costo + comisión).
+ * - Capa 1 = capital × (1 + comisión) × (TIIE de emisión + spread ASR) ×
+ *   plazo financiero / 360. Corre SIEMPRE, sobre el plazo completo.
+ *
+ *   NO QUITAR EL × (1 + comisión). Sale del Excel operativo de Azagro, hoja
+ *   DIF_TC_SL_AGRICOLA, columna AN:
+ *       AN = AL * (1 + 0.01) * W / 360 * 150
+ *   con AL = costo de proveedor MXN y W = TIIE de emisión + 4%. La utilidad
+ *   (columna AO) resta la comisión aparte (− AL * 0.01). Es decir: la
+ *   comisión se cobra una vez sobre el costo Y ADEMÁS la Capa 1 corre sobre
+ *   costo + comisión, porque lo que la línea adelanta es costo + comisión.
+ *   Se quitó por error el 2026-09-01 y se regresó el 2026-09-02 con el
+ *   Excel a la vista. El Excel es la fuente de verdad.
  * - Capa 2 = capital de la venta × la misma tasa × días excedidos / 360.
  *   Solo cuando el cliente se pasa del plazo financiero.
  * La TIIE de emisión (mes en que se facturó) es distinta de la TIIE con la
@@ -374,7 +381,8 @@ export function financeCost(input: {
   const cost = Math.max(0, input.supplierCost);
   const rate = input.tiieAtIssue + input.costSpread;
   const commission = round2(cost * Math.max(0, input.commissionRate));
-  const layer1 = round2((cost * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
+  // Base de la Capa 1 = costo + comisión (columna AN del Excel: AL * 1.01).
+  const layer1 = round2((cost * (1 + Math.max(0, input.commissionRate)) * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
   const layer2 = round2((Math.max(0, input.saleCapital) * rate * Math.max(0, input.daysExceeded)) / YEAR_DAYS);
   return { rate, commission, layer1, layer2, total: round2(commission + layer1 + layer2) };
 }

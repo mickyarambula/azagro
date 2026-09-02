@@ -493,7 +493,7 @@ function Page() {
           </HeadBox>
         </div>
         <p className="mb-3 text-[13px] text-muted">
-          Precio = costo + margen + <strong>financiamiento encima</strong>, por unidad: costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × {days} d / 360.
+          Precio = costo + margen + <strong>financiamiento encima</strong>, por unidad: costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × {(1 + commissionPct / 100).toFixed(2)} × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × {days} d / 360.
           {days === 0 ? " Contado: sin financiamiento, precio = costo + margen." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El 9% de mora NO va aquí: es factura de intereses al vencimiento.
         </p>
         <div className="overflow-x-auto erp-card">

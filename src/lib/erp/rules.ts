@@ -23,7 +23,7 @@ export const BUSINESS_RULES = [
   {
     id: "finance",
     title: "Financiamiento dentro del precio",
-    body: "Si hay días de crédito, el precio incluye por unidad: costo × comisión ASR (1%, una sola vez) + costo × (TIIE vigente al cotizar + spread ASR 4%) × días / 360. De contado es $0, comisión incluida. Eso no es mora.",
+    body: "Si hay días de crédito, el precio incluye por unidad: costo × comisión ASR (1%, una sola vez) + costo × 1.01 × (TIIE vigente al cotizar + spread ASR 4%) × días / 360. La línea adelanta costo + comisión, por eso el 1.01. De contado es $0, comisión incluida. Eso no es mora.",
   },
   {
     id: "mora",

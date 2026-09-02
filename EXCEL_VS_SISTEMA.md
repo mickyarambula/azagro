@@ -54,18 +54,16 @@ dinero → la hermana le refactura costo + interés):
   de 150** / 360 (cuando el cliente se pasa del plazo, el fondeo sigue
   corriendo).
 
-**Sistema (actualizado 1 de septiembre de 2026):** ya calcula las tres
-piezas con los parámetros de Ajustes (comisión ASR 1%, spread ASR 4%), y el
-financiamiento va **dentro del precio** al cliente:
+**Sistema (actualizado 2 de septiembre de 2026):** ya calcula las tres
+piezas con los parámetros de Ajustes (comisión ASR 1%, spread ASR 4%), con
+las mismas fórmulas del Excel, y el financiamiento va **dentro del precio**
+al cliente:
 
 - **Comisión 1%** sobre el costo de proveedor, una sola vez, sin días.
-- **Capa 1** = costo × (TIIE vigente al cotizar + 4%) × **días de crédito del
-  pedido** / 360. Dos diferencias deliberadas con el Excel: (a) los días son
-  los del pedido, no 150 fijos; (b) va sobre el costo **solo**, no sobre
-  costo × 1.01. El × 1.01 venía de que la hermana adelantaba costo +
-  comisión; con ASR la comisión no se capitaliza (decisión del dueño,
-  1-sep-2026). Si ASR sí cobra interés sobre la comisión, es una línea en
-  `financeCost` (`src/lib/erp/credit.ts`).
+- **Capa 1** = costo × 1.01 × (TIIE + 4%) × **días de crédito del pedido** /
+  360 — la columna AN tal cual, incluido el 1.01 (la línea adelanta costo +
+  comisión). Única diferencia con el Excel: los días son los del pedido, no
+  150 fijos.
 - **Capa 2** = capital de la venta × (TIIE + 4%) × días excedidos / 360, en
   la utilidad por pedido (`src/lib/erp/reports.ts`). No va en el precio.
 - Al contado (0 días) el financiamiento es $0, comisión incluida.
@@ -77,12 +75,10 @@ Lo que sigue pendiente de este punto: la TIIE es la vigente al cotizar, no la
 del mes de emisión de la factura (ver punto 1).
 
 Ejemplo con costo de proveedor $100,000, TIIE 10%, 150 días de crédito,
-cliente que paga 90 días tarde sobre una venta de $115,000:
-- Excel: comisión $1,000 + Capa 1 = $101,000 × 14% × 150/360 = $5,891.67 +
-  Capa 2 = $115,000 × 14% × 90/360 = $4,025. **Total: $10,916.67.**
-- Sistema: comisión $1,000 + Capa 1 = $100,000 × 14% × 150/360 = $5,833.33
-  (en el precio) + Capa 2 $4,025 (en la utilidad). **Total: $10,858.33.**
-La única diferencia son los $58.34 de interés sobre la comisión.
+cliente que paga 90 días tarde sobre una venta de $115,000: comisión $1,000 +
+Capa 1 = $101,000 × 14% × 150/360 = $5,891.67 + Capa 2 = $115,000 × 14% ×
+90/360 = $4,025. **Total $10,916.67, igual que el Excel** (la Capa 1 va en el
+precio; la Capa 2, en la utilidad del pedido).
 
 ---
 

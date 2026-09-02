@@ -274,7 +274,7 @@ function SettingsBody() {
           <input className="erp-input" type="number" step="0.0001" value={form.asrSpread} onChange={(e) => setForm({ ...form, asrSpread: Number(e.target.value) })} />
         </Field>
         <p className="md:col-span-3 text-sm text-muted">
-          Financiamiento dentro del precio de venta (por unidad) = costo × {((form.asrCommission || 0) * 100).toFixed(2)}% + costo × (TIIE + {((form.asrSpread || 0) * 100).toFixed(2)}%) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días. De contado (0 días) el financiamiento es $0, comisión incluida.
+          Financiamiento dentro del precio de venta (por unidad) = costo × {((form.asrCommission || 0) * 100).toFixed(2)}% + costo × {(1 + (form.asrCommission || 0)).toFixed(2)} × (TIIE + {((form.asrSpread || 0) * 100).toFixed(2)}%) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días, y además genera interés porque la línea adelanta costo + comisión. De contado (0 días) el financiamiento es $0, comisión incluida.
           Mora (solo factura FI si ya venció) = Cargo × (TIIE + {((form.collectionSpread || 0) * 100).toFixed(1)}%) × días exactos / {YEAR_DAYS}. En el estado de cuenta, Comisión 1% + FEGA 2.04% = 3.04% sobre el cargo (columna «Comisión + FEGA»); no se mete al precio del producto.
         </p>
         {editable && <button className="erp-btn-primary">Guardar política</button>}

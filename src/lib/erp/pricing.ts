@@ -1,4 +1,5 @@
 import { financeCost } from "@/lib/erp/credit";
+import { YEAR_DAYS } from "@/lib/erp/rules";
 
 /**
  * Precio Azagro — el costo financiero NO lo absorbe Azagro: se le pasa al
@@ -8,8 +9,9 @@ import { financeCost } from "@/lib/erp/credit";
  *   2. Margen elegido por el usuario (sobre ese costo).
  *   3. Financiamiento ENCIMA, por unidad:
  *        costo × comisión ASR (1%, una sola vez)
- *      + costo × (TIIE vigente al cotizar + spread ASR 4%) × días / 360
- *      con los días de crédito de ESTE pedido (no 150 fijos).
+ *      + costo × 1.01 × (TIIE vigente al cotizar + spread ASR 4%) × días / 360
+ *      con los días de crédito de ESTE pedido (no 150 fijos). El 1.01 es la
+ *      columna AN del Excel DIF_TC: la línea adelanta costo + comisión.
  *
  * Al contado (0 días) no hay circuito de financiamiento: precio = costo +
  * margen y el financiamiento es $0, comisión incluida.
@@ -94,7 +96,7 @@ export function annualRate(tiie: number, costSpread: number) {
 /**
  * Financiamiento por unidad que va DENTRO del precio (misma fórmula que
  * priceSale, para quien ya tiene el costo y solo necesita el cargo):
- *   costo × comisión + costo × (TIIE + spread ASR) × días / 360.
+ *   costo × comisión + costo × (1 + comisión) × (TIIE + spread ASR) × días / 360.
  * Contado (0 días) → 0, comisión incluida.
  */
 export function financeUnit(i: { cost: number; days: number; tiie: number; costSpread: number; commissionRate: number }) {
@@ -112,14 +114,42 @@ export function financeUnit(i: { cost: number; days: number; tiie: number; costS
 }
 
 /**
- * Precio a crédito a partir del de contado (cotización directa, sin
- * solicitud): contado + financiamiento sobre el COSTO. Si no se conoce el
- * costo (0), el financiamiento se calcula sobre el precio de contado, que es
- * la opción conservadora: nunca cobra de menos.
+ * Base del financiamiento de un producto, calculada en el SERVIDOR con el
+ * costo real. Sirve para que la pantalla arme el precio a crédito sin
+ * recibir nunca el costo: quién cotiza no cambia el precio, solo cambia lo
+ * que se le muestra.
+ *   commission   = costo × comisión ASR, en pesos (una sola vez).
+ *   interestYear = costo × (1 + comisión) × (TIIE + spread ASR), en pesos:
+ *                  el interés de un año. Por eso financeFor divide /360.
+ * financeFor(financeBase(x), d) da exactamente lo mismo que
+ * financeUnit({ ...x, days: d }) — hay prueba que lo verifica.
  */
-export function creditFromCash(i: { cash: number; cost: number; days: number; tiie: number; costSpread: number; commissionRate: number }) {
+export type FinanceBase = { commission: number; interestYear: number };
+
+export function financeBase(i: { cost: number; tiie: number; costSpread: number; commissionRate: number }): FinanceBase {
+  const cost = Math.max(0, i.cost);
+  const commissionRate = Math.max(0, i.commissionRate);
+  const rate = Math.max(0, i.tiie) + Math.max(0, i.costSpread);
+  return {
+    commission: Math.round(cost * commissionRate * 100) / 100,
+    interestYear: cost * (1 + commissionRate) * rate,
+  };
+}
+
+/** Financiamiento por unidad a partir de la base. Contado (0 días) → 0. */
+export function financeFor(base: FinanceBase, days: number) {
+  if (days <= 0) return 0;
+  return base.commission + Math.round(((base.interestYear * days) / YEAR_DAYS) * 100) / 100;
+}
+
+/**
+ * Precio a crédito a partir del de contado (cotización directa, sin
+ * solicitud): contado + financiamiento sobre el COSTO, igual para todos los
+ * roles. Un producto sin costo capturado no genera financiamiento (crédito =
+ * contado): es un hueco de datos, no de fórmula.
+ */
+export function creditFromCash(i: { cash: number; fin: FinanceBase; days: number }) {
   const cash = Math.max(0, i.cash);
   if (i.days <= 0) return cash;
-  const base = i.cost > 0 ? i.cost : cash;
-  return Math.round((cash + financeUnit({ ...i, cost: base })) * 10000) / 10000;
+  return Math.round((cash + financeFor(i.fin, i.days)) * 10000) / 10000;
 }

@@ -11,7 +11,7 @@ import { Expediente } from "@/components/expediente";
 import { addDays } from "@/lib/erp/credit";
 import { getDealTrail } from "@/lib/erp/deal";
 import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
-import { creditFromCash } from "@/lib/erp/pricing";
+import { creditFromCash, type FinanceBase } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
@@ -19,7 +19,9 @@ import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/quotes")({ component: Page });
 
-type Line = { productId: number; qty: number; cashPrice: number; creditPrice: number; uom: string; cost: number };
+/** fin = base del financiamiento que manda el servidor (calculada con el costo real, igual para todos los roles). */
+type Line = { productId: number; qty: number; cashPrice: number; creditPrice: number; uom: string; fin: FinanceBase };
+const SIN_FIN: FinanceBase = { commission: 0, interestYear: 0 };
 type Offer = "cash" | "credit" | "both";
 
 function offerLabel(o: string) {
@@ -37,9 +39,7 @@ function Page() {
   const [priceOffer, setPriceOffer] = useState<Offer>("both");
   const [creditDays, setCreditDays] = useState(90);
   const [tiie, setTiie] = useState(0.0706);
-  // Financiamiento dentro del precio: comisión ASR (una vez) + TIIE + spread ASR × días/360, sobre el costo.
   const [spread, setSpread] = useState(0.04);
-  const [commission, setCommission] = useState(0.01);
   const [deliveryTo, setDeliveryTo] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -50,10 +50,10 @@ function Page() {
   const [locationId, setLocationId] = useState(0);
   const [fulfillKind, setFulfillKind] = useState<"inventory" | "direct">("inventory");
 
-  const fin = { tiie, costSpread: spread, commissionRate: commission };
-
-  function syncCredit(ls: Line[], days = creditDays, f = fin) {
-    return ls.map((l) => ({ ...l, creditPrice: creditFromCash({ cash: l.cashPrice, cost: l.cost, days, ...f }) }));
+  // El financiamiento lo calcula el servidor sobre el costo real (línea.fin):
+  // el precio a crédito es el mismo para cualquier rol, vea o no el costo.
+  function syncCredit(ls: Line[], days = creditDays) {
+    return ls.map((l) => ({ ...l, creditPrice: creditFromCash({ cash: l.cashPrice, fin: l.fin, days }) }));
   }
 
   async function load() {
@@ -64,7 +64,6 @@ function Page() {
       setCreditDays(s.creditDays || 90);
       setTiie(s.defaultTiie || 0.0706);
       setSpread(s.asrSpread);
-      setCommission(s.asrCommission);
     }
     const inv = await listInventory();
     setLocs(inv.locations.filter((l) => l.loc_type === "internal" || l.loc_type === "supplier"));
@@ -72,9 +71,8 @@ function Page() {
     if (lines.length === 0 && d.products[0]) {
       const p = d.products[0];
       const cash = Number(p.list_price);
-      const cost = num(p.cost);
-      const f = { tiie: s?.defaultTiie || 0.0706, costSpread: s?.asrSpread ?? 0.04, commissionRate: s?.asrCommission ?? 0.01 };
-      setLines([{ productId: p.id, qty: 1, cashPrice: cash, cost, creditPrice: creditFromCash({ cash, cost, days: s?.creditDays || 90, ...f }), uom: p.uom || "TM" }]);
+      const days = s?.creditDays || 90;
+      setLines([{ productId: p.id, qty: 1, cashPrice: cash, fin: p.fin, creditPrice: creditFromCash({ cash, fin: p.fin, days }), uom: p.uom || "TM" }]);
     }
   }
   useEffect(() => {
@@ -113,8 +111,7 @@ function Page() {
       });
       const p = data?.products[0];
       const cash = Number(p?.list_price ?? 0);
-      const cost = num(p?.cost);
-      setLines(p ? [{ productId: p.id, qty: 1, cashPrice: cash, cost, creditPrice: creditFromCash({ cash, cost, days: creditDays, ...fin }), uom: p.uom || "TM" }] : []);
+      setLines(p ? [{ productId: p.id, qty: 1, cashPrice: cash, fin: p.fin, creditPrice: creditFromCash({ cash, fin: p.fin, days: creditDays }), uom: p.uom || "TM" }] : []);
       await load();
     } catch (err) {
       setError(humanError(err));
@@ -282,8 +279,8 @@ function Page() {
           onClick={() => {
             const p = data?.products[0];
             const cash = Number(p?.list_price ?? 0);
-            const cost = num(p?.cost);
-            setLines((ls) => [...ls, { productId: p?.id ?? 0, qty: 1, cashPrice: cash, cost, creditPrice: creditFromCash({ cash, cost, days: creditDays, ...fin }), uom: p?.uom || "TM" }]);
+            const f = p?.fin ?? SIN_FIN;
+            setLines((ls) => [...ls, { productId: p?.id ?? 0, qty: 1, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days: creditDays }), uom: p?.uom || "TM" }]);
           }}
         >
           <Plus className="mr-1 inline size-3.5" />
@@ -318,8 +315,8 @@ function Page() {
                           const id = Number(v);
                           const prod = data?.products.find((x) => x.id === id);
                           const cash = Number(prod?.list_price ?? line.cashPrice);
-                          const cost = num(prod?.cost);
-                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, cashPrice: cash, cost, creditPrice: creditFromCash({ cash, cost, days: creditDays, ...fin }) } : x)));
+                          const f = prod?.fin ?? SIN_FIN;
+                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days: creditDays }) } : x)));
                         }}
                       />
                     </td>
@@ -334,7 +331,7 @@ function Page() {
                       <MoneyField
                         value={line.cashPrice}
                         onChange={(cashPrice) =>
-                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, cashPrice, creditPrice: creditFromCash({ cash: cashPrice, cost: x.cost, days: creditDays, ...fin }) } : x)))
+                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, cashPrice, creditPrice: creditFromCash({ cash: cashPrice, fin: x.fin, days: creditDays }) } : x)))
                         }
                       />
                     </td>
@@ -520,8 +517,9 @@ function Page() {
                                             [l.product_id]: {
                                               ...rp,
                                               cash,
-                                              // Revisión = volver a cotizar hoy: TIIE y spread vigentes, sobre el costo de la partida.
-                                              credit: creditFromCash({ cash, cost: num(l.cost), days: qrow.credit_days, ...fin }),
+                                              // Revisión = volver a cotizar hoy: el servidor ya trae la base
+                                              // del financiamiento de la partida con la TIIE y el spread vigentes.
+                                              credit: creditFromCash({ cash, fin: l.fin, days: qrow.credit_days }),
                                             },
                                           }))
                                         }
