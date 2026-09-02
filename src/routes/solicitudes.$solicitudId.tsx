@@ -79,7 +79,7 @@ function Page() {
       .then((s) => {
         const latest = s.tiie[0];
         setTiiePct(Number(((latest ? Number(latest.rate) : s.defaultTiie) * 100).toFixed(2)));
-        // El spread del precio es el de COSTO (circuito hermana), no el de línea.
+        // El spread del precio es el de ASR (spread de costo), no el de mora.
         setSpreadPct(Number((s.asrSpread * 100).toFixed(2)));
         setCommissionPct(Number((s.asrCommission * 100).toFixed(2)));
       })
@@ -485,15 +485,15 @@ function Page() {
           <HeadBox label="TIIE %">
             <QtyField className="w-full border-0 bg-transparent px-0" value={tiiePct} onChange={setTiiePct} />
           </HeadBox>
-          <HeadBox label="Spread costo %">
+          <HeadBox label="Spread ASR %">
             <QtyField className="w-full border-0 bg-transparent px-0" value={spreadPct} onChange={setSpreadPct} />
           </HeadBox>
-          <HeadBox label="Comisión %">
+          <HeadBox label="Comisión ASR %">
             <QtyField className="w-full border-0 bg-transparent px-0" value={commissionPct} onChange={setCommissionPct} />
           </HeadBox>
         </div>
         <p className="mb-3 text-[13px] text-muted">
-          Precio = costo + margen + <strong>financiamiento encima</strong> (comisión {commissionPct.toFixed(2)}% + Capa 1: TIIE {tiiePct.toFixed(2)}% + spread costo {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}% × {days} d / 360).
+          Precio = costo + margen + <strong>financiamiento encima</strong>, por unidad: costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × {days} d / 360.
           {days === 0 ? " Contado: sin financiamiento, precio = costo + margen." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El 9% de mora NO va aquí: es factura de intereses al vencimiento.
         </p>
         <div className="overflow-x-auto erp-card">

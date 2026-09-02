@@ -21,13 +21,20 @@ function Page() {
   async function load() {
     const d = await getRfq({ data: { id } });
     setData(d);
-    const next: Record<number, number> = {};
-    for (const line of d.lines) {
-      const bids = d.bids.filter((b) => b.product_id === line.product_id && Number(b.unit_price) > 0);
-      bids.sort((a, b) => Number(a.unit_price) - Number(b.unit_price));
-      if (bids[0]) next[line.product_id] = bids[0].partner_id;
-    }
-    setPick(next);
+    // Ganador por renglón: se sugiere el más barato solo donde el usuario
+    // no ha elegido. Una elección manual (crédito, servicio) se respeta
+    // aunque se sigan capturando precios en otros renglones.
+    setPick((prev) => {
+      const next: Record<number, number> = {};
+      for (const line of d.lines) {
+        const bids = d.bids.filter((b) => b.product_id === line.product_id && Number(b.unit_price) > 0);
+        bids.sort((a, b) => Number(a.unit_price) - Number(b.unit_price));
+        const chosen = prev[line.product_id];
+        if (chosen && bids.some((b) => b.partner_id === chosen)) next[line.product_id] = chosen;
+        else if (bids[0]) next[line.product_id] = bids[0].partner_id;
+      }
+      return next;
+    });
   }
   useEffect(() => {
     void load().catch((e) => setError(e instanceof Error ? e.message : "Error"));

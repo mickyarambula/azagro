@@ -21,19 +21,21 @@ async function companyOf(sql: Sql, userId: string) {
 }
 
 export async function policy(sql: Sql, companyId: number) {
-  await sql`alter table company_settings add column if not exists finance_spread numeric(8,4) not null default 0.045`;
   await sql`alter table company_settings add column if not exists alert_days_cxc integer not null default 7`;
   await sql`alter table company_settings add column if not exists alert_days_cxp integer not null default 7`;
   await sql`alter table company_settings add column if not exists alert_email text not null default ''`;
   await sql`alter table company_settings add column if not exists alert_email_on boolean not null default true`;
   await sql`alter table company_settings add column if not exists resend_key text not null default ''`;
   await sql`alter table company_settings add column if not exists early_pay_days integer not null default 120`;
+  // El "spread de línea" ya no existe: el financiamiento del precio usa
+  // comisión ASR + spread ASR. Se quita la columna para que no quede un
+  // porcentaje viejo dormido en la base.
+  await sql`alter table company_settings drop column if exists finance_spread`;
   const rows = await sql<{
     credit_days: number;
     invoice_days: number;
     fega_rate: string;
     collection_spread: string;
-    finance_spread: string;
     default_tiie: string;
     legal_name: string;
     rfc: string;
@@ -48,7 +50,7 @@ export async function policy(sql: Sql, companyId: number) {
     resend_key: string;
     early_pay_days: number;
   }>`
-    select credit_days, invoice_days, fega_rate::text, collection_spread::text, finance_spread::text, default_tiie::text,
+    select credit_days, invoice_days, fega_rate::text, collection_spread::text, default_tiie::text,
       legal_name, rfc, asr_commission::text, asr_spread::text, email_from, phone,
       coalesce(alert_days_cxc,7)::int as alert_days_cxc, coalesce(alert_days_cxp,7)::int as alert_days_cxp,
       coalesce(alert_email,'') as alert_email, coalesce(alert_email_on,true) as alert_email_on,
@@ -80,7 +82,6 @@ export async function policy(sql: Sql, companyId: number) {
     fegaRate: Number(r.fega_rate),
     commissionRate: DEFAULT_POLICY.commissionRate,
     collectionSpread: Number(r.collection_spread),
-    financeSpread: Number(r.finance_spread || 0.045),
     defaultTiie: Number(r.default_tiie),
     legalName: r.legal_name,
     rfc: r.rfc,
@@ -122,7 +123,6 @@ export const saveSettings = createServerFn({ method: "POST" })
       invoiceDays: z.number().int().positive(),
       fegaRate: z.number(),
       collectionSpread: z.number(),
-      financeSpread: z.number(),
       defaultTiie: z.number(),
       asrCommission: z.number(),
       asrSpread: z.number(),
@@ -141,7 +141,6 @@ export const saveSettings = createServerFn({ method: "POST" })
     const cid = await companyOf(sql, context.userId);
     // Los parámetros de cartera mueven intereses y utilidad: solo administrador.
     await assertAdmin(sql, context.userId);
-    await sql`alter table company_settings add column if not exists finance_spread numeric(8,4) not null default 0.045`;
     await sql`alter table company_settings add column if not exists alert_days_cxc integer not null default 7`;
     await sql`alter table company_settings add column if not exists alert_days_cxp integer not null default 7`;
     await sql`alter table company_settings add column if not exists alert_email text not null default ''`;
@@ -152,12 +151,12 @@ export const saveSettings = createServerFn({ method: "POST" })
     await sql`
       insert into company_settings (
         company_id, legal_name, rfc, credit_days, invoice_days, fega_rate,
-        collection_spread, finance_spread, default_tiie, asr_commission, asr_spread, email_from, phone,
+        collection_spread, default_tiie, asr_commission, asr_spread, email_from, phone,
         alert_days_cxc, alert_days_cxp, alert_email, alert_email_on, early_pay_days
       )
       values (
         ${cid}, ${data.legalName}, ${data.rfc}, ${data.creditDays}, ${data.invoiceDays}, ${data.fegaRate},
-        ${data.collectionSpread}, ${data.financeSpread}, ${data.defaultTiie}, ${data.asrCommission}, ${data.asrSpread},
+        ${data.collectionSpread}, ${data.defaultTiie}, ${data.asrCommission}, ${data.asrSpread},
         ${data.emailFrom}, ${data.phone}, ${data.alertDaysCxc ?? 7}, ${data.alertDaysCxp ?? 7},
         ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays ?? 120}
       )
@@ -168,7 +167,6 @@ export const saveSettings = createServerFn({ method: "POST" })
         invoice_days = excluded.invoice_days,
         fega_rate = excluded.fega_rate,
         collection_spread = excluded.collection_spread,
-        finance_spread = excluded.finance_spread,
         default_tiie = excluded.default_tiie,
         asr_commission = excluded.asr_commission,
         asr_spread = excluded.asr_spread,
@@ -187,7 +185,6 @@ export const saveSettings = createServerFn({ method: "POST" })
     // Bitácora de los parámetros financieros: valor anterior → nuevo.
     const watch: Array<[string, number, number]> = [
       ["spread cobro", before.collectionSpread, data.collectionSpread],
-      ["spread costo/línea", before.financeSpread, data.financeSpread],
       ["spread ASR", before.asrSpread, data.asrSpread],
       ["comisión ASR", before.asrCommission, data.asrCommission],
       ["FEGA", before.fegaRate, data.fegaRate],
@@ -395,12 +392,18 @@ export const listQuotes = createServerFn({ method: "GET" })
       select id, name, coalesce(email,'') as email, coalesce(phone,'') as phone
       from partners where company_id = ${cid} and is_customer = true order by name
     `;
-    const products = await sql<{ id: number; code: string; name: string; list_price: string; uom: string }>`
-      select id, code, name, list_price::text, uom from products where company_id = ${cid} order by code
+    // cost = promedio móvil del kardex: base del financiamiento en la cotización directa.
+    const products = await sql<{ id: number; code: string; name: string; list_price: string; uom: string; cost: string }>`
+      select id, code, name, list_price::text, uom, coalesce(cost,0)::text as cost from products where company_id = ${cid} order by code
     `;
     // El costo de compra y el flete no son para ventas: solo quien puede ver costos.
     if (!canSeeCosts(me.role)) {
-      return { quotes, lines: lines.map((l) => ({ ...l, cost: "0", freight: "0" })), customers, products };
+      return {
+        quotes,
+        lines: lines.map((l) => ({ ...l, cost: "0", freight: "0" })),
+        customers,
+        products: products.map((p) => ({ ...p, cost: "0" })),
+      };
     }
     return { quotes, lines, customers, products };
   });
@@ -524,8 +527,9 @@ export const reviseQuote = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "quotes", "edit");
-    const q = await sql<{ id: number; state: string; name: string; revision: number; price_offer: string }>`
-      select id, state, name, coalesce(revision,1) as revision, coalesce(price_offer,'both') as price_offer
+    const q = await sql<{ id: number; state: string; name: string; revision: number; price_offer: string; credit_days: number }>`
+      select id, state, name, coalesce(revision,1) as revision, coalesce(price_offer,'both') as price_offer,
+        coalesce(credit_days,0)::int as credit_days
       from quotes where id = ${data.quoteId} and company_id = ${cid}
     `;
     if (!q[0]) throw new Error("Cotización no encontrada");
@@ -542,6 +546,26 @@ export const reviseQuote = createServerFn({ method: "POST" })
       from quote_lines ql join products p on p.id = ql.product_id
       where ql.quote_id = ${q[0].id}
     `;
+    // Una revisión es una oferta distinta: si nada cambió (precio, cantidad,
+    // plazo u oferta) no se sube el número de revisión ni se escribe bitácora.
+    const cambios: string[] = [];
+    if (offer !== q[0].price_offer) cambios.push(`oferta ${q[0].price_offer} → ${offer}`);
+    if (data.creditDays !== undefined && data.creditDays !== q[0].credit_days) {
+      cambios.push(`plazo ${q[0].credit_days} → ${data.creditDays} d`);
+    }
+    for (const line of data.lines) {
+      const prev = oldLines.find((o) => o.product_id === line.productId);
+      if (prev) {
+        if (Number(prev.qty) !== line.qty) cambios.push(`${prev.code} cant ${Number(prev.qty)} → ${line.qty}`);
+        // Misma tolerancia que la pantalla (centavos): ruido de decimales no es una revisión.
+        if (Math.abs(Number(prev.cash_price) - line.cashPrice) > 0.009 || Math.abs(Number(prev.credit_price) - line.creditPrice) > 0.009) {
+          cambios.push(`${prev.code} precio ${Number(prev.cash_price)}/${Number(prev.credit_price)} → ${line.cashPrice}/${line.creditPrice}`);
+        }
+      }
+    }
+    if (!cambios.length) {
+      throw new Error("Sin cambios: la revisión no se guardó. Cambia algún precio, cantidad o plazo para hacer una revisión nueva.");
+    }
     await sql`
       update quotes
       set revision = ${q[0].revision + 1},
@@ -552,16 +576,8 @@ export const reviseQuote = createServerFn({ method: "POST" })
           state = 'sent'
       where id = ${q[0].id}
     `;
-    const cambios: string[] = [];
     for (const line of data.lines) {
       const unit = offer === "cash" ? line.cashPrice : line.creditPrice || line.cashPrice;
-      const prev = oldLines.find((o) => o.product_id === line.productId);
-      if (prev) {
-        if (Number(prev.qty) !== line.qty) cambios.push(`${prev.code} cant ${Number(prev.qty)} → ${line.qty}`);
-        if (Number(prev.cash_price) !== line.cashPrice || Number(prev.credit_price) !== line.creditPrice) {
-          cambios.push(`${prev.code} precio ${Number(prev.cash_price)}/${Number(prev.credit_price)} → ${line.cashPrice}/${line.creditPrice}`);
-        }
-      }
       await sql`
         update quote_lines
         set qty = ${line.qty}, unit_price = ${unit}, cash_price = ${line.cashPrice}, credit_price = ${line.creditPrice}
@@ -575,7 +591,7 @@ export const reviseQuote = createServerFn({ method: "POST" })
       entity: "quote",
       entityId: q[0].id,
       name: q[0].name,
-      detail: `Rev ${q[0].revision} → ${q[0].revision + 1}${cambios.length ? ` · ${cambios.join(" · ")}` : " · sin cambio de precios"}`,
+      detail: `Rev ${q[0].revision} → ${q[0].revision + 1} · ${cambios.join(" · ")}`,
     });
     return { id: q[0].id, name: q[0].name, revision: q[0].revision + 1 };
   });

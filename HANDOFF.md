@@ -213,8 +213,15 @@ natural de trabajo grande.
 - Comisión 1% + FEGA 2.04% = **3.04%** una sola vez sobre el cargo, cuando
   ya venció.
 - Precio al cliente = costo de mercancía + margen elegido + financiamiento
-  (comisión 1% + Capa 1: (costo × 1.01) × (TIIE de emisión + 4%) × días de
-  crédito del pedido / 360). Al contado no hay financiamiento.
+  por unidad: costo × comisión ASR 1% (una sola vez, no depende de los días)
+  + costo × (TIIE vigente al cotizar + spread ASR 4%) × días de crédito del
+  pedido / 360. La Capa 1 va sobre el costo **solo**, no sobre costo × 1.01
+  como en la hoja DIF_TC del Excel (ahí la hermana adelantaba costo +
+  comisión); decisión del dueño 2026-09-01. Al contado (0 días) el
+  financiamiento es $0, comisión incluida. Ejemplo: costo $10,000, TIIE
+  6.9%, 150 días → $100 + $454.17 = $554.17. Ya no existe el "spread de
+  línea 4.5%": era un legado del primer commit sin comisión. Pruebas en
+  `scripts/erp-financiamiento-precio.test.mjs`.
 - Capa 2 (costo financiero de los días que el cliente se pasa del plazo) sí
   se resta de la utilidad — ese no estaba previsto en el precio.
 - Kardex: promedio móvil, `stock_moves` inmutable, `stock_quants` proyección.

@@ -54,26 +54,35 @@ dinero → la hermana le refactura costo + interés):
   de 150** / 360 (cuando el cliente se pasa del plazo, el fondeo sigue
   corriendo).
 
-**Sistema:** solo calcula al cliente. Del lado del costo hay una sola capa
-aproximada, en dos lugares (cotizador y utilidad por pedido): costo × (TIIE
-por omisión + **4.5%**) × **días de crédito del pedido** / 360. Es decir:
+**Sistema (actualizado 1 de septiembre de 2026):** ya calcula las tres
+piezas con los parámetros de Ajustes (comisión ASR 1%, spread ASR 4%), y el
+financiamiento va **dentro del precio** al cliente:
 
-- Spread 4.5% en lugar de 4%.
-- Días de crédito del pedido en lugar de 150 fijos.
-- TIIE actual en lugar de la del mes de emisión.
-- **Sin comisión 1%** (el parámetro existe en Ajustes… pero ningún cálculo lo
-  usa).
-- **Sin Capa 2**: si el cliente paga tarde, el sistema le cobra mora al
-  cliente pero nunca carga el costo de fondeo de esos días a la utilidad de
-  Azagro.
+- **Comisión 1%** sobre el costo de proveedor, una sola vez, sin días.
+- **Capa 1** = costo × (TIIE vigente al cotizar + 4%) × **días de crédito del
+  pedido** / 360. Dos diferencias deliberadas con el Excel: (a) los días son
+  los del pedido, no 150 fijos; (b) va sobre el costo **solo**, no sobre
+  costo × 1.01. El × 1.01 venía de que la hermana adelantaba costo +
+  comisión; con ASR la comisión no se capitaliza (decisión del dueño,
+  1-sep-2026). Si ASR sí cobra interés sobre la comisión, es una línea en
+  `financeCost` (`src/lib/erp/credit.ts`).
+- **Capa 2** = capital de la venta × (TIIE + 4%) × días excedidos / 360, en
+  la utilidad por pedido (`src/lib/erp/reports.ts`). No va en el precio.
+- Al contado (0 días) el financiamiento es $0, comisión incluida.
+- El "spread de línea 4.5%" que había en Ajustes **se eliminó**: era un
+  legado del primer commit (una sola capa sin comisión), no un 1%
+  amortizado. Hoy nada lo usa.
 
-Ejemplo con costo de proveedor $100,000, TIIE de emisión 10%, cliente que paga
-90 días tarde sobre una venta de $115,000:
-- Excel: comisión $1,000 + Capa 1 = $101,000 × 14% × 150/360 = $5,892 +
-  Capa 2 = $115,000 × 14% × 90/360 = $4,025. **Total costo financiero:
-  $10,917.**
-- Sistema: $100,000 × 11.56% × 150/360 = **$4,817 y nada más.**
-La utilidad mostrada queda inflada ~$6,100 en esa operación.
+Lo que sigue pendiente de este punto: la TIIE es la vigente al cotizar, no la
+del mes de emisión de la factura (ver punto 1).
+
+Ejemplo con costo de proveedor $100,000, TIIE 10%, 150 días de crédito,
+cliente que paga 90 días tarde sobre una venta de $115,000:
+- Excel: comisión $1,000 + Capa 1 = $101,000 × 14% × 150/360 = $5,891.67 +
+  Capa 2 = $115,000 × 14% × 90/360 = $4,025. **Total: $10,916.67.**
+- Sistema: comisión $1,000 + Capa 1 = $100,000 × 14% × 150/360 = $5,833.33
+  (en el precio) + Capa 2 $4,025 (en la utilidad). **Total: $10,858.33.**
+La única diferencia son los $58.34 de interés sobre la comisión.
 
 ---
 

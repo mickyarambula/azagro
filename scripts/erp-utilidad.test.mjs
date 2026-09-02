@@ -11,7 +11,9 @@ const src = (p) => readFileSync(join(root, p), "utf8");
  * Copias de src/lib/erp/credit.ts (financeCost, earlyPayBonus) — si cambia el
  * motor, actualiza aquí y piensa por qué. Los casos replican las fórmulas del
  * Excel de utilidad (hoja DIF_TC: comisión, Capa 1 = AN, Capa 2 = AK,
- * descuento = Z) con números inventados.
+ * descuento = Z) con números inventados — con UNA diferencia deliberada:
+ * la Capa 1 va sobre el costo solo, no sobre costo × 1.01 (decisión del
+ * dueño 2026-09-01: la comisión ASR no se capitaliza).
  */
 const YEAR_DAYS = 360;
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -19,7 +21,7 @@ function financeCost(input) {
   const cost = Math.max(0, input.supplierCost);
   const rate = input.tiieAtIssue + input.costSpread;
   const commission = round2(cost * Math.max(0, input.commissionRate));
-  const layer1 = round2((cost * (1 + Math.max(0, input.commissionRate)) * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
+  const layer1 = round2((cost * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
   const layer2 = round2((Math.max(0, input.saleCapital) * rate * Math.max(0, input.daysExceeded)) / YEAR_DAYS);
   return { rate, commission, layer1, layer2, total: round2(commission + layer1 + layer2) };
 }
@@ -40,12 +42,12 @@ function earlyPayBonus(input) {
 // Parámetros del ejemplo: comisión 1%, TIIE emisión 10%, spread costo 4% → 14%.
 const P = { commissionRate: 0.01, costSpread: 0.04, tiieAtIssue: 0.10, financialDays: 150 };
 
-test("Capa 1 (fórmula AN del Excel): costo × 1.01 × 14% × 150/360", () => {
+test("Capa 1: costo × 14% × 150/360 (como la fórmula AN del Excel pero sin el × 1.01)", () => {
   const f = financeCost({ supplierCost: 100000, saleCapital: 115000, daysExceeded: 0, ...P });
-  // Excel: AN = AL × (1 + 0.01) × W / 360 × 150
-  const excel = round2(100000 * 1.01 * 0.14 / 360 * 150);
-  assert.equal(f.layer1, excel);
-  assert.equal(f.layer1, 5891.67);
+  // Excel: AN = AL × (1 + 0.01) × W / 360 × 150 = 5,891.67. Aquí la comisión
+  // no genera interés: 100,000 × 14% × 150/360.
+  assert.equal(f.layer1, 5833.33);
+  assert.notEqual(f.layer1, round2(100000 * 1.01 * 0.14 / 360 * 150));
   assert.equal(f.commission, 1000); // 1% sobre costo de proveedor
   assert.equal(f.layer2, 0); // sin días excedidos no hay Capa 2
 });
@@ -56,10 +58,10 @@ test("Capa 2 (fórmula AK del Excel): capital de venta × 14% × días excedidos
   const excel = round2(115000 * 0.14 * 90 / 360);
   assert.equal(f.layer2, excel);
   assert.equal(f.layer2, 4025);
-  assert.equal(f.total, 1000 + 5891.67 + 4025);
+  assert.equal(f.total, 1000 + 5833.33 + 4025);
 });
 
-test("operación completa: venta 115,000, costo 100,000, 90 días excedidos → utilidad 12,179.33", () => {
+test("operación completa: venta 115,000, costo 100,000, 90 días excedidos → utilidad 12,237.67", () => {
   // Ingresos: venta + mora al cliente (TIIE venc. 7% + 9% = 16% sobre cargo).
   const venta = 115000;
   const costo = 100000;
@@ -68,7 +70,7 @@ test("operación completa: venta 115,000, costo 100,000, 90 días excedidos → 
   const fin = financeCost({ supplierCost: costo, saleCapital: venta, daysExceeded: 90, ...P });
   // Utilidad = venta + mora + dif. cambiario − costo − comisión − C1 − C2 − descuento
   const utilidad = round2(venta + mora + 0 - costo - fin.commission - fin.layer1 - fin.layer2 - 0);
-  assert.equal(utilidad, 12179.33);
+  assert.equal(utilidad, 12237.67); // 115,000 + 8,096 − 100,000 − 1,000 − 5,833.33 − 4,025
   // El cálculo viejo (una capa: costo × TIIE actual+4.5% × días de crédito/360)
   // habría restado solo ~4,817: la utilidad salía inflada ~$6,100.
   const capaViejaUnica = round2(100000 * (0.0706 + 0.045) * 150 / 360);

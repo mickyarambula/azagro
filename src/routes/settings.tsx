@@ -29,7 +29,6 @@ function SettingsBody() {
     invoiceDays: 120,
     fegaRate: 0.0304,
     collectionSpread: 0.09,
-    financeSpread: 0.045,
     defaultTiie: 0.0706,
     asrCommission: 0.01,
     asrSpread: 0.04,
@@ -62,7 +61,6 @@ function SettingsBody() {
       invoiceDays: s.invoiceDays,
       fegaRate: s.fegaRate,
       collectionSpread: s.collectionSpread,
-      financeSpread: s.financeSpread,
       defaultTiie: s.defaultTiie,
       asrCommission: s.asrCommission,
       asrSpread: s.asrSpread,
@@ -263,24 +261,21 @@ function SettingsBody() {
         <Field label="FEGA + comisión (única vez)">
           <input className="erp-input" type="number" step="0.0001" value={form.fegaRate} onChange={(e) => setForm({ ...form, fegaRate: Number(e.target.value) })} />
         </Field>
-        <Field label="Spread de línea (en precio, %)">
-          <input className="erp-input" type="number" step="0.0001" value={form.financeSpread} onChange={(e) => setForm({ ...form, financeSpread: Number(e.target.value) })} />
-        </Field>
         <Field label="Spread mora (factura de intereses, %)">
           <input className="erp-input" type="number" step="0.0001" value={form.collectionSpread} onChange={(e) => setForm({ ...form, collectionSpread: Number(e.target.value) })} />
         </Field>
         <Field label="TIIE por omisión">
           <input className="erp-input" type="number" step="0.0001" value={form.defaultTiie} onChange={(e) => setForm({ ...form, defaultTiie: Number(e.target.value) })} />
         </Field>
-        <Field label="Comisión ASR">
+        <Field label="Comisión ASR (en precio, una sola vez)">
           <input className="erp-input" type="number" step="0.0001" value={form.asrCommission} onChange={(e) => setForm({ ...form, asrCommission: Number(e.target.value) })} />
         </Field>
-        <Field label="Spread ASR (TIIE + )">
+        <Field label="Spread ASR (en precio, TIIE + )">
           <input className="erp-input" type="number" step="0.0001" value={form.asrSpread} onChange={(e) => setForm({ ...form, asrSpread: Number(e.target.value) })} />
         </Field>
         <p className="md:col-span-3 text-sm text-muted">
+          Financiamiento dentro del precio de venta (por unidad) = costo × {((form.asrCommission || 0) * 100).toFixed(2)}% + costo × (TIIE + {((form.asrSpread || 0) * 100).toFixed(2)}%) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días. De contado (0 días) el financiamiento es $0, comisión incluida.
           Mora (solo factura FI si ya venció) = Cargo × (TIIE + {((form.collectionSpread || 0) * 100).toFixed(1)}%) × días exactos / {YEAR_DAYS}. En el estado de cuenta, Comisión 1% + FEGA 2.04% = 3.04% sobre el cargo (columna «Comisión + FEGA»); no se mete al precio del producto.
-          Costo de línea en cotización = TIIE + {((form.financeSpread || 0) * 100).toFixed(1)}% × días exactos / {YEAR_DAYS}.
         </p>
         {editable && <button className="erp-btn-primary">Guardar política</button>}
       </form>

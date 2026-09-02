@@ -14,6 +14,12 @@ const src = (p) => readFileSync(join(root, p), "utf8");
  * Regla del dueño: el costo financiero NO lo absorbe Azagro — se cobra al
  * cliente dentro del precio. Orden: costo → margen → financiamiento encima,
  * con los días de crédito de ESE pedido.
+ *
+ * Financiamiento por unidad = costo × comisión ASR (una vez) + costo ×
+ * (TIIE + spread ASR) × días / 360. La Capa 1 va sobre el costo SOLO (no
+ * sobre costo × 1.01 como en la hoja DIF_TC del Excel viejo): decisión del
+ * dueño 2026-09-01. Los casos con sus números están en
+ * erp-financiamiento-precio.test.mjs.
  */
 const YEAR_DAYS = 360;
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -21,7 +27,7 @@ function financeCost(input) {
   const cost = Math.max(0, input.supplierCost);
   const rate = input.tiieAtIssue + input.costSpread;
   const commission = round2(cost * Math.max(0, input.commissionRate));
-  const layer1 = round2((cost * (1 + Math.max(0, input.commissionRate)) * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
+  const layer1 = round2((cost * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
   const layer2 = round2((Math.max(0, input.saleCapital) * rate * Math.max(0, input.daysExceeded)) / YEAR_DAYS);
   return { rate, commission, layer1, layer2, total: round2(commission + layer1 + layer2) };
 }
@@ -53,9 +59,9 @@ test("el precio sugerido lleva el financiamiento ADENTRO: costo → margen → c
   assert.equal(p.landedUnit, 1000);
   assert.equal(p.marginUnit, 80); // 8% sobre el costo de mercancía
   assert.equal(p.commissionUnit, 10); // comisión 1%
-  assert.equal(p.layer1Unit, 58.92); // 1,010 × 14% × 150/360 (días del PEDIDO)
-  assert.equal(p.financeUnit, 68.92);
-  assert.equal(p.priceUnit, 1148.92); // 1,000 + 80 + 68.92
+  assert.equal(p.layer1Unit, 58.33); // 1,000 × 14% × 150/360 (días del PEDIDO)
+  assert.equal(p.financeUnit, 68.33);
+  assert.equal(p.priceUnit, 1148.33); // 1,000 + 80 + 68.33
 });
 
 test("al contado no hay circuito: precio = costo + margen, sin financiamiento", () => {
@@ -66,13 +72,13 @@ test("al contado no hay circuito: precio = costo + margen, sin financiamiento", 
 
 test("los días son los del pedido, no 150 fijos: a 90 días el financiamiento baja", () => {
   const p = priceSale({ ...EJ, days: 90 });
-  assert.equal(p.layer1Unit, 35.35); // 1,010 × 14% × 90/360
-  assert.equal(p.priceUnit, round2(1000 + 80 + 10 + 35.35));
+  assert.equal(p.layer1Unit, 35); // 1,000 × 14% × 90/360
+  assert.equal(p.priceUnit, round2(1000 + 80 + 10 + 35));
 });
 
 test("la utilidad final queda en el margen elegido: cobrado en precio − pagado al circuito ≈ 0", () => {
   const p = priceSale(EJ);
-  const venta = p.priceUnit * 100; // 114,892
+  const venta = p.priceUnit * 100; // 114,833
   const costo = 100000;
   // Lo que Azagro paga al circuito por la operación completa (mismos 150 días):
   const fin = financeCost({ supplierCost: costo, saleCapital: venta, commissionRate: 0.01, costSpread: 0.04, tiieAtIssue: 0.10, financialDays: 150, daysExceeded: 0 });
@@ -87,12 +93,16 @@ test("la utilidad final queda en el margen elegido: cobrado en precio − pagado
   assert.ok(utilidad - utilidadVieja > 6000, "la diferencia son los ~7 puntos que se descontaban dos veces");
 });
 
-test("validación contra el Excel (hoja DIF_TC): la Capa 1 del precio es la fórmula AN con los días del circuito", () => {
-  // Excel: AN = costo × (1 + 1%) × (TIIE emisión + 4%) / 360 × 150.
-  const excelAN = round2(100000 * 1.01 * 0.14 / 360 * 150);
+test("contra el Excel (hoja DIF_TC): misma tasa y días que la fórmula AN, pero sobre el costo solo (sin × 1.01)", () => {
+  // Excel: AN = costo × (1 + 1%) × (TIIE emisión + 4%) / 360 × 150 (el circuito
+  // con la hermana adelantaba costo + comisión). Con ASR la comisión no se
+  // capitaliza: Capa 1 = costo × (TIIE + 4%) × días / 360.
+  const excelAN = round2(100000 * 1.01 * 0.14 / 360 * 150); // 5,891.67
+  const op = financeCost({ supplierCost: 100000, saleCapital: 0, commissionRate: 0.01, costSpread: 0.04, tiieAtIssue: 0.10, financialDays: 150, daysExceeded: 0 });
+  assert.equal(op.layer1, 5833.33); // 100,000 × 14% × 150/360, sobre el costo solo
+  assert.equal(round2(excelAN - op.layer1), 58.34, "la diferencia es exactamente el interés sobre la comisión (1,000 × 14% × 150/360)");
   const p = priceSale(EJ);
-  assert.equal(round2(p.layer1Unit * 100), 5892); // por unidad × 100 unidades
-  assert.ok(Math.abs(p.layer1Unit * 100 - excelAN) < 1, "misma fórmula que el Excel");
+  assert.equal(p.layer1Unit, 58.33); // por unidad: lo mismo entre 100
   // Margen bruto s/venta ≈ 13% y utilidad ≈ 7% s/venta: el rango del Excel
   // (8-9% con mora e ingresos cambiarios encima), no 5 puntos abajo.
   const venta = p.priceUnit * 100;
