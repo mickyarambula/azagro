@@ -6,6 +6,7 @@ import { assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { todayMx } from "@/lib/utils";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
+import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -85,6 +86,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const daysExceeded = fv[0]
     ? Math.max(0, daysBetween(fv[0].credit_due || fv[0].due_date, exceededEnd))
     : 0;
+  await ensureRefCost(sql);
   const raw = await sql<{
     product_id: number;
     code: string;
@@ -93,6 +95,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     uom: string;
     unit_price: string;
     catalog_cost: string;
+    ref_cost: string;
     po_cost: string | null;
     quote_cost: string | null;
     quote_freight: string;
@@ -100,6 +103,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   }>`
     select sl.product_id, p.code, p.name, sl.qty::text, coalesce(sl.uom, p.uom) as uom, sl.unit_price::text,
       p.cost::text as catalog_cost,
+      coalesce(p.ref_cost,0)::text as ref_cost,
       (
         select pl.unit_price::text from purchase_lines pl
         join purchase_orders po on po.id = pl.po_id
@@ -120,9 +124,11 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     const saleUnit = Number(l.unit_price);
     const poCost = l.po_cost != null ? Number(l.po_cost) : null;
     const quoteCost = l.quote_cost != null ? Number(l.quote_cost) : null;
-    const catalog = Number(l.catalog_cost);
-    const costUnit = poCost ?? quoteCost ?? catalog;
-    const costSource = poCost != null ? "OC" : quoteCost != null ? "cotización" : "catálogo";
+    // El costo real manda: OC del proveedor, luego el de la cotización. Si no
+    // hay ninguno, el del catálogo con el orden único (kardex → referencia).
+    const catalogo = resolveCost({ avgCost: l.catalog_cost, refCost: l.ref_cost });
+    const costUnit = poCost ?? quoteCost ?? catalogo.cost;
+    const costSource = poCost != null ? "OC" : quoteCost != null ? "cotización" : catalogo.source === "referencia" ? "referencia" : "catálogo";
     const freightUnit = Number(l.quote_freight);
     const otherUnit = Number(l.quote_other);
     const sale = qty * saleUnit;

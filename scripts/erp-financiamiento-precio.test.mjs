@@ -264,10 +264,11 @@ test("cableado: el 4.5% (spread de línea) ya no existe en Ajustes, política ni
 test("cableado: el servidor calcula el financiamiento con el costo real ANTES de escondérselo a ventas", () => {
   const ops = src("src/lib/erp/ops.ts");
   const fn = ops.slice(ops.indexOf("export const listQuotes"), ops.indexOf("export const createQuote"));
-  assert.ok(fn.includes("financeBase({ cost: Number(cost) || 0, tiie: pol.defaultTiie, costSpread: pol.asrSpread, commissionRate: pol.asrCommission })"), "la base sale del costo real y de Ajustes");
+  assert.ok(fn.includes("financeBase({ cost, tiie: pol.defaultTiie, costSpread: pol.asrSpread, commissionRate: pol.asrCommission })"), "la base sale del costo resuelto y de Ajustes");
+  assert.ok(fn.includes("resolveCost({ avgCost: row.cost, refCost: row.ref_cost })"), "y el costo sale del orden único (kardex → referencia)");
   assert.ok(fn.indexOf("const pricedProducts") < fn.indexOf("if (!canSeeCosts(me.role))"), "primero se calcula, después se esconde el costo");
-  assert.ok(fn.includes("pricedLines.map((l) => ({ ...l, cost: \"0\", freight: \"0\" }))"), "a ventas se le esconde costo y flete, no el precio");
-  assert.ok(fn.includes("pricedProducts.map((p) => ({ ...p, cost: \"0\" }))"), "lo mismo en el catálogo de productos");
+  assert.ok(fn.includes("pricedLines.map((l) => ({ ...l, cost: \"0\", ref_cost: \"0\", freight: \"0\" }))"), "a ventas se le esconde costo y flete, no el precio");
+  assert.ok(fn.includes("pricedProducts.map((p) => ({ ...p, cost: \"0\", ref_cost: \"0\" }))"), "lo mismo en el catálogo de productos");
 
   const q = src("src/routes/quotes.tsx");
   assert.ok(!q.includes("num(p.cost)") && !q.includes("num(prod?.cost)"), "la pantalla ya no calcula con el costo");

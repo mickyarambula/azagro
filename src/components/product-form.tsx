@@ -9,6 +9,7 @@ export type ProductDraft = {
   product_type: string;
   uom: string;
   cost: number;
+  ref_cost: number;
   list_price: number;
   min_stock: number;
 };
@@ -18,11 +19,16 @@ export function ProductFields({
   setForm,
   lookups,
   onLookups,
+  canEditRefCost = false,
+  costSource,
 }: {
   form: ProductDraft;
   setForm: (f: ProductDraft) => void;
   lookups: Awaited<ReturnType<typeof listLookups>> | null;
   onLookups: () => Promise<void>;
+  /** El costo de referencia es de administración: solo el admin lo ve y lo edita. */
+  canEditRefCost?: boolean;
+  costSource?: "kardex" | "referencia" | "ninguno";
 }) {
   return (
     <div className="grid gap-4">
@@ -71,6 +77,37 @@ export function ProductFields({
           <input className="erp-input" type="number" step="0.01" value={form.min_stock} onChange={(e) => setForm({ ...form, min_stock: Number(e.target.value) })} />
         </Field>
       </div>
+      {canEditRefCost && (
+        <div className="grid gap-3 md:grid-cols-3">
+          <Field label="Costo de referencia">
+            <input
+              className="erp-input"
+              type="number"
+              step="0.01"
+              min="0"
+              value={form.ref_cost}
+              onChange={(e) => setForm({ ...form, ref_cost: Math.max(0, Number(e.target.value)) })}
+            />
+          </Field>
+          <p className="text-xs text-muted md:col-span-2 md:self-center">
+            Para productos que nunca entran a bodega (brokeraje, directo) o que aún no se han recibido. El sistema usa el promedio móvil del kardex si existe; si no, este.
+            Sin ninguno de los dos no se puede cotizar a crédito. Todo cambio queda en Bitácora.
+          </p>
+        </div>
+      )}
+      {costSource && (
+        <p className="text-xs text-muted">
+          Costo que está usando el sistema:{" "}
+          {costSource === "kardex" ? (
+            <strong>promedio móvil del kardex</strong>
+          ) : costSource === "referencia" ? (
+            <strong>costo de referencia</strong>
+          ) : (
+            <strong className="text-warn">ninguno — no se puede cotizar a crédito</strong>
+          )}
+          .
+        </p>
+      )}
       <p className="text-xs text-muted">Costo y precio se pueden dejar en cero y completarlos al cotizar o comprar.</p>
     </div>
   );

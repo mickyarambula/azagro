@@ -120,6 +120,9 @@ function Page() {
     }
   }
 
+  // A crédito cada partida necesita costo (kardex o de referencia): sin él el
+  // financiamiento sale en cero y el servidor no deja guardar.
+  const sinCosto = priceOffer !== "cash" && creditDays > 0;
   const cashTotal = lines.reduce((s, l) => s + l.qty * l.cashPrice, 0);
   const creditTotal = lines.reduce((s, l) => s + l.qty * l.creditPrice, 0);
 
@@ -319,6 +322,10 @@ function Page() {
                           setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days: creditDays }) } : x)));
                         }}
                       />
+                      {/* El servidor rechaza guardar esto a crédito: se avisa antes de capturar todo. */}
+                      {sinCosto && p?.cost_source === "ninguno" ? (
+                        <p className="mt-1 text-[11px] text-warn">Sin costo: pide a administración el costo de referencia, o cotiza de contado.</p>
+                      ) : null}
                     </td>
                     <td className="px-3 py-2">
                       <UomSelect value={line.uom || p?.uom || "TM"} extra={p?.uom} onChange={(uom) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, uom } : x)))} />

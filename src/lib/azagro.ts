@@ -12,6 +12,7 @@ import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate } from "@/lib/erp/credit";
 import { ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
+import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { todayMx } from "@/lib/utils";
 
 export type Role = AppRole;
@@ -661,29 +662,46 @@ export const saveProduct = createServerFn({ method: "POST" })
       cost: z.number(),
       list_price: z.number(),
       min_stock: z.number(),
+      // Costo de referencia: opcional en el envío. Si no viene, no se toca.
+      ref_cost: z.number().nonnegative().optional(),
     }),
   )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "products", "edit");
+    await ensureRefCost(sql);
+    const me = await activeMember(sql, context.userId);
+    // El costo de referencia lo captura administración: validación en el
+    // servidor, no solo en pantalla (la pantalla ni siquiera lo muestra a los
+    // demás roles, pero eso no es un candado).
+    if (data.ref_cost !== undefined && me.role !== "admin") {
+      throw new Error("Solo un administrador puede capturar el costo de referencia");
+    }
+    if (data.ref_cost !== undefined && (!Number.isFinite(data.ref_cost) || data.ref_cost < 0)) {
+      throw new Error("El costo de referencia no puede ser negativo");
+    }
     let code = (data.code ?? "").trim().toUpperCase();
     if (!code) code = await nextCodeFor(sql, m.company_id, "PRD-", "products");
     const category = data.category || (data.product_type === "INSUMO" ? "Insumos" : "Fertilizantes");
     if (data.id) {
       // Costo y precio de lista son sensibles: cambios manuales a bitácora.
-      const before = await sql<{ cost: string; list_price: string }>`
-        select cost::text, list_price::text from products where id = ${data.id} and company_id = ${m.company_id}
+      const before = await sql<{ cost: string; list_price: string; ref_cost: string }>`
+        select cost::text, list_price::text, coalesce(ref_cost,0)::text as ref_cost
+        from products where id = ${data.id} and company_id = ${m.company_id}
       `;
       await sql`
         update products set code=${code}, name=${data.name}, category=${category},
           product_type=${data.product_type}, uom=${data.uom}, cost=${data.cost},
-          list_price=${data.list_price}, min_stock=${data.min_stock}
+          list_price=${data.list_price}, min_stock=${data.min_stock},
+          ref_cost = coalesce(${data.ref_cost ?? null}, ref_cost)
         where id = ${data.id} and company_id = ${m.company_id}
       `;
       if (before[0]) {
         const cambios: string[] = [];
         if (Number(before[0].cost) !== data.cost) cambios.push(`costo ${Number(before[0].cost)} → ${data.cost}`);
+        if (data.ref_cost !== undefined && Number(before[0].ref_cost) !== data.ref_cost)
+          cambios.push(`costo de referencia ${Number(before[0].ref_cost)} → ${data.ref_cost}`);
         if (Number(before[0].list_price) !== data.list_price)
           cambios.push(`precio lista ${Number(before[0].list_price)} → ${data.list_price}`);
         if (cambios.length) {
@@ -701,10 +719,21 @@ export const saveProduct = createServerFn({ method: "POST" })
       return { id: data.id };
     }
     const row = await sql<{ id: number }>`
-      insert into products (company_id, code, name, category, product_type, uom, cost, list_price, min_stock)
-      values (${m.company_id}, ${code}, ${data.name}, ${category}, ${data.product_type}, ${data.uom}, ${data.cost}, ${data.list_price}, ${data.min_stock})
+      insert into products (company_id, code, name, category, product_type, uom, cost, list_price, min_stock, ref_cost)
+      values (${m.company_id}, ${code}, ${data.name}, ${category}, ${data.product_type}, ${data.uom}, ${data.cost}, ${data.list_price}, ${data.min_stock}, ${data.ref_cost ?? 0})
       returning id
     `;
+    if (data.ref_cost) {
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "precio-producto",
+        entity: "product",
+        entityId: row[0]!.id,
+        name: `${code} ${data.name}`,
+        detail: `costo de referencia 0 → ${data.ref_cost}`,
+      });
+    }
     return { id: row[0]!.id };
   });
 
@@ -724,6 +753,7 @@ export const getProduct = createServerFn({ method: "POST" })
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "products", "view");
+    await ensureRefCost(sql);
     const rows = await sql<{
       id: number;
       code: string;
@@ -732,11 +762,13 @@ export const getProduct = createServerFn({ method: "POST" })
       product_type: string;
       uom: string;
       cost: string;
+      ref_cost: string;
       list_price: string;
       min_stock: string;
       on_hand: string;
     }>`
       select p.id, p.code, p.name, p.category, p.product_type, p.uom, p.cost::text, p.list_price::text, p.min_stock::text,
+        coalesce(p.ref_cost,0)::text as ref_cost,
         coalesce((select sum(quantity) from stock_quants q where q.product_id = p.id),0)::text as on_hand
       from products p
       where p.company_id = ${m.company_id} and p.id = ${data.id}
@@ -744,9 +776,16 @@ export const getProduct = createServerFn({ method: "POST" })
     `;
     if (!rows[0]) throw new Error("No encontrado");
     const me = await activeMember(sql, context.userId);
+    // De cuál de las dos vías sale el costo que el sistema está usando.
+    const used = resolveCost({ avgCost: rows[0].cost, refCost: rows[0].ref_cost });
     return {
       ...rows[0],
       cost: canSeeCosts(me.role) ? rows[0].cost : "0",
+      // El costo de referencia es de administración: nadie más lo ve.
+      ref_cost: me.role === "admin" ? rows[0].ref_cost : "0",
+      can_edit_ref_cost: me.role === "admin",
+      cost_in_use: canSeeCosts(me.role) ? String(used.cost) : "0",
+      cost_source: used.source,
       list_price: canSeeSalePrices(me.role) ? rows[0].list_price : "0",
     };
   });

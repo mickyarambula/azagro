@@ -10,7 +10,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 - Postgres: Neon si hay `DATABASE_URL`, si no PGLite embebido (`src/lib/db.ts`)
 - better-auth
 - Server functions: `createServerFn` + `authMiddleware`
-- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente)
+- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`)
 
 ## No romper
 

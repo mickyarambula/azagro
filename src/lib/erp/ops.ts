@@ -9,6 +9,7 @@ import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { financeBase } from "@/lib/erp/pricing";
+import { assertCostForCredit, ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -373,6 +374,7 @@ export const listQuotes = createServerFn({ method: "GET" })
       on_hand_own: string;
       on_hand_supplier: string;
       cost: string;
+      ref_cost: string;
       freight: string;
     }>`
       select ql.id, ql.quote_id, ql.product_id, (pr.code || ' — ' || pr.name) as product, ql.qty::text, ql.unit_price::text,
@@ -383,6 +385,7 @@ export const listQuotes = createServerFn({ method: "GET" })
         coalesce((select sum(q.quantity) from stock_quants q join locations l on l.id = q.location_id where q.product_id = pr.id and l.loc_type = 'internal'),0)::text as on_hand_own,
         coalesce((select sum(q.quantity) from stock_quants q join locations l on l.id = q.location_id where q.product_id = pr.id and l.loc_type = 'supplier'),0)::text as on_hand_supplier,
         coalesce(nullif(ql.cost,0), pr.cost)::text as cost,
+        coalesce(pr.ref_cost,0)::text as ref_cost,
         coalesce(ql.freight,0)::text as freight
       from quote_lines ql
       join products pr on pr.id = ql.product_id
@@ -393,26 +396,36 @@ export const listQuotes = createServerFn({ method: "GET" })
       select id, name, coalesce(email,'') as email, coalesce(phone,'') as phone
       from partners where company_id = ${cid} and is_customer = true order by name
     `;
-    // cost = promedio móvil del kardex: base del financiamiento en la cotización directa.
-    const products = await sql<{ id: number; code: string; name: string; list_price: string; uom: string; cost: string }>`
-      select id, code, name, list_price::text, uom, coalesce(cost,0)::text as cost from products where company_id = ${cid} order by code
+    // Costo del producto: promedio móvil del kardex y, si no hay, el de
+    // referencia (orden único en resolveCost). Es la base del financiamiento
+    // de la cotización directa.
+    await ensureRefCost(sql);
+    const products = await sql<{ id: number; code: string; name: string; list_price: string; uom: string; cost: string; ref_cost: string }>`
+      select id, code, name, list_price::text, uom, coalesce(cost,0)::text as cost, coalesce(ref_cost,0)::text as ref_cost
+      from products where company_id = ${cid} order by code
     `;
     // El financiamiento se calcula SIEMPRE sobre el costo real, para cualquier
     // rol: el precio no puede depender de quién cotiza. Lo que cambia con el
     // rol es lo que se muestra (costo y flete), no el cálculo. Por eso la
     // pantalla recibe la base del financiamiento y nunca el costo.
     const pol = await policy(sql, cid);
-    const baseOf = (cost: string) =>
-      financeBase({ cost: Number(cost) || 0, tiie: pol.defaultTiie, costSpread: pol.asrSpread, commissionRate: pol.asrCommission });
-    const pricedProducts = products.map((p) => ({ ...p, fin: baseOf(p.cost) }));
-    const pricedLines = lines.map((l) => ({ ...l, fin: baseOf(l.cost) }));
+    const baseOf = (row: { cost: string; ref_cost: string }) => {
+      const { cost, source } = resolveCost({ avgCost: row.cost, refCost: row.ref_cost });
+      return {
+        fin: financeBase({ cost, tiie: pol.defaultTiie, costSpread: pol.asrSpread, commissionRate: pol.asrCommission }),
+        // La pantalla necesita saber si hay costo para avisar antes de guardar.
+        cost_source: source,
+      };
+    };
+    const pricedProducts = products.map((p) => ({ ...p, ...baseOf(p) }));
+    const pricedLines = lines.map((l) => ({ ...l, ...baseOf(l) }));
     // El costo de compra y el flete no son para ventas: solo quien puede ver costos.
     if (!canSeeCosts(me.role)) {
       return {
         quotes,
-        lines: pricedLines.map((l) => ({ ...l, cost: "0", freight: "0" })),
+        lines: pricedLines.map((l) => ({ ...l, cost: "0", ref_cost: "0", freight: "0" })),
         customers,
-        products: pricedProducts.map((p) => ({ ...p, cost: "0" })),
+        products: pricedProducts.map((p) => ({ ...p, cost: "0", ref_cost: "0" })),
       };
     }
     return { quotes, lines: pricedLines, customers, products: pricedProducts };
@@ -459,6 +472,10 @@ export const createQuote = createServerFn({ method: "POST" })
     if (data.validUntil < today) {
       throw new Error(`La vigencia ya venció (${data.validUntil}). Elige hoy o una fecha posterior.`);
     }
+    // A crédito el precio lleva financiamiento; sin costo saldría en cero.
+    // De contado (oferta solo contado o plazo 0) no hay nada que financiar.
+    const plazo = (data.priceOffer ?? "both") === "cash" ? 0 : (data.creditDays ?? 0);
+    await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazo);
     await sql`alter table quotes add column if not exists owner_id text`;
     await sql`alter table quotes add column if not exists tiie numeric(8,6) not null default 0`;
     await sql`alter table quotes add column if not exists spread numeric(8,6) not null default 0`;
@@ -576,6 +593,10 @@ export const reviseQuote = createServerFn({ method: "POST" })
     if (!cambios.length) {
       throw new Error("Sin cambios: la revisión no se guardó. Cambia algún precio, cantidad o plazo para hacer una revisión nueva.");
     }
+    // Mismo candado que al crear: si la revisión queda a crédito, cada partida
+    // necesita costo (kardex o de referencia) para poder financiar el precio.
+    const plazoRev = offer === "cash" ? 0 : (data.creditDays ?? q[0].credit_days);
+    await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev);
     await sql`
       update quotes
       set revision = ${q[0].revision + 1},

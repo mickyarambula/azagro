@@ -227,6 +227,15 @@ natural de trabajo grande.
 - El financiamiento lo calcula el **servidor** con el costo real, para
   cualquier rol: el precio no depende de quién cotiza. A Ventas se le
   esconden costo y flete, no el cálculo.
+- **Costo del producto, orden único** (`src/lib/erp/cost.ts`, migración 0016):
+  1) promedio móvil del kardex si es > 0; 2) si no, costo de referencia
+  (`products.ref_cost`, solo administrador lo ve y lo captura, con bitácora);
+  3) si no, el producto no tiene costo y el servidor **no deja guardar una
+  cotización a crédito** con esa partida (de contado sí: no hay nada que
+  financiar). El costo de referencia existe para brokeraje/directo, que por
+  regla nunca entra a bodega y por lo tanto nunca genera promedio móvil.
+  La ruta de solicitud con RFQ no usa nada de esto: ahí el costo es el
+  precio del proveedor ganador.
 - Capa 2 (costo financiero de los días que el cliente se pasa del plazo) sí
   se resta de la utilidad — ese no estaba previsto en el precio.
 - Kardex: promedio móvil, `stock_moves` inmutable, `stock_quants` proyección.

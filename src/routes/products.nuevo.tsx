@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { BackBar } from "@/components/erp";
 import { ProductFields, type ProductDraft } from "@/components/product-form";
+import { useAccess } from "@/lib/access";
 import { nextProductCode, saveProduct } from "@/lib/azagro";
 import { listLookups } from "@/lib/erp/catalogs";
 
@@ -11,6 +12,7 @@ export const Route = createFileRoute("/products/nuevo")({
 
 function Nuevo() {
   const navigate = useNavigate();
+  const esAdmin = useAccess().role === "admin";
   const [lookups, setLookups] = useState<Awaited<ReturnType<typeof listLookups>> | null>(null);
   const [form, setForm] = useState<ProductDraft>({
     code: "",
@@ -18,6 +20,7 @@ function Nuevo() {
     product_type: "FERTILIZANTES",
     uom: "KGS",
     cost: 0,
+    ref_cost: 0,
     list_price: 0,
     min_stock: 0,
   });
@@ -42,7 +45,9 @@ function Nuevo() {
     setBusy(true);
     setError(null);
     try {
-      const res = await saveProduct({ data: form });
+      // Igual que en la ficha: ref_cost solo viaja si quien captura es admin.
+      const { ref_cost: _ref, ...rest } = form;
+      const res = await saveProduct({ data: esAdmin ? form : rest });
       await navigate({
         to: "/products/$productId",
         params: { productId: String(res.id) },
@@ -68,7 +73,7 @@ function Nuevo() {
         </button>
       </div>
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}
-      <ProductFields form={form} setForm={setForm} lookups={lookups} onLookups={async () => setLookups(await listLookups())} />
+      <ProductFields form={form} setForm={setForm} lookups={lookups} onLookups={async () => setLookups(await listLookups())} canEditRefCost={esAdmin} />
     </form>
   );
 }

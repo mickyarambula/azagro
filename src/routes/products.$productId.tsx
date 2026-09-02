@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { BackBar } from "@/components/erp";
-import { ProductFields } from "@/components/product-form";
+import { ProductFields, type ProductDraft } from "@/components/product-form";
 import { PartnerProducts } from "@/components/partner-products";
 import { useAccess } from "@/lib/access";
 import { getProduct, saveProduct } from "@/lib/azagro";
@@ -18,16 +18,10 @@ function Ficha() {
   const { can } = useAccess();
   const canEdit = can("products", "edit");
   const [lookups, setLookups] = useState<Awaited<ReturnType<typeof listLookups>> | null>(null);
-  const [form, setForm] = useState<{
-    code: string;
-    name: string;
-    product_type: string;
-    uom: string;
-    cost: number;
-    list_price: number;
-    min_stock: number;
-  } | null>(null);
+  const [form, setForm] = useState<ProductDraft | null>(null);
   const [onHand, setOnHand] = useState("0");
+  const [refCostOk, setRefCostOk] = useState(false);
+  const [costSource, setCostSource] = useState<"kardex" | "referencia" | "ninguno">("ninguno");
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,9 +34,12 @@ function Ficha() {
       product_type: p.product_type,
       uom: p.uom,
       cost: num(p.cost),
+      ref_cost: num(p.ref_cost),
       list_price: num(p.list_price),
       min_stock: num(p.min_stock),
     });
+    setRefCostOk(p.can_edit_ref_cost);
+    setCostSource(p.cost_source);
     setOnHand(p.on_hand);
   }
 
@@ -56,7 +53,10 @@ function Ficha() {
     if (!form) return;
     setError(null);
     try {
-      await saveProduct({ data: { ...form, id } });
+      // ref_cost solo se manda si este usuario puede capturarlo: si no, el
+      // servidor rechazaría el envío (y no debe irse un 0 por accidente).
+      const { ref_cost: _ref, ...rest } = form;
+      await saveProduct({ data: refCostOk ? { ...form, id } : { ...rest, id } });
       setMsg("Guardado");
       await load();
     } catch (err) {
@@ -90,7 +90,14 @@ function Ficha() {
       </div>
       {msg && <p className="mb-3 text-sm text-ok">{msg}</p>}
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}
-      <ProductFields form={form} setForm={setForm} lookups={lookups} onLookups={async () => setLookups(await listLookups())} />
+      <ProductFields
+        form={form}
+        setForm={setForm}
+        lookups={lookups}
+        onLookups={async () => setLookups(await listLookups())}
+        canEditRefCost={refCostOk}
+        costSource={costSource}
+      />
       <PartnerProducts productId={id} canEdit={canEdit} />
     </form>
   );

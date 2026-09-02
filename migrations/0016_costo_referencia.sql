@@ -1,0 +1,14 @@
+-- Costo de referencia del producto.
+--
+-- products.cost es el promedio móvil del kardex: solo existe cuando la
+-- mercancía ya entró a bodega. Los productos de brokeraje/directo (que por
+-- regla nunca se reciben) y los de alta nueva se quedaban en costo 0, y una
+-- cotización a crédito sobre ellos calculaba $0 de financiamiento: Azagro
+-- regalaba el costo del dinero.
+--
+-- ref_cost lo captura administración a mano. El orden para resolver el costo
+-- es uno solo en todo el sistema (src/lib/erp/cost.ts):
+--   1) promedio móvil del kardex, si es mayor que cero
+--   2) si no, costo de referencia, si es mayor que cero
+--   3) si no, el producto no tiene costo y no se puede cotizar a crédito.
+alter table products add column if not exists ref_cost numeric(14,4) not null default 0;
