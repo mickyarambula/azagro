@@ -8,7 +8,7 @@ import { MoneyField, QtyField, UomSelect } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { SendButton } from "@/components/send-doc";
 import { Expediente } from "@/components/expediente";
-import { addDays } from "@/lib/erp/credit";
+import { addDays, missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { getDealTrail } from "@/lib/erp/deal";
 import { OFFER_LABEL } from "@/lib/erp/margins";
 import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
@@ -100,12 +100,18 @@ function Page() {
   const [locs, setLocs] = useState<Array<{ id: number; name: string }>>([]);
   const [partnerId, setPartnerId] = useState(0);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
-  const [fxRate, setFxRate] = useState(18);
+  // Ningún número de negocio nace aquí: plazo y spread vienen de Ajustes,
+  // la TIIE y el tipo de cambio de sus tablas (con fecha). 0 = todavía no
+  // hay dato, y el servidor no deja guardar sin él.
+  const [fxRate, setFxRate] = useState(0);
+  const [fxFrom, setFxFrom] = useState<string | null>(null);
   const [validUntil, setValidUntil] = useState(() => addDays(todayMx(), 15));
   const [priceOffer, setPriceOffer] = useState<Offer>("both");
-  const [creditDays, setCreditDays] = useState(90);
-  const [tiie, setTiie] = useState(0.0706);
-  const [spread, setSpread] = useState(0.04);
+  const [creditDays, setCreditDays] = useState(0);
+  const [tiie, setTiie] = useState(0);
+  const [tiieFrom, setTiieFrom] = useState<string | null>(null);
+  const [spread, setSpread] = useState(0);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [deliveryTo, setDeliveryTo] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -126,22 +132,33 @@ function Page() {
   }
 
   async function load() {
-    const [d, s] = await Promise.all([listQuotes(), getSettings().catch(() => null)]);
+    const d = await listQuotes();
     setData(d);
     setPartnerId(d.customers[0]?.id ?? 0);
+    // Ajustes incompletos = no se cotiza a mano; el error se muestra tal cual.
+    const s = await getSettings().catch((e: unknown) => {
+      setSettingsError(humanError(e));
+      return null;
+    });
     if (s) {
-      setCreditDays(s.creditDays || 90);
-      setTiie(s.defaultTiie || 0.0706);
+      setSettingsError(null);
+      setCreditDays(s.creditDays);
       setSpread(s.asrSpread);
+      const fx = nearestRate(s.fx.map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), todayMx());
+      setFxRate(fx?.rate ?? 0);
+      setFxFrom(fx?.date ?? null);
     }
+    setTiie(d.tiieToday?.rate ?? 0);
+    setTiieFrom(d.tiieToday?.date ?? null);
     const inv = await listInventory();
     setLocs(inv.locations.filter((l) => l.loc_type === "internal" || l.loc_type === "supplier"));
     setLocationId((id) => id || inv.locations.find((l) => l.loc_type === "internal")?.id || inv.locations[0]?.id || 0);
-    if (lines.length === 0 && d.products[0]) {
+    if (lines.length === 0 && d.products[0] && s) {
       const p = d.products[0];
       const cash = Number(p.list_price);
-      const days = s?.creditDays || 90;
-      setLines([{ productId: p.id, qty: 1, cashPrice: cash, fin: p.fin, creditPrice: creditFromCash({ cash, fin: p.fin, days }), uom: p.uom || "TM" }]);
+      const days = s.creditDays;
+      const f = p.fin ?? SIN_FIN;
+      setLines([{ productId: p.id, qty: 1, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days }), uom: p.uom || "TM" }]);
     }
   }
   useEffect(() => {
@@ -179,6 +196,11 @@ function Page() {
       if (validUntil < todayMx()) {
         throw new Error(`La vigencia ya venció (${validUntil}). Elige hoy o una fecha posterior.`);
       }
+      if (settingsError) throw new Error(settingsError);
+      if (currency === "USD" && !(fxRate > 0)) {
+        throw new Error("Sin tipo de cambio: la tabla está vacía. Captúralo en Ajustes → Tipo de cambio o escribe el pactado.");
+      }
+      if (priceOffer !== "cash" && creditDays > 0 && !(tiie > 0)) throw new Error(missingRateMessage(todayMx(), "cotización a crédito"));
       const priced = lines.filter((l) => l.productId && l.qty > 0);
       await createQuote({
         data: {
@@ -203,7 +225,8 @@ function Page() {
       });
       const p = data?.products[0];
       const cash = Number(p?.list_price ?? 0);
-      setLines(p ? [{ productId: p.id, qty: 1, cashPrice: cash, fin: p.fin, creditPrice: creditFromCash({ cash, fin: p.fin, days: creditDays }), uom: p.uom || "TM" }] : []);
+      const f = p?.fin ?? SIN_FIN;
+      setLines(p ? [{ productId: p.id, qty: 1, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days: creditDays }), uom: p.uom || "TM" }] : []);
       await load();
     } catch (err) {
       setError(humanError(err));
@@ -305,6 +328,7 @@ function Page() {
       </p>
       <details className="mb-6">
         <summary className="cursor-pointer text-sm font-semibold">Alta manual (sin solicitud)</summary>
+      {settingsError ? <p className="mt-3 text-sm text-danger">Ajustes no disponibles: {settingsError}</p> : null}
       <form onSubmit={submit} className="mt-3">
         <div className="grid gap-3 lg:grid-cols-6">
           <HeadBox label="Cliente">
@@ -323,8 +347,9 @@ function Page() {
             </select>
           </HeadBox>
           {currency === "USD" ? (
-          <HeadBox label="Dólar pactado">
+          <HeadBox label={fxFrom ? `Dólar pactado (tabla ${fxFrom})` : "Dólar pactado (sin tabla)"}>
             <MoneyField className="w-full border-0 bg-transparent px-0" value={fxRate} onChange={setFxRate} />
+            {!fxFrom ? <p className="text-[11px] text-danger">Sin tipo de cambio en la tabla: captúralo en Ajustes o escribe el pactado.</p> : null}
           </HeadBox>
           ) : null}
           <HeadBox label="Vigencia">
@@ -362,6 +387,17 @@ function Page() {
             {priceOffer !== "credit" ? <p className="text-sm tabular-nums">Contado {moneyIn(cashTotal, currency)}</p> : null}
             {priceOffer !== "cash" ? <p className="text-sm font-semibold tabular-nums">Crédito {moneyIn(creditTotal, currency)}</p> : null}
           </HeadBox>
+          {priceOffer !== "cash" ? (
+            <HeadBox label="Financiamiento">
+              {tiieFrom ? (
+                <p className="text-[12px] tabular-nums">
+                  TIIE {(tiie * 100).toFixed(2)}% (tabla, {tiieFrom}) + spread ASR {(spread * 100).toFixed(2)}% (Ajustes)
+                </p>
+              ) : (
+                <p className="text-[11px] text-danger">{missingRateMessage(todayMx(), "cotización a crédito")}</p>
+              )}
+            </HeadBox>
+          ) : null}
         </div>
         <div className="mt-3 grid gap-3 lg:grid-cols-3">
           <HeadBox label="Entrega">
@@ -697,7 +733,7 @@ function Page() {
                                     setRevPrices((prev) => {
                                       const base = { ...(prev[al.productId] ?? rp), [which]: p };
                                       const credit =
-                                        which === "cash" && prod ? creditFromCash({ cash: p, fin: prod.fin, days: qrow.credit_days }) : base.credit;
+                                        which === "cash" && prod ? creditFromCash({ cash: p, fin: prod.fin ?? SIN_FIN, days: qrow.credit_days }) : base.credit;
                                       return { ...prev, [al.productId]: { ...base, credit, qty: al.qty } };
                                     });
                                   return (

@@ -35,7 +35,8 @@ test("editar un pedido deja bitácora con anterior → nuevo, y marca los confir
 test("la FI guarda TIIE, spread, días, capital y FEGA, con autor y desglose", () => {
   const ops = src("src/lib/erp/ops.ts");
   const mora = ops.slice(ops.indexOf("export async function issueMoraInvoice"));
-  assert.ok(mora.includes("TIIE ${(tiie * 100).toFixed(4)}%"), "la FI guarda la TIIE usada");
+  assert.ok(mora.includes("${rateLabel(pick)} vigente al ${moraDue}"), "la FI guarda la TIIE usada y de qué renglón de la tabla salió");
+  assert.ok(mora.includes("requireRate("), "sin renglón de TIIE no se emite FI (error claro), no se estima");
   assert.ok(mora.includes("spread ${(pol.collectionSpread * 100).toFixed(2)}%"), "la FI guarda el spread");
   assert.ok(mora.includes("d vencidos"), "la FI guarda los días");
   assert.ok(mora.includes("capital (cargo original)"), "la FI guarda el capital base");
@@ -50,9 +51,13 @@ test("la FV congela sus parámetros al emitirse (foto contra cambios futuros de 
     assert.ok(deliver.includes(campo), `la foto de la FV incluye ${campo}`);
   }
   assert.ok(deliver.includes("params_snap"), "la foto se guarda en la factura");
+  assert.ok(
+    deliver.includes("const tiiePick = financedDays > 0 ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`) : nearestRate(tiieTable, today);"),
+    "a crédito la FV exige renglón de TIIE (se detiene sin él); de contado guarda el que haya o nada, nunca un número del código",
+  );
   const rep = src("src/lib/erp/reports.ts");
   assert.ok(rep.includes("JSON.parse(fv[0].params_snap)"), "el P&L usa la foto guardada, no los Ajustes de hoy");
-  assert.ok(rep.includes("snap.tiieIssue ??"), "la TIIE de emisión sale de la foto; la tabla es solo respaldo");
+  assert.ok(rep.includes("snap.tiieIssue != null"), "la TIIE de emisión sale de la foto; si no hay foto, de la tabla (con fecha), nunca de un número del código");
 });
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ import { rememberTrade } from "@/lib/erp/links";
 import { seedAcl, type AppRole } from "@/lib/erp/acl";
 import { activeMember, assertCan, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
 import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
-import { addDays, nearestRate } from "@/lib/erp/credit";
+import { addDays, nearestRate, requireRate } from "@/lib/erp/credit";
 import { ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
@@ -121,9 +121,9 @@ export async function seedCompany(sql: Sql, companyId: number) {
   await sql`alter table invoices add column if not exists policy_code text not null default 'NONE'`;
   for (const p of CREDIT_POLICY_CATALOG) {
     await sql`
-      insert into credit_policies (company_id, code, name, spread, fega_rate)
-      values (${companyId}, ${p.code}, ${p.name}, ${p.spread}, ${p.fega_rate})
-      on conflict (company_id, code) do update set name = excluded.name, spread = excluded.spread, fega_rate = excluded.fega_rate
+      insert into credit_policies (company_id, code, name)
+      values (${companyId}, ${p.code}, ${p.name})
+      on conflict (company_id, code) do update set name = excluded.name
     `;
   }
 
@@ -1200,11 +1200,16 @@ export const receivePurchase = createServerFn({ method: "POST" })
     if (!already[0]) {
       const total = await sql<{ total: string }>`select total::text from purchase_orders where id = ${po[0].id}`;
       const partner = await sql<{ partner_id: number }>`select partner_id from purchase_orders where id = ${po[0].id}`;
-      const days = await sql<{ payment_days: number }>`
+      // El plazo del proveedor es el que se capturó en su ficha (0 = contado);
+      // no hay plazo de respaldo en el código.
+      const days = await sql<{ payment_days: number | null }>`
         select payment_days from partners where id = ${partner[0]!.partner_id}
       `;
+      if (!days[0] || days[0].payment_days == null) {
+        throw new Error("El proveedor no tiene plazo de pago capturado. Captúralo en su ficha (0 = contado) antes de recibir.");
+      }
       const today = todayMx();
-      const due = addDays(today, days[0]?.payment_days ?? 30);
+      const due = addDays(today, days[0].payment_days);
       const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'supplier'`;
       const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
       await sql`
@@ -1435,18 +1440,21 @@ export const deliverSale = createServerFn({ method: "POST" })
     const tiieRows = await sql<{ date: string; rate: string }>`
       select date::text, rate::text from tiie_rates where company_id = ${m.company_id} order by date
     `;
-    const tiieIssue = nearestRate(
-      tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
-      today,
-      pol.defaultTiie,
-    );
+    // A crédito, sin renglón de TIIE vigente a la fecha de emisión no se
+    // factura: la entrega completa se revierte con el aviso. De contado no
+    // hay financiamiento que calcular: se guarda el renglón si existe y, si
+    // no, la foto queda sin TIIE (el reporte lo marca, no lo estima).
+    const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+    const financedDays = so[0].credit_days ?? 0;
+    const tiiePick = financedDays > 0 ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`) : nearestRate(tiieTable, today);
     const snap = JSON.stringify({
-      tiieIssue,
+      tiieIssue: tiiePick?.rate ?? null,
+      tiieDate: tiiePick?.date ?? null,
       costSpread: pol.asrSpread,
       commissionRate: pol.asrCommission,
       // Los días financiados de ESTE pedido: los mismos que fueron cobrados
       // al cliente dentro del precio (0 = contado, sin circuito).
-      financialDays: so[0].credit_days ?? 0,
+      financialDays: financedDays,
       collectionSpread: pol.collectionSpread,
       fegaRate: pol.fegaRate,
       earlyPayDays: pol.earlyPayDays,

@@ -106,6 +106,12 @@ function Page() {
             <Kpi label="Utilidad en caja" value={money(pano.totales.caja)} hint="Solo facturas liquidadas" />
             <Kpi label="Utilidad proporcional" value={money(pano.totales.proporcional)} hint="Según % pagado" />
           </div>
+          {pano.excluidas.n > 0 && (
+            <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+              {pano.excluidas.n} partida(s) fuera del cálculo de utilidad (venta {money(pano.excluidas.venta)}):{" "}
+              {pano.excluidas.motivos.map((m) => `${m.motivo} (${m.pedidos} pedido${m.pedidos === 1 ? "" : "s"})`).join("; ")}. No se les inventa costo ni tasa: captura el dato y vuelven a entrar.
+            </p>
+          )}
           <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <Kpi label="Capital facturado" value={money(pano.cobranza.capitalFacturado)} hint={`Pagado ${money(pano.cobranza.capitalPagado)}`} />
             <Kpi label="Capital pendiente" value={money(pano.cobranza.capitalPendiente)} />
@@ -131,6 +137,7 @@ function Page() {
                     <th className="px-3 py-3 text-right font-medium">Capa 2</th>
                     <th className="px-3 py-3 text-right font-medium">Descuento</th>
                     <th className="px-4 py-3 text-right font-medium">Utilidad</th>
+                    <th className="px-3 py-3 text-right font-medium">Excluidas</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -152,6 +159,9 @@ function Page() {
                         {money(r.utilidad)}
                         <span className="ml-1 text-[11px] text-muted">{r.venta > 0 ? ((r.utilidad / r.venta) * 100).toFixed(1) : "0.0"}%</span>
                       </td>
+                      <td className="px-3 py-3 text-right tabular-nums text-warn">
+                        {r.excluidas > 0 ? `${r.excluidas} (${money(r.ventaExcluida)})` : "—"}
+                      </td>
                     </tr>
                   ))}
                   <tr className="border-t border-line font-semibold">
@@ -165,6 +175,7 @@ function Page() {
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.capa2)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.descuento)}</td>
                     <td className="px-4 py-3 text-right tabular-nums">{money(pano.totales.utilidad)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums text-warn">{pano.totales.excluidas > 0 ? `${pano.totales.excluidas} (${money(pano.totales.ventaExcluida)})` : "—"}</td>
                   </tr>
                 </tbody>
               </table>
@@ -173,6 +184,12 @@ function Page() {
         </div>
       )}
 
+      {deals && deals.excluidas.n > 0 && (
+        <p className="mb-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+          {deals.excluidas.n} partida(s) fuera de la utilidad por pedido (venta {money(deals.excluidas.venta)}):{" "}
+          {deals.excluidas.motivos.map((m) => `${m.motivo} (${m.pedidos} pedido${m.pedidos === 1 ? "" : "s"})`).join("; ")}.
+        </p>
+      )}
       <div className="overflow-x-auto erp-card">
         <table className="w-full min-w-[820px] text-left text-[13px]">
           <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
@@ -213,6 +230,11 @@ function Page() {
                 <td className="px-4 py-3 text-right tabular-nums font-medium">
                   {money(d.netProfit)}
                   <span className="ml-1 text-[11px] text-muted">{d.netProfitPct.toFixed(1)}%</span>
+                  {d.excluidas > 0 ? (
+                    <span className="block text-[11px] font-normal text-warn">
+                      {d.excluidas} partida(s) excluida(s) ({money(d.ventaExcluida)}): {d.motivos.join("; ")}
+                    </span>
+                  ) : null}
                 </td>
               </tr>
             ))}

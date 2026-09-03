@@ -3,7 +3,7 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan, canSeeMargins } from "@/lib/erp/acl";
-import { todayMx } from "@/lib/utils";
+import { dateDMY, todayMx } from "@/lib/utils";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
@@ -61,7 +61,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   // Si la factura guardó su foto de parámetros al emitirse, la utilidad se
   // calcula con ESOS valores: cambiar Ajustes o la tabla TIIE después no
   // reescribe la historia de operaciones ya facturadas.
-  let snap: { tiieIssue?: number; costSpread?: number; commissionRate?: number; financialDays?: number; earlyPayDays?: number } = {};
+  let snap: { tiieIssue?: number; tiieDate?: string; costSpread?: number; commissionRate?: number; financialDays?: number; earlyPayDays?: number } = {};
   try {
     if (fv[0]?.params_snap) snap = JSON.parse(fv[0].params_snap) as typeof snap;
   } catch {
@@ -70,13 +70,13 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const tiieRows = await sql<{ date: string; rate: string }>`
     select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
   `;
-  const tiieIssue =
-    snap.tiieIssue ??
-    nearestRate(
-      tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
-      issueDate,
-      pol.defaultTiie,
-    );
+  // TIIE de emisión: la de la foto de la factura o, si no hay foto, el
+  // renglón de la tabla vigente a la emisión. Sin renglón NO se inventa: si
+  // el pedido la necesita (crédito, días excedidos o pronto pago) queda fuera
+  // del cálculo, marcado con el motivo.
+  const tiiePick = snap.tiieIssue != null
+    ? { rate: snap.tiieIssue, date: snap.tiieDate ?? issueDate }
+    : nearestRate(tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })), issueDate);
   const costSpread = snap.costSpread ?? pol.asrSpread;
   const commissionRate = snap.commissionRate ?? pol.asrCommission;
   // Los días financiados son los de ESTE pedido (los mismos que se cobraron
@@ -86,6 +86,12 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const daysExceeded = fv[0]
     ? Math.max(0, daysBetween(fv[0].credit_due || fv[0].due_date, exceededEnd))
     : 0;
+  const earlyPayDays = snap.earlyPayDays ?? pol.earlyPayDays;
+  const earlyPaid = Boolean(fv[0]?.paid_date) && daysBetween(fv[0]!.date, fv[0]!.paid_date!) < earlyPayDays;
+  const needsTiie = financialDays > 0 || daysExceeded > 0 || earlyPaid;
+  const sinTiie = needsTiie && tiiePick == null;
+  const tiieIssue = tiiePick?.rate ?? null;
+  const sinTiieMotivo = sinTiie ? `sin TIIE en la tabla para ${dateDMY(issueDate)} (emisión)` : null;
   await ensureRefCost(sql);
   const raw = await sql<{
     product_id: number;
@@ -126,20 +132,27 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     const quoteCost = l.quote_cost != null ? Number(l.quote_cost) : null;
     // El costo real manda: OC del proveedor, luego el de la cotización. Si no
     // hay ninguno, el del catálogo con el orden único (kardex → referencia).
+    // Un 0 en la cotización es "no se capturó", igual que en Cotizaciones.
     const catalogo = resolveCost({ avgCost: l.catalog_cost, refCost: l.ref_cost });
-    const costUnit = poCost ?? quoteCost ?? catalogo.cost;
-    const costSource = poCost != null ? "OC" : quoteCost != null ? "cotización" : catalogo.source === "referencia" ? "referencia" : "catálogo";
+    const quoteReal = quoteCost != null && quoteCost > 0 ? quoteCost : null;
+    const sinCosto = poCost == null && quoteReal == null && catalogo.source === "ninguno";
+    const costUnit = poCost ?? quoteReal ?? catalogo.cost;
+    const costSource = poCost != null ? "OC" : quoteReal != null ? "cotización" : sinCosto ? "sin costo" : catalogo.source === "referencia" ? "referencia" : "catálogo";
+    // Una partida sin costo NO entra a la utilidad (entraría como 100% de
+    // ganancia). Queda etiquetada y aparte, con su motivo.
+    const excludeReason = sinTiieMotivo ?? (sinCosto ? "sin costo (ni OC, ni cotización, ni kardex, ni referencia)" : null);
+    const excluded = excludeReason != null;
     const freightUnit = Number(l.quote_freight);
     const otherUnit = Number(l.quote_other);
     const sale = qty * saleUnit;
-    const cogs = qty * costUnit;
-    const freight = qty * freightUnit;
-    const other = qty * otherUnit;
+    const cogs = excluded ? 0 : qty * costUnit;
+    const freight = excluded ? 0 : qty * freightUnit;
+    const other = excluded ? 0 : qty * otherUnit;
     // Costo financiero del circuito hermana: comisión + Capa 1 con los días
     // de crédito del pedido (los mismos cobrados al cliente en el precio) +
     // Capa 2 (días excedidos, no previstos). Al contado no hay circuito.
     const fin =
-      financialDays > 0 || daysExceeded > 0
+      !excluded && tiieIssue != null && (financialDays > 0 || daysExceeded > 0)
         ? financeCost({
             supplierCost: financialDays > 0 ? cogs : 0,
             saleCapital: sale,
@@ -149,9 +162,9 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
             financialDays: Math.max(0, financialDays),
             daysExceeded,
           })
-        : { rate: tiieIssue + costSpread, commission: 0, layer1: 0, layer2: 0, total: 0 };
+        : { commission: 0, layer1: 0, layer2: 0, total: 0 };
     const finance = fin.total;
-    const margin = sale - cogs - freight - other;
+    const margin = excluded ? 0 : sale - cogs - freight - other;
     return {
       productId: l.product_id,
       code: l.code,
@@ -160,7 +173,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       uom: l.uom,
       saleUnit,
       sale,
-      costUnit,
+      costUnit: excluded ? 0 : costUnit,
       costSource,
       cogs,
       freightUnit,
@@ -171,9 +184,18 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       layer1: fin.layer1,
       layer2: fin.layer2,
       margin,
-      marginPct: sale > 0 ? (margin / sale) * 100 : 0,
+      marginPct: !excluded && sale > 0 ? (margin / sale) * 100 : 0,
+      excluded,
+      excludeReason,
     };
   });
+  const included = lines.filter((l) => !l.excluded);
+  const excludedLines = lines.filter((l) => l.excluded);
+  const excluded = {
+    n: excludedLines.length,
+    venta: excludedLines.reduce((s, l) => s + l.sale, 0),
+    motivos: [...new Set(excludedLines.map((l) => l.excludeReason!))],
+  };
   let expenses: Array<{ id: number; name: string; class: string; amount: number }> = [];
   try {
     const exp = await sql<{ id: number; name: string; class: string; amount: string }>`
@@ -198,23 +220,25 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     mora = 0;
     moraPendiente = 0;
   }
-  const revenue = lines.reduce((s, l) => s + l.sale, 0);
-  const cogs = lines.reduce((s, l) => s + l.cogs, 0);
-  const freightQuote = lines.reduce((s, l) => s + l.freight, 0);
-  const otherQuote = lines.reduce((s, l) => s + l.other, 0);
-  const commission = lines.reduce((s, l) => s + l.commission, 0);
-  const layer1 = lines.reduce((s, l) => s + l.layer1, 0);
-  const layer2 = lines.reduce((s, l) => s + l.layer2, 0);
+  // Solo las partidas con costo (y con TIIE cuando hace falta) entran al
+  // cálculo; las excluidas se reportan aparte.
+  const revenue = included.reduce((s, l) => s + l.sale, 0);
+  const cogs = included.reduce((s, l) => s + l.cogs, 0);
+  const freightQuote = included.reduce((s, l) => s + l.freight, 0);
+  const otherQuote = included.reduce((s, l) => s + l.other, 0);
+  const commission = included.reduce((s, l) => s + l.commission, 0);
+  const layer1 = included.reduce((s, l) => s + l.layer1, 0);
+  const layer2 = included.reduce((s, l) => s + l.layer2, 0);
   const finance = commission + layer1 + layer2;
   const freight = freightQuote + expPedido;
   // Descuento por pronto pago: si la factura se liquidó antes del umbral,
   // se bonifican los días hasta el plazo financiero a la tasa de costo.
-  const bono = fv[0]?.paid_date
+  const bono = fv[0]?.paid_date && tiieIssue != null && !sinTiie
     ? earlyPayBonus({
         cargo: Number(fv[0].amount),
         issueDate: fv[0].date,
         payDate: fv[0].paid_date,
-        thresholdDays: snap.earlyPayDays ?? pol.earlyPayDays,
+        thresholdDays: earlyPayDays,
         financialDays,
         tiieAtIssue: tiieIssue,
         costSpread,
@@ -245,11 +269,13 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     name: so[0].name,
     currency: so[0].currency,
     creditDays: so[0].credit_days,
-    financeRate: tiieIssue + costSpread,
+    financeRate: tiieIssue != null ? tiieIssue + costSpread : null,
     tiieIssue,
+    tiieDate: tiiePick?.date ?? null,
     financialDays,
     daysExceeded,
     lines,
+    excluded,
     expenses,
     revenue,
     cogs,
@@ -324,6 +350,9 @@ export const listDealPnl = createServerFn({ method: "POST" })
         marginPct: d.marginPct,
         netProfit: d.netProfit,
         netProfitPct: d.netProfitPct,
+        excluidas: d.excluded.n,
+        ventaExcluida: d.excluded.venta,
+        motivos: d.excluded.motivos,
       });
     }
     const totals = deals.reduce(
@@ -334,10 +363,15 @@ export const listDealPnl = createServerFn({ method: "POST" })
         finance: s.finance + d.finance,
         margin: s.margin + d.margin,
         netProfit: s.netProfit + d.netProfit,
+        excluidas: s.excluidas + d.excluidas,
+        ventaExcluida: s.ventaExcluida + d.ventaExcluida,
       }),
-      { revenue: 0, cogs: 0, freight: 0, finance: 0, margin: 0, netProfit: 0 },
+      { revenue: 0, cogs: 0, freight: 0, finance: 0, margin: 0, netProfit: 0, excluidas: 0, ventaExcluida: 0 },
     );
-    return { from, to, deals, totals };
+    // Cuántas partidas quedaron fuera y por qué (suma por motivo).
+    const motivos = new Map<string, number>();
+    for (const d of deals) for (const m of d.motivos) motivos.set(m, (motivos.get(m) ?? 0) + 1);
+    return { from, to, deals, totals, excluidas: { n: totals.excluidas, venta: totals.ventaExcluida, motivos: [...motivos.entries()].map(([motivo, pedidos]) => ({ motivo, pedidos })) } };
   });
 
 export const getCompanyPnl = createServerFn({ method: "POST" })
@@ -458,8 +492,11 @@ export const getPanorama = createServerFn({ method: "GET" })
       realizada: number;
       caja: number;
       proporcional: number;
+      excluidas: number;
+      ventaExcluida: number;
     };
     const byPartner = new Map<string, Row>();
+    const motivos = new Map<string, number>();
     for (const o of orders) {
       const d = await computeDealPnl(sql, companyId, o.id);
       const r = byPartner.get(o.partner) ?? {
@@ -467,7 +504,11 @@ export const getPanorama = createServerFn({ method: "GET" })
         group: o.group_name,
         venta: 0, mora: 0, fx: 0, costo: 0, comision: 0, capa1: 0, capa2: 0,
         descuento: 0, utilidad: 0, realizada: 0, caja: 0, proporcional: 0,
+        excluidas: 0, ventaExcluida: 0,
       };
+      r.excluidas += d.excluded.n;
+      r.ventaExcluida += d.excluded.venta;
+      for (const m of d.excluded.motivos) motivos.set(m, (motivos.get(m) ?? 0) + 1);
       r.venta += d.revenue;
       r.mora += d.mora;
       r.fx += d.fxIncome;
@@ -483,7 +524,7 @@ export const getPanorama = createServerFn({ method: "GET" })
       byPartner.set(o.partner, r);
     }
     const porRazon = [...byPartner.values()]
-      .filter((r) => r.venta !== 0 || r.mora !== 0)
+      .filter((r) => r.venta !== 0 || r.mora !== 0 || r.excluidas !== 0)
       .sort((a, b) => b.venta - a.venta);
     const sum = (f: (r: Row) => number) => porRazon.reduce((s, r) => s + f(r), 0);
     const totales = {
@@ -499,6 +540,13 @@ export const getPanorama = createServerFn({ method: "GET" })
       realizada: sum((r) => r.realizada),
       caja: sum((r) => r.caja),
       proporcional: sum((r) => r.proporcional),
+      excluidas: sum((r) => r.excluidas),
+      ventaExcluida: sum((r) => r.ventaExcluida),
+    };
+    const excluidas = {
+      n: totales.excluidas,
+      venta: totales.ventaExcluida,
+      motivos: [...motivos.entries()].map(([motivo, pedidos]) => ({ motivo, pedidos })),
     };
 
     // Cobranza (capital, mora y ajustes de TC) — sobre facturas reales.
@@ -528,6 +576,7 @@ export const getPanorama = createServerFn({ method: "GET" })
     return {
       porRazon,
       totales,
+      excluidas,
       cobranza: {
         capitalFacturado,
         capitalPagado: capitalFacturado - capitalPendiente,
@@ -574,12 +623,18 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
     type Bucket = { month: string; n: number; saldo: number; saldoMxnDocs: number; saldoUsdDocs: number; interesMensual: number };
     const buckets = new Map<string, Bucket>();
     const vencido: Bucket = { month: "vencido", n: 0, saldo: 0, saldoMxnDocs: 0, saldoUsdDocs: 0, interesMensual: 0 };
+    // Facturas cuyo plazo no tiene TIIE en la tabla: el saldo sí cuenta, el
+    // interés no se estima (se reporta cuántas quedaron sin estimar).
+    let sinTiie = 0;
     for (const inv of open) {
       const moraDue = inv.credit_due || inv.due_date;
       const saldo = Number(inv.residual);
-      const rate = nearestRate(tiieTable, moraDue, pol.defaultTiie) + pol.collectionSpread;
-      // El interés corre sobre el CARGO original una vez vencido el plazo.
-      const interesMensual = (Number(inv.amount) * rate * 30) / 360;
+      const pick = nearestRate(tiieTable, moraDue);
+      if (!pick) sinTiie += 1;
+      const rate = pick ? pick.rate + pol.collectionSpread : 0;
+      // El interés corre sobre el CARGO original una vez vencido el plazo; el
+      // "× 30 / 360" es la unidad del reporte (interés de un mes de 30 días).
+      const interesMensual = pick ? (Number(inv.amount) * rate * 30) / 360 : 0;
       const target = moraDue < today ? vencido : (() => {
         const key = moraDue.slice(0, 7);
         const b = buckets.get(key) ?? { month: key, n: 0, saldo: 0, saldoMxnDocs: 0, saldoUsdDocs: 0, interesMensual: 0 };
@@ -593,5 +648,5 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       target.interesMensual += interesMensual;
     }
     const meses = [...buckets.values()].sort((a, b) => a.month.localeCompare(b.month));
-    return { vencido, meses, spread: pol.collectionSpread };
+    return { vencido, meses, spread: pol.collectionSpread, sinTiie };
   });

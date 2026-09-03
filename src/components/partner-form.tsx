@@ -157,7 +157,7 @@ export function PartnerFields({
         <Field label="Ciudad">
           <input className="erp-input" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} />
         </Field>
-        <Field label="Mora anual %">
+        <Field label="Mora anual % (informativa)">
           <input
             className="erp-input"
             type="number"
@@ -165,6 +165,9 @@ export function PartnerFields({
             value={form.late_rate}
             onChange={(e) => setForm({ ...form, late_rate: Number(e.target.value) })}
           />
+          <p className="mt-1 text-[11px] font-normal normal-case tracking-normal text-muted">
+            Solo informativa. La mora real usa la TIIE del vencimiento (tabla) + spread de Ajustes.
+          </p>
         </Field>
       </div>
 

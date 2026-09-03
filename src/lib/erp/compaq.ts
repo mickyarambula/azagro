@@ -95,7 +95,9 @@ export async function syncCompaqCatalogs(sql: Sql, companyId: number, force = fa
         named.code = p.code;
       }
     }
-    const late = p.is_customer ? 16.06 : 0;
+    // La "mora anual" del socio es informativa; la real sale de la TIIE del
+    // vencimiento + spread de Ajustes. No se importa ningún número inventado.
+    const late = 0;
     await sql`
       insert into partners (
         company_id, code, name, legal_name, rfc, is_customer, is_supplier,

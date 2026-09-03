@@ -1,25 +1,15 @@
-import { COMMISSION_RATE, FEGA_BUNDLE_RATE, YEAR_DAYS } from "@/lib/erp/rules";
+import { YEAR_DAYS } from "@/lib/erp/rules";
 import { dateDMY, moneyIn, todayMx } from "@/lib/utils";
 
-/** Motor de crédito Azagro — mismas reglas que los Excel de cartera (Grupo SL, no el export crudo de Compaq). */
-
-export type CreditPolicy = {
-  creditDays: number;
-  invoiceDays: number;
-  fegaRate: number;
-  commissionRate: number;
-  collectionSpread: number;
-  defaultTiie: number;
-};
-
-export const DEFAULT_POLICY: CreditPolicy = {
-  creditDays: 150,
-  invoiceDays: 120,
-  fegaRate: FEGA_BUNDLE_RATE,
-  commissionRate: COMMISSION_RATE,
-  collectionSpread: 0.09,
-  defaultTiie: 0.0706,
-};
+/**
+ * Motor de crédito Azagro — mismas reglas que los Excel de cartera (Grupo SL,
+ * no el export crudo de Compaq).
+ *
+ * Aquí no vive ningún número de negocio: tasas, plazos y umbrales llegan
+ * siempre de Ajustes (company_settings) o de sus tablas (tiie_rates,
+ * fx_rates). Si un dato no está, el llamador se detiene y avisa; este archivo
+ * nunca inventa un respaldo.
+ */
 
 export function daysBetween(from: string, to: string) {
   const a = Date.parse(from.slice(0, 10) + "T00:00:00");
@@ -33,15 +23,41 @@ export function addDays(iso: string, days: number) {
   return new Date(Date.UTC(y!, m! - 1, d! + days)).toISOString().slice(0, 10);
 }
 
-export function nearestRate(table: Array<{ date: string; rate: number }>, asOf: string, fallback: number) {
+/** Renglón de la tabla TIIE: tasa y la fecha del renglón que se usó. */
+export type RatePick = { rate: number; date: string };
+
+/**
+ * TIIE vigente en una fecha: el renglón de la tabla más reciente con fecha
+ * igual o anterior a `asOf`. Devuelve también la fecha del renglón para que
+ * la pantalla diga cuál usó. Sin renglón que aplique → null; nunca un número
+ * de respaldo. El llamador decide cómo detenerse (requireRate) o cómo avisar.
+ */
+export function nearestRate(table: Array<{ date: string; rate: number }>, asOf: string): RatePick | null {
   const t = asOf.slice(0, 10);
   const sorted = [...table].sort((a, b) => a.date.localeCompare(b.date));
-  let pick = fallback;
+  let pick: RatePick | null = null;
   for (const row of sorted) {
-    if (row.date <= t) pick = row.rate;
+    if (row.date <= t) pick = { rate: row.rate, date: row.date };
     else break;
   }
   return pick;
+}
+
+/** Mensaje único de "no hay TIIE": el mismo en servidor y en pantalla. */
+export function missingRateMessage(asOf: string, what: string) {
+  return `No hay TIIE en la tabla con fecha igual o anterior al ${dateDMY(asOf)} (${what}). Captúrala en Ajustes → Tabla TIIE antes de continuar.`;
+}
+
+/** Igual que nearestRate, pero se detiene con mensaje claro si la tabla no cubre la fecha. */
+export function requireRate(table: Array<{ date: string; rate: number }>, asOf: string, what: string): RatePick {
+  const pick = nearestRate(table, asOf);
+  if (!pick) throw new Error(missingRateMessage(asOf, what));
+  return pick;
+}
+
+/** "TIIE 6.9% (tabla, 01/05/26)": la tasa y de qué renglón salió. */
+export function rateLabel(pick: RatePick) {
+  return `TIIE ${pctRate(pick.rate)} (tabla, ${dateDMY(pick.date)})`;
 }
 
 /** Serie + folio al estilo Compaq (A / 292). FV-0001 → serie FV, folio 0001. */
@@ -51,15 +67,20 @@ export function splitDocName(name: string) {
   return { serie: "", folio: String(name || "").trim() };
 }
 
-export function splitFegaBundle(fegaRate: number, commissionRate = COMMISSION_RATE) {
+/**
+ * La columna «Comisión + FEGA» del Excel es un solo porcentaje (fegaRate,
+ * Ajustes) que se muestra partido en comisión + FEGA. La comisión que va
+ * dentro también viene de Ajustes (fega_commission); aquí solo se reparte.
+ */
+export function splitFegaBundle(fegaRate: number, commissionRate: number) {
   const commission = Math.min(Math.max(0, commissionRate), Math.max(0, fegaRate));
   return { commission, fega: Math.max(0, fegaRate - commission), bundle: fegaRate };
 }
 
 /**
  * Mora a facturar (FI):
- *   Interés = Capital × (TIIE vencimiento + spread) × días vencidos / 360   (nunca negativo)
- *   FEGA    = Capital × 3.04%  (una sola vez, si ya venció y no se ha facturado)
+ *   Interés = Capital × (TIIE vencimiento + spread de cobro) × días vencidos / 360   (nunca negativo)
+ *   FEGA    = Capital × tasa «comisión + FEGA» de Ajustes  (una sola vez, si ya venció y no se ha facturado)
  * Mora corre aunque el capital ya se haya pagado, sobre los días que estuvo vencido
  * hasta la fecha de pago (o el corte si sigue pendiente).
  */
@@ -100,12 +121,13 @@ export function computeMora(input: {
  * Fórmulas (igual que GRUPO SL / SL AGRICOLA):
  *   Días vence     = vencimiento → corte (con signo)
  *   Días vencidos  = vencimiento → fecha de pago, o corte si sigue abierta (con signo)
- *   Interés        = Cargo × (TIIE al vencimiento + 9%) × días vencidos / 360   (con signo: negativo = pronto pago)
- *   Comisión+FEGA  = Cargo × 3.04%  (1% + 2.04%), siempre, sobre el cargo
+ *   Interés        = Cargo × (TIIE al vencimiento + spread de cobro) × días vencidos / 360   (con signo: negativo = pronto pago)
+ *   Comisión+FEGA  = Cargo × tasa «comisión + FEGA» (Ajustes), siempre, sobre el cargo
  *   Total int+FEGA = interés + comisión+FEGA
  *
  * El capital del Excel es el CARGO (importe original), no el saldo.
- * La tasa anual del encabezado es TIIE + spread (en el Excel a veces la congelaban a 18%).
+ * La tasa anual del encabezado es TIIE + spread (en el Excel a veces la congelaban).
+ * Todas las tasas llegan de Ajustes; aquí no hay respaldos.
  */
 export function computeStatementLine(input: {
   cargo: number;
@@ -115,7 +137,7 @@ export function computeStatementLine(input: {
   tiieAtDue: number;
   spread: number;
   fegaRate: number;
-  commissionRate?: number;
+  commissionRate: number;
 }) {
   const paid = input.paidDate ? input.paidDate.slice(0, 10) : "";
   const fechaPago = paid && paid <= input.asOf ? paid : input.asOf;
@@ -147,16 +169,22 @@ export function pctRate(n: number) {
   return `${t}%`;
 }
 
-/** Texto del cálculo, el que va en el estado de cuenta y en cartera. */
+/**
+ * Texto del cálculo, el que va en el estado de cuenta y en cartera. Las tasas
+ * (spread de cobro, comisión + FEGA y la comisión que va dentro) se reciben
+ * de Ajustes; el texto nunca afirma un porcentaje que no venga de ahí.
+ * tiieDate = fecha del renglón de la tabla que se usó, para mostrarla.
+ */
 export function explainInterest(i: {
   capital: number;
   days: number;
   tiie: number;
+  tiieDate?: string;
   spread: number;
   interest: number;
   fega?: number;
-  fegaRate?: number;
-  commissionRate?: number;
+  fegaRate: number;
+  commissionRate: number;
   currency?: string;
   dueDate?: string;
   residual?: number;
@@ -166,7 +194,8 @@ export function explainInterest(i: {
   const int = moneyIn(i.interest, cur);
   const annual = i.tiie + i.spread;
   const dueBit = i.dueDate ? ` al ${dateDMY(i.dueDate)}` : " en la fecha de vencimiento";
-  const split = splitFegaBundle(i.fegaRate ?? FEGA_BUNDLE_RATE, i.commissionRate);
+  const tiieBit = i.tiieDate ? ` (renglón de la tabla del ${dateDMY(i.tiieDate)})` : "";
+  const split = splitFegaBundle(i.fegaRate, i.commissionRate);
   const base =
     i.residual != null && i.residual > 0.009
       ? "saldo pendiente"
@@ -178,7 +207,7 @@ export function explainInterest(i: {
   const lines = [
     "Misma fórmula que el Excel de cartera (no el export crudo de Compaq).",
     "Interés = Cargo × Tasa anual × Días vencidos / 360.",
-    `Tasa anual = TIIE${dueBit} + 9% (spread de cobro) = ${pctRate(annual)}.`,
+    `Tasa anual = TIIE${dueBit} ${pctRate(i.tiie)}${tiieBit} + ${pctRate(i.spread)} (spread de cobro, Ajustes) = ${pctRate(annual)}.`,
     `Cargo (${base}): ${cap}. Días vencidos: ${i.days} (con signo; el factor es /360).`,
     math,
   ];

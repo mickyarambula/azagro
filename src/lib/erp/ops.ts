@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
-import { addDays, computeMora, computeStatementLine, DEFAULT_POLICY, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, moraBilling, nearestRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
+import { addDays, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingRateMessage, moraBilling, nearestRate, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
@@ -40,27 +40,73 @@ async function ensureTwoPrices(sql: Sql) {
   await sql`alter table sales_orders add column if not exists accepted_offer text`;
 }
 
-export async function policy(sql: Sql, companyId: number) {
+/**
+ * Parámetros de negocio de Ajustes (company_settings). Cada uno se lee tal
+ * cual de la base: si falta (renglón inexistente o columna en nulo) NO se
+ * rellena con nada — `missing` lo dice y policy() se detiene.
+ */
+export const POLICY_FIELDS = [
+  ["creditDays", "plazo financiero (días)"],
+  ["invoiceDays", "plazo de factura (días)"],
+  ["fegaRate", "comisión + FEGA"],
+  ["fegaCommission", "comisión dentro de «comisión + FEGA»"],
+  ["collectionSpread", "spread de cobro (mora)"],
+  ["asrCommission", "comisión ASR"],
+  ["asrSpread", "spread ASR"],
+  ["earlyPayDays", "umbral de pronto pago (días)"],
+] as const;
+export type PolicyField = (typeof POLICY_FIELDS)[number][0];
+
+export type PolicyNumbers = Record<PolicyField, number>;
+
+export type PolicyRead = {
+  values: Record<PolicyField, number | null>;
+  missing: string[];
+  legalName: string;
+  rfc: string;
+  emailFrom: string;
+  phone: string;
+  alertDaysCxc: number;
+  alertDaysCxp: number;
+  alertEmail: string;
+  alertEmailOn: boolean;
+  mailReady: boolean;
+};
+
+export type Policy = PolicyNumbers & Omit<PolicyRead, "values" | "missing"> & {
+  /** Comisión del estado de cuenta (la que va dentro de «comisión + FEGA»). */
+  commissionRate: number;
+};
+
+async function ensureSettingsColumns(sql: Sql) {
+  // Alertas y correo no son números de negocio: sí tienen omisión.
   await sql`alter table company_settings add column if not exists alert_days_cxc integer not null default 7`;
   await sql`alter table company_settings add column if not exists alert_days_cxp integer not null default 7`;
   await sql`alter table company_settings add column if not exists alert_email text not null default ''`;
   await sql`alter table company_settings add column if not exists alert_email_on boolean not null default true`;
   await sql`alter table company_settings add column if not exists resend_key text not null default ''`;
-  await sql`alter table company_settings add column if not exists early_pay_days integer not null default 120`;
+  // Parámetros de negocio: sin default, sin NOT NULL (migración 0019). Vacío = sin capturar.
+  await sql`alter table company_settings add column if not exists early_pay_days integer`;
+  await sql`alter table company_settings add column if not exists fega_commission numeric(8,4)`;
   // El "spread de línea" ya no existe: el financiamiento del precio usa
   // comisión ASR + spread ASR. Se quita la columna para que no quede un
   // porcentaje viejo dormido en la base.
   await sql`alter table company_settings drop column if exists finance_spread`;
+}
+
+/** Lectura tolerante: devuelve lo que hay y la lista de lo que falta. Solo para la pantalla de Ajustes. */
+export async function readPolicy(sql: Sql, companyId: number): Promise<PolicyRead> {
+  await ensureSettingsColumns(sql);
   const rows = await sql<{
-    credit_days: number;
-    invoice_days: number;
-    fega_rate: string;
-    collection_spread: string;
-    default_tiie: string;
+    credit_days: number | null;
+    invoice_days: number | null;
+    fega_rate: string | null;
+    fega_commission: string | null;
+    collection_spread: string | null;
     legal_name: string;
     rfc: string;
-    asr_commission: string;
-    asr_spread: string;
+    asr_commission: string | null;
+    asr_spread: string | null;
     email_from: string;
     phone: string;
     alert_days_cxc: number;
@@ -68,68 +114,98 @@ export async function policy(sql: Sql, companyId: number) {
     alert_email: string;
     alert_email_on: boolean;
     resend_key: string;
-    early_pay_days: number;
+    early_pay_days: number | null;
   }>`
-    select credit_days, invoice_days, fega_rate::text, collection_spread::text, default_tiie::text,
+    select credit_days, invoice_days, fega_rate::text, fega_commission::text, collection_spread::text,
       legal_name, rfc, asr_commission::text, asr_spread::text, email_from, phone,
       coalesce(alert_days_cxc,7)::int as alert_days_cxc, coalesce(alert_days_cxp,7)::int as alert_days_cxp,
       coalesce(alert_email,'') as alert_email, coalesce(alert_email_on,true) as alert_email_on,
       coalesce(resend_key,'') as resend_key,
-      coalesce(early_pay_days,120)::int as early_pay_days
+      early_pay_days
     from company_settings where company_id = ${companyId}
   `;
   const r = rows[0];
-  if (!r) {
-    return {
-      ...DEFAULT_POLICY,
-      legalName: "AZ INSUMOS AGRICOLAS SA DE CV",
-      rfc: "",
-      asrCommission: 0.01,
-      asrSpread: 0.04,
-      emailFrom: "",
-      phone: "",
-      alertDaysCxc: 7,
-      alertDaysCxp: 7,
-      alertEmail: "",
-      alertEmailOn: true,
-      mailReady: false,
-      earlyPayDays: 120,
-    };
-  }
+  const num = (v: string | number | null | undefined) => (v == null || v === "" ? null : Number(v));
+  const values: Record<PolicyField, number | null> = {
+    creditDays: num(r?.credit_days),
+    invoiceDays: num(r?.invoice_days),
+    fegaRate: num(r?.fega_rate),
+    fegaCommission: num(r?.fega_commission),
+    collectionSpread: num(r?.collection_spread),
+    asrCommission: num(r?.asr_commission),
+    asrSpread: num(r?.asr_spread),
+    earlyPayDays: num(r?.early_pay_days),
+  };
+  const missing = POLICY_FIELDS.filter(([k]) => values[k] == null).map(([, label]) => label);
   return {
-    creditDays: r.credit_days,
-    invoiceDays: r.invoice_days,
-    fegaRate: Number(r.fega_rate),
-    commissionRate: DEFAULT_POLICY.commissionRate,
-    collectionSpread: Number(r.collection_spread),
-    defaultTiie: Number(r.default_tiie),
-    legalName: r.legal_name,
-    rfc: r.rfc,
-    asrCommission: Number(r.asr_commission),
-    asrSpread: Number(r.asr_spread),
-    emailFrom: r.email_from,
-    phone: r.phone,
-    alertDaysCxc: r.alert_days_cxc,
-    alertDaysCxp: r.alert_days_cxp,
-    alertEmail: r.alert_email,
-    alertEmailOn: r.alert_email_on,
-    mailReady: Boolean(process.env.RESEND_API_KEY) || (r.resend_key || "").length > 8,
-    earlyPayDays: r.early_pay_days,
+    values,
+    missing,
+    legalName: r?.legal_name ?? "",
+    rfc: r?.rfc ?? "",
+    emailFrom: r?.email_from ?? "",
+    phone: r?.phone ?? "",
+    alertDaysCxc: r?.alert_days_cxc ?? 7,
+    alertDaysCxp: r?.alert_days_cxp ?? 7,
+    alertEmail: r?.alert_email ?? "",
+    alertEmailOn: r?.alert_email_on ?? true,
+    mailReady: Boolean(process.env.RESEND_API_KEY) || (r?.resend_key || "").length > 8,
   };
 }
 
+export function missingPolicyMessage(missing: string[]) {
+  return `Ajustes incompletos: falta ${missing.join(", ")}. Captúralo en Ajustes → Política de crédito antes de operar.`;
+}
+
+/**
+ * Parámetros de negocio para operar. Si falta cualquiera, se detiene con
+ * mensaje visible: la base está incompleta y no se opera con números del
+ * código. (Regla del dueño: nunca inventar un número.)
+ */
+export async function policy(sql: Sql, companyId: number): Promise<Policy> {
+  const p = await readPolicy(sql, companyId);
+  if (p.missing.length) throw new Error(missingPolicyMessage(p.missing));
+  const v = p.values as PolicyNumbers;
+  const { values: _values, missing: _missing, ...rest } = p;
+  return { ...rest, ...v, commissionRate: v.fegaCommission };
+}
+
+/** Tabla TIIE completa, como números (para nearestRate / requireRate). */
+async function tiieTableOf(sql: Sql, cid: number) {
+  const rows = await sql<{ date: string; rate: string }>`
+    select date::text, rate::text from tiie_rates where company_id = ${cid} order by date
+  `;
+  return rows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+}
+
+async function rateTables(sql: Sql, cid: number) {
+  const tiie = await sql<{ date: string; rate: string }>`
+    select date::text, rate::text from tiie_rates where company_id = ${cid} order by date desc limit 24
+  `;
+  const fx = await sql<{ date: string; usd_mxn: string }>`
+    select date::text, usd_mxn::text from fx_rates where company_id = ${cid} order by date desc limit 24
+  `;
+  return { tiie, fx };
+}
+
+/** Ajustes completos para operar (cotizar, cobrar, estado de cuenta). Se detiene si falta algo. */
 export const getSettings = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     const p = await policy(sql, cid);
-    const tiie = await sql<{ date: string; rate: string }>`
-      select date::text, rate::text from tiie_rates where company_id = ${cid} order by date desc limit 24
-    `;
-    const fx = await sql<{ date: string; usd_mxn: string }>`
-      select date::text, usd_mxn::text from fx_rates where company_id = ${cid} order by date desc limit 24
-    `;
+    const { tiie, fx } = await rateTables(sql, cid);
+    return { ...p, tiie, fx };
+  });
+
+/** Solo para la pantalla de Ajustes: lo que hay (nulo = sin capturar) y lo que falta. */
+export const getSettingsForm = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const sql = await getSql();
+    const cid = await companyOf(sql, context.userId);
+    const p = await readPolicy(sql, cid);
+    const { tiie, fx } = await rateTables(sql, cid);
     return { ...p, tiie, fx };
   });
 
@@ -139,13 +215,15 @@ export const saveSettings = createServerFn({ method: "POST" })
     z.object({
       legalName: z.string(),
       rfc: z.string(),
+      // Todos los números de negocio son obligatorios: aquí es donde se
+      // capturan; no hay respaldo en el código si faltan.
       creditDays: z.number().int().positive(),
       invoiceDays: z.number().int().positive(),
-      fegaRate: z.number(),
-      collectionSpread: z.number(),
-      defaultTiie: z.number(),
-      asrCommission: z.number(),
-      asrSpread: z.number(),
+      fegaRate: z.number().nonnegative(),
+      fegaCommission: z.number().nonnegative(),
+      collectionSpread: z.number().nonnegative(),
+      asrCommission: z.number().nonnegative(),
+      asrSpread: z.number().nonnegative(),
       emailFrom: z.string(),
       phone: z.string(),
       alertDaysCxc: z.number().int().min(0).max(120).optional(),
@@ -153,7 +231,7 @@ export const saveSettings = createServerFn({ method: "POST" })
       alertEmail: z.string().optional(),
       alertEmailOn: z.boolean().optional(),
       resendKey: z.string().optional(),
-      earlyPayDays: z.number().int().min(0).max(365).optional(),
+      earlyPayDays: z.number().int().min(0).max(365),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -161,24 +239,22 @@ export const saveSettings = createServerFn({ method: "POST" })
     const cid = await companyOf(sql, context.userId);
     // Los parámetros de cartera mueven intereses y utilidad: solo administrador.
     await assertAdmin(sql, context.userId);
-    await sql`alter table company_settings add column if not exists alert_days_cxc integer not null default 7`;
-    await sql`alter table company_settings add column if not exists alert_days_cxp integer not null default 7`;
-    await sql`alter table company_settings add column if not exists alert_email text not null default ''`;
-    await sql`alter table company_settings add column if not exists alert_email_on boolean not null default true`;
-    await sql`alter table company_settings add column if not exists resend_key text not null default ''`;
-    await sql`alter table company_settings add column if not exists early_pay_days integer not null default 120`;
-    const before = await policy(sql, cid);
+    if (data.fegaCommission > data.fegaRate + 1e-9) {
+      throw new Error("La comisión dentro de «comisión + FEGA» no puede ser mayor que el total comisión + FEGA.");
+    }
+    // Lectura tolerante: se puede estar capturando por primera vez.
+    const before = await readPolicy(sql, cid);
     await sql`
       insert into company_settings (
-        company_id, legal_name, rfc, credit_days, invoice_days, fega_rate,
-        collection_spread, default_tiie, asr_commission, asr_spread, email_from, phone,
+        company_id, legal_name, rfc, credit_days, invoice_days, fega_rate, fega_commission,
+        collection_spread, asr_commission, asr_spread, email_from, phone,
         alert_days_cxc, alert_days_cxp, alert_email, alert_email_on, early_pay_days
       )
       values (
-        ${cid}, ${data.legalName}, ${data.rfc}, ${data.creditDays}, ${data.invoiceDays}, ${data.fegaRate},
-        ${data.collectionSpread}, ${data.defaultTiie}, ${data.asrCommission}, ${data.asrSpread},
+        ${cid}, ${data.legalName}, ${data.rfc}, ${data.creditDays}, ${data.invoiceDays}, ${data.fegaRate}, ${data.fegaCommission},
+        ${data.collectionSpread}, ${data.asrCommission}, ${data.asrSpread},
         ${data.emailFrom}, ${data.phone}, ${data.alertDaysCxc ?? 7}, ${data.alertDaysCxp ?? 7},
-        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays ?? 120}
+        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays}
       )
       on conflict (company_id) do update set
         legal_name = excluded.legal_name,
@@ -186,8 +262,8 @@ export const saveSettings = createServerFn({ method: "POST" })
         credit_days = excluded.credit_days,
         invoice_days = excluded.invoice_days,
         fega_rate = excluded.fega_rate,
+        fega_commission = excluded.fega_commission,
         collection_spread = excluded.collection_spread,
-        default_tiie = excluded.default_tiie,
         asr_commission = excluded.asr_commission,
         asr_spread = excluded.asr_spread,
         email_from = excluded.email_from,
@@ -202,18 +278,19 @@ export const saveSettings = createServerFn({ method: "POST" })
     if (key.length > 8) {
       await sql`update company_settings set resend_key = ${key} where company_id = ${cid}`;
     }
-    // Bitácora de los parámetros financieros: valor anterior → nuevo.
-    const watch: Array<[string, number, number]> = [
-      ["spread cobro", before.collectionSpread, data.collectionSpread],
-      ["spread ASR", before.asrSpread, data.asrSpread],
-      ["comisión ASR", before.asrCommission, data.asrCommission],
-      ["FEGA", before.fegaRate, data.fegaRate],
-      ["plazo factura", before.invoiceDays, data.invoiceDays],
-      ["plazo financiero", before.creditDays, data.creditDays],
-      ["umbral pronto pago", before.earlyPayDays, data.earlyPayDays ?? 120],
-      ["TIIE por omisión", before.defaultTiie, data.defaultTiie],
+    // Bitácora de los parámetros financieros: valor anterior → nuevo ("sin capturar" si no había).
+    const b = before.values;
+    const watch: Array<[string, number | null, number]> = [
+      ["spread cobro", b.collectionSpread, data.collectionSpread],
+      ["spread ASR", b.asrSpread, data.asrSpread],
+      ["comisión ASR", b.asrCommission, data.asrCommission],
+      ["comisión + FEGA", b.fegaRate, data.fegaRate],
+      ["comisión dentro de FEGA", b.fegaCommission, data.fegaCommission],
+      ["plazo factura", b.invoiceDays, data.invoiceDays],
+      ["plazo financiero", b.creditDays, data.creditDays],
+      ["umbral pronto pago", b.earlyPayDays, data.earlyPayDays],
     ];
-    const changes = watch.filter(([, a, b]) => a !== b).map(([n, a, b]) => `${n} ${a} → ${b}`);
+    const changes = watch.filter(([, a, c]) => a !== c).map(([n, a, c]) => `${n} ${a ?? "sin capturar"} → ${c}`);
     if (changes.length) {
       await writeAudit(sql, {
         companyId: cid,
@@ -452,10 +529,14 @@ export const listQuotes = createServerFn({ method: "GET" })
     // rol es lo que se muestra (costo y flete), no el cálculo. Por eso la
     // pantalla recibe la base del financiamiento y nunca el costo.
     const pol = await policy(sql, cid);
+    // La TIIE sale de la tabla: el renglón vigente a hoy, con su fecha, para
+    // que la pantalla diga cuál usó. Sin renglón no hay financiamiento y la
+    // pantalla no deja cotizar a crédito.
+    const tiieToday = nearestRate(await tiieTableOf(sql, cid), todayMx());
     const baseOf = (row: { cost: string; ref_cost: string }) => {
       const { cost, source } = resolveCost({ avgCost: row.cost, refCost: row.ref_cost });
       return {
-        fin: financeBase({ cost, tiie: pol.defaultTiie, costSpread: pol.asrSpread, commissionRate: pol.asrCommission }),
+        fin: tiieToday ? financeBase({ cost, tiie: tiieToday.rate, costSpread: pol.asrSpread, commissionRate: pol.asrCommission }) : null,
         // La pantalla necesita saber si hay costo para avisar antes de guardar.
         cost_source: source,
       };
@@ -491,9 +572,10 @@ export const listQuotes = createServerFn({ method: "GET" })
         lines: pricedLines.map((l) => ({ ...l, cost: "0", ref_cost: "0", freight: "0" })),
         customers,
         products: pricedProducts.map((p) => ({ ...p, cost: "0", ref_cost: "0" })),
+        tiieToday,
       };
     }
-    return { quotes, lines: pricedLines, customers, products: pricedProducts };
+    return { quotes, lines: pricedLines, customers, products: pricedProducts, tiieToday };
   });
 
 export const createQuote = createServerFn({ method: "POST" })
@@ -502,13 +584,17 @@ export const createQuote = createServerFn({ method: "POST" })
     z.object({
       partnerId: z.number(),
       currency: z.enum(["MXN", "USD"]),
-      fxRate: z.number().positive(),
+      // 0 = "no hay": en USD se rechaza abajo con mensaje claro (nunca se
+      // inventa un tipo de cambio).
+      fxRate: z.number().nonnegative(),
       validUntil: z.string(),
       notes: z.string().optional().default(""),
       deliveryTo: z.string().optional().default(""),
-      tiie: z.number().optional().default(0),
-      spread: z.number().optional().default(0),
-      creditDays: z.number().optional().default(0),
+      // TIIE y spread vienen de la tabla y de Ajustes (la pantalla los
+      // muestra); a crédito son obligatorios y se verifica abajo.
+      tiie: z.number().nonnegative(),
+      spread: z.number().nonnegative(),
+      creditDays: z.number().int().nonnegative(),
       priceOffer: z.enum(["cash", "credit", "both"]).optional().default("both"),
       send: z.boolean().optional().default(true),
       lines: z
@@ -537,9 +623,26 @@ export const createQuote = createServerFn({ method: "POST" })
     if (data.validUntil < today) {
       throw new Error(`La vigencia ya venció (${data.validUntil}). Elige hoy o una fecha posterior.`);
     }
+    // Un documento en dólares necesita un tipo de cambio real (de la tabla o
+    // capturado); sin él no se guarda.
+    if (data.currency === "USD" && !(data.fxRate > 0)) {
+      throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de cotizar en dólares.");
+    }
     // A crédito el precio lleva financiamiento; sin costo saldría en cero.
     // De contado (oferta solo contado o plazo 0) no hay nada que financiar.
-    const plazo = (data.priceOffer ?? "both") === "cash" ? 0 : (data.creditDays ?? 0);
+    const plazo = (data.priceOffer ?? "both") === "cash" ? 0 : data.creditDays;
+    // La TIIE la decide la tabla, no la pantalla: se toma el renglón vigente
+    // hoy y se exige que sea el mismo con el que la pantalla calculó los
+    // precios (si alguien capturó otro renglón entre abrir y guardar, se
+    // vuelve a cargar en lugar de guardar precios con una TIIE distinta).
+    let tiie = 0;
+    if (plazo > 0) {
+      const pick = requireRate(await tiieTableOf(sql, cid), today, "cotización a crédito");
+      if (Math.abs(pick.rate - data.tiie) > 0.000001) {
+        throw new Error(`La TIIE de la tabla cambió desde que abriste la pantalla (ahora ${rateLabel(pick)}). Vuelve a cargar y cotiza de nuevo.`);
+      }
+      tiie = pick.rate;
+    }
     await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazo);
     await sql`alter table quotes add column if not exists owner_id text`;
     await sql`alter table quotes add column if not exists tiie numeric(8,6) not null default 0`;
@@ -567,7 +670,7 @@ export const createQuote = createServerFn({ method: "POST" })
     const q = await sql<{ id: number }>`
       insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer)
       values (${cid}, ${name}, ${data.partnerId}, ${today}, ${data.validUntil}, ${data.currency}, ${data.fxRate}, ${state},
-        ${data.notes ?? ""}, ${data.deliveryTo ?? ""}, ${total}, ${context.userId}, ${data.tiie ?? 0}, ${data.spread ?? 0}, ${data.creditDays ?? 0}, ${offer})
+        ${data.notes ?? ""}, ${data.deliveryTo ?? ""}, ${total}, ${context.userId}, ${tiie}, ${data.spread ?? 0}, ${data.creditDays ?? 0}, ${offer})
       returning id
     `;
     await sql`alter table quote_lines add column if not exists uom text not null default ''`;
@@ -583,7 +686,7 @@ export const createQuote = createServerFn({ method: "POST" })
       const p = costs.find((c) => c.id === line.productId);
       const cost = line.cost > 0 ? line.cost : resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost;
       const landed = cost + (line.freight ?? 0) + (line.other ?? 0);
-      const fin = financeUnit({ cost: landed, days: plazo, tiie: data.tiie ?? 0, costSpread: data.spread ?? 0, commissionRate: pol.asrCommission });
+      const fin = financeUnit({ cost: landed, days: plazo, tiie, costSpread: data.spread ?? 0, commissionRate: pol.asrCommission });
       const conMargen = landed > 0.0001;
       const mCash = conMargen ? marginFromPrice({ price: line.cash, landed, finance: 0, mode: "pct" }) : null;
       const mCredit = conMargen ? marginFromPrice({ price: line.credit, landed, finance: fin, mode: "pct" }) : null;
@@ -1353,9 +1456,22 @@ export async function applyInvoicePayment(
   let discountDetail = "";
   if (inv[0].kind === "customer" && inv[0].inv_class === "product" && Number(inv[0].amount) > 0 && newRes > 0.009) {
     const pol = await policy(sql, opts.companyId);
-    const tiieRows = await sql<{ date: string; rate: string }>`
-      select date::text, rate::text from tiie_rates where company_id = ${opts.companyId} order by date
-    `;
+    // La TIIE solo hace falta si el pago cae antes del umbral (Ajustes). Si
+    // hace falta y la tabla no tiene renglón para la fecha de emisión, el cobro
+    // se detiene con aviso: nunca se bonifica con una tasa inventada.
+    const early = daysBetween(inv[0].date, payDate) < pol.earlyPayDays;
+    const tiieRows = early
+      ? await sql<{ date: string; rate: string }>`
+          select date::text, rate::text from tiie_rates where company_id = ${opts.companyId} order by date
+        `
+      : [];
+    const tiieAtIssue = early
+      ? requireRate(
+          tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
+          inv[0].date,
+          `pronto pago de ${inv[0].name}`,
+        ).rate
+      : 0;
     const bono = earlyPayBonus({
       cargo: Number(inv[0].amount),
       issueDate: inv[0].date,
@@ -1363,11 +1479,7 @@ export async function applyInvoicePayment(
       thresholdDays: pol.earlyPayDays,
       // Se bonifican los días no usados del plazo de ESTE pedido.
       financialDays: inv[0].credit_days || pol.creditDays,
-      tiieAtIssue: nearestRate(
-        tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
-        inv[0].date,
-        pol.defaultTiie,
-      ),
+      tiieAtIssue,
       costSpread: pol.asrSpread,
     });
     if (bono.applies && newRes <= bono.bonus + 0.009) {
@@ -1644,7 +1756,12 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // corre la mora y del que se toma la TIIE. Sin credit_due (corte
         // Compaq), se usa el único vencimiento que hay.
         const moraDue = inv.credit_due || inv.due_date;
-        const tiie = nearestRate(tiieTable, moraDue, pol.defaultTiie);
+        // TIIE del renglón de la tabla vigente al plazo financiero. Sin renglón
+        // no se calcula interés: la fila sale marcada "sin TIIE" y con el aviso,
+        // nunca con una tasa inventada.
+        const tiiePick = nearestRate(tiieTable, moraDue);
+        const sinTiie = tiiePick == null;
+        const tiie = tiiePick?.rate ?? 0;
         const cargo = Number(inv.amount);
         const productDoc = inv.kind === "customer" && (inv.inv_class || "product") === "product";
         const allocsAll = pays.filter((p) => p.invoice_id === inv.id);
@@ -1665,7 +1782,10 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           ? misFis.reduce((s, f) => s + Number(f.int_part), 0)
           : Number(inv.interest_invoiced);
         const fegaCharged = historico ? misFis.some((f) => Number(f.fega_part) > 0) : inv.fega_charged;
-        const mora = productDoc
+        // Días vencidos aunque falte la TIIE: se muestran, lo que no se
+        // calcula es el dinero.
+        const endOverdue = paidForCalc && paidForCalc < asOf ? paidForCalc : asOf;
+        const mora = productDoc && !sinTiie
           ? computeMora({
               capital: Math.max(0, cargo),
               dueDate: moraDue,
@@ -1676,7 +1796,11 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               fegaRate: pol.fegaRate,
               fegaAlreadyCharged: fegaCharged,
             })
-          : { daysOverdue: 0, annualRate: tiie + pol.collectionSpread, interest: 0, fega: 0, mora: 0, tiie, spread: pol.collectionSpread, capital: cargo, endDate: asOf };
+          : {
+              daysOverdue: productDoc ? Math.max(0, daysBetween(moraDue, endOverdue)) : 0,
+              annualRate: sinTiie ? 0 : tiie + pol.collectionSpread,
+              interest: 0, fega: 0, mora: 0, tiie, spread: pol.collectionSpread, capital: cargo, endDate: asOf,
+            };
         // Lo mismo que facturaría la FI hoy: interés nuevo + FEGA si falta.
         const liveMora = Math.max(0, mora.interest - intInvoiced) + mora.fega;
         const fxDiff = inv.currency === "USD"
@@ -1686,7 +1810,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         const dueNow = saldo + liveMora + liveFx;
         const plazo = inv.credit_days || partner.payment_days || 0;
         const { serie, folio } = splitDocName(inv.name);
-        const line = productDoc
+        const line = productDoc && !sinTiie
           ? computeStatementLine({
               cargo,
               dueDate: moraDue,
@@ -1699,31 +1823,44 @@ export const getLiveStatement = createServerFn({ method: "POST" })
             })
           : null;
         // Bonificación por pronto pago (informativa): pagó antes del umbral,
-        // se bonifican los días hasta el plazo financiero a tasa de costo.
-        const bono = productDoc && paidForCalc
+        // se bonifican los días hasta el plazo financiero a tasa de costo. La
+        // TIIE es la del renglón vigente a la emisión; sin renglón no se
+        // estima y se avisa.
+        const earlyPay = productDoc && paidForCalc != null && daysBetween(inv.date, paidForCalc) < pol.earlyPayDays;
+        const tiieIssuePick = earlyPay ? nearestRate(tiieTable, inv.date) : null;
+        const bono = earlyPay && tiieIssuePick
           ? earlyPayBonus({
               cargo,
               issueDate: inv.date,
-              payDate: paidForCalc,
+              payDate: paidForCalc!,
               thresholdDays: pol.earlyPayDays,
               financialDays: inv.credit_days || pol.creditDays,
-              tiieAtIssue: nearestRate(tiieTable, inv.date, pol.defaultTiie),
+              tiieAtIssue: tiieIssuePick.rate,
               costSpread: pol.asrSpread,
             })
           : { applies: false, lived: 0, days: 0, rate: 0, bonus: 0 };
-        const formula = explainInterest({
-          capital: line?.capital ?? mora.capital,
-          days: line?.daysVencidos ?? mora.daysOverdue,
-          tiie: mora.tiie,
-          spread: mora.spread,
-          interest: line?.interest ?? mora.interest,
-          fega: line?.comisionFega ?? mora.fega,
-          fegaRate: pol.fegaRate,
-          commissionRate: pol.commissionRate,
-          currency: inv.currency,
-          dueDate: inv.due_date,
-          residual: saldo,
-        });
+        const formula = sinTiie && productDoc
+          ? {
+              short: "Sin TIIE en la tabla: interés no calculado.",
+              lines: [
+                missingRateMessage(moraDue, `plazo financiero de ${inv.name}`),
+                "Interés y comisión/FEGA no calculados: esta fila queda fuera del total de mora hasta que haya TIIE.",
+              ],
+            }
+          : explainInterest({
+              capital: line?.capital ?? mora.capital,
+              days: line?.daysVencidos ?? mora.daysOverdue,
+              tiie: mora.tiie,
+              tiieDate: tiiePick?.date,
+              spread: mora.spread,
+              interest: line?.interest ?? mora.interest,
+              fega: line?.comisionFega ?? mora.fega,
+              fegaRate: pol.fegaRate,
+              commissionRate: pol.commissionRate,
+              currency: inv.currency,
+              dueDate: inv.due_date,
+              residual: saldo,
+            });
         const dueCheck = validateDueDates({
           issue: inv.date,
           due: moraDue,
@@ -1733,8 +1870,10 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         });
         if (bono.applies) {
           formula.lines.push(
-            `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays}). Bonificación = cargo × (TIIE emisión + ${(pol.asrSpread * 100).toFixed(2)}%) × ${bono.days} d no usados / 360 = ${bono.bonus.toFixed(2)}.`,
+            `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays}). Bonificación = cargo × (TIIE emisión ${rateLabel(tiieIssuePick!)} + ${(pol.asrSpread * 100).toFixed(2)}%) × ${bono.days} d no usados / 360 = ${bono.bonus.toFixed(2)}.`,
           );
+        } else if (earlyPay && !tiieIssuePick) {
+          formula.lines.push(`Pronto pago no calculado: ${missingRateMessage(inv.date, `emisión de ${inv.name}`)}`);
         }
         return {
           ...inv,
@@ -1762,7 +1901,9 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           fega: mora.fega,
           comisionFega: line?.comisionFega ?? 0,
           totalFinanciero: line?.totalFinanciero ?? mora.mora,
-          tiie,
+          tiie: sinTiie ? null : tiie,
+          tiieDate: tiiePick?.date ?? null,
+          sinTiie,
           spread: pol.collectionSpread,
           formula: formula.short,
           formulaLines: formula.lines,
@@ -1853,15 +1994,26 @@ export async function issueMoraInvoice(
   // vencimiento visible al cliente (due_date, día 120). La TIIE es la vigente
   // en esa fecha. El capital es SIEMPRE el cargo original (regla del Excel).
   const moraDue = inv[0].credit_due || inv[0].due_date;
+  const paidDate = opts?.paidDate === undefined ? inv[0].paid_date : opts.paidDate;
+  // Primero los días: si no ha vencido no hay mora y no hace falta TIIE. Si
+  // sí venció, la TIIE tiene que estar en la tabla para esa fecha; sin
+  // renglón la FI no se genera y se avisa (en un cobro, la transacción
+  // completa se revierte).
+  const endOverdue = paidDate && paidDate < asOf ? paidDate : asOf;
+  const daysOverdue = Math.max(0, daysBetween(moraDue, endOverdue));
+  if (daysOverdue <= 0) {
+    if (opts?.requireCharge !== false) throw new Error("No hay mora nueva por facturar");
+    return { name: null as string | null, charge: 0, formula: `Sin días vencidos al ${asOf} (plazo financiero ${moraDue}).` };
+  }
   const tiieRows = await sql<{ date: string; rate: string }>`
     select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
   `;
-  const tiie = nearestRate(
+  const pick = requireRate(
     tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
     moraDue,
-    pol.defaultTiie,
+    `plazo financiero de ${inv[0].name}`,
   );
-  const paidDate = opts?.paidDate === undefined ? inv[0].paid_date : opts.paidDate;
+  const tiie = pick.rate;
   const bill = moraBilling({
     cargo: Number(inv[0].amount),
     moraDue,
@@ -1877,10 +2029,12 @@ export async function issueMoraInvoice(
     capital: bill.capital,
     days: bill.daysOverdue,
     tiie: bill.tiie,
+    tiieDate: pick.date,
     spread: bill.spread,
     interest: bill.interest,
     fega: bill.fega,
     fegaRate: pol.fegaRate,
+    commissionRate: pol.commissionRate,
     dueDate: moraDue,
     residual: Number(inv[0].residual),
   }).short;
@@ -1892,7 +2046,7 @@ export async function issueMoraInvoice(
   // los parámetros, este número sigue siendo explicable tal como se emitió.
   const calc = [
     formula,
-    `TIIE ${(tiie * 100).toFixed(4)}% (al ${moraDue}) + spread ${(pol.collectionSpread * 100).toFixed(2)}%`,
+    `${rateLabel(pick)} vigente al ${moraDue} + spread ${(pol.collectionSpread * 100).toFixed(2)}%`,
     `capital (cargo original) ${Number(inv[0].amount).toFixed(2)} · ${bill.daysOverdue} d vencidos`,
     `interés nuevo ${bill.interestNew.toFixed(2)} (ya facturado antes: ${Number(inv[0].interest_invoiced).toFixed(2)})`,
     `FEGA ${bill.fegaNew.toFixed(2)} (tasa ${(pol.fegaRate * 100).toFixed(2)}%${inv[0].fega_charged ? ", ya cobrado antes" : ""})`,

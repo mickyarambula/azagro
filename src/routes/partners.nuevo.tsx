@@ -4,7 +4,6 @@ import { BackBar } from "@/components/erp";
 import { PartnerFields, type PartnerDraft } from "@/components/partner-form";
 import { savePartner, nextPartnerCode } from "@/lib/azagro";
 import { listLookups, saveLookup } from "@/lib/erp/catalogs";
-import { getSettings } from "@/lib/erp/ops";
 
 export const Route = createFileRoute("/partners/nuevo")({
   validateSearch: (s: Record<string, unknown>): { tipo: "cliente" | "proveedor" } => ({
@@ -30,7 +29,9 @@ function Nuevo() {
     notes: "",
     credit_limit: 0,
     payment_days: 0,
-    late_rate: 16.06,
+    // Informativa. La mora real usa TIIE del vencimiento (tabla) + spread de
+    // Ajustes; aquí no se propone ningún número.
+    late_rate: 0,
     is_customer: !isProv,
     is_supplier: isProv,
   });
@@ -40,9 +41,8 @@ function Nuevo() {
 
   useEffect(() => {
     void (async () => {
-      const [code, settings, l] = await Promise.all([
+      const [code, l] = await Promise.all([
         nextPartnerCode({ data: { kind: tipo } }),
-        getSettings().catch(() => null),
         listLookups().catch(() => null),
       ]);
       setLookups(l);
@@ -52,7 +52,7 @@ function Nuevo() {
         is_customer: tipo !== "proveedor",
         is_supplier: tipo === "proveedor",
         payment_days: 0,
-        late_rate: settings ? Number(((settings.defaultTiie + settings.collectionSpread) * 100).toFixed(2)) : 16.06,
+        late_rate: 0,
       }));
     })();
   }, [tipo]);

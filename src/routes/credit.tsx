@@ -7,7 +7,7 @@ import { SendButton } from "@/components/send-doc";
 import { getDealTrail } from "@/lib/erp/deal";
 import { listInvoices, registerPayment } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
-import { computeMora, exactClock, explainInterest, nearestRate, validateDueDates } from "@/lib/erp/credit";
+import { computeMora, exactClock, explainInterest, missingRateMessage, nearestRate, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 
@@ -33,6 +33,8 @@ function Page() {
     fxTreatment?: "utilidad" | "ajuste";
   } | null>(null);
   const [settings, setSettings] = useState<Awaited<ReturnType<typeof getSettings>> | null>(null);
+  // Ajustes incompletos: se muestra el aviso tal cual; no hay números de respaldo.
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [banks, setBanks] = useState<Array<{ id: number; name: string; opening: string; movement: string; currency: string }>>([]);
@@ -41,11 +43,17 @@ function Page() {
     const [inv, b, s] = await Promise.all([
       listInvoices({ data: { kind } }),
       listBanks().catch(() => null),
-      getSettings().catch(() => null),
+      getSettings().catch((e: unknown) => {
+        setSettingsError(e instanceof Error ? e.message : "No se pudieron leer los Ajustes");
+        return null;
+      }),
     ]);
     setRows(inv);
     if (b) setBanks(b.banks);
-    if (s) setSettings(s);
+    if (s) {
+      setSettings(s);
+      setSettingsError(null);
+    }
   }
   useEffect(() => {
     void load();
@@ -305,25 +313,40 @@ function Page() {
             {(() => {
               const inv = rows.find((r) => r.id === pay.id);
               if (!inv || inv.kind !== "customer") return null;
-              const tiieTable = (settings?.tiie ?? []).map((t) => ({ date: t.date, rate: Number(t.rate) }));
-              const tiie = nearestRate(tiieTable, inv.due_date, settings?.defaultTiie ?? 0.0706);
+              if (!settings) {
+                return <p className="mt-2 text-[12px] text-danger">{settingsError ?? "Ajustes no disponibles: la mora no se puede calcular."}</p>;
+              }
+              // TIIE del vencimiento: renglón de la tabla, con fecha. Sin
+              // renglón no se calcula ni se estima.
+              const tiieTable = settings.tiie.map((t) => ({ date: t.date, rate: Number(t.rate) }));
+              const pick = nearestRate(tiieTable, inv.due_date);
+              if (!pick) {
+                return (
+                  <div className="mt-2 text-[12px] text-muted">
+                    <p>Vence {dateDMY(inv.due_date)} · {exactClock(inv.due_date, pay.date).label}.</p>
+                    <p className="mt-1 text-danger">{missingRateMessage(inv.due_date, `mora de ${inv.name}`)}</p>
+                  </div>
+                );
+              }
               const mora = computeMora({
                 capital: num(inv.residual),
                 dueDate: inv.due_date,
                 asOf: pay.date || todayMx(),
-                tiieAtDue: tiie,
-                spread: settings?.collectionSpread ?? 0.09,
-                fegaRate: settings?.fegaRate ?? 0.0304,
+                tiieAtDue: pick.rate,
+                spread: settings.collectionSpread,
+                fegaRate: settings.fegaRate,
                 fegaAlreadyCharged: false,
               });
               const exp = explainInterest({
                 capital: num(inv.residual),
                 days: mora.daysOverdue,
-                tiie,
-                spread: settings?.collectionSpread ?? 0.09,
+                tiie: pick.rate,
+                tiieDate: pick.date,
+                spread: settings.collectionSpread,
                 interest: mora.interest,
                 fega: mora.fega,
-                fegaRate: settings?.fegaRate,
+                fegaRate: settings.fegaRate,
+                commissionRate: settings.commissionRate,
                 currency: inv.currency,
                 dueDate: inv.due_date,
                 residual: num(inv.residual),

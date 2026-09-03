@@ -227,10 +227,13 @@ test("parámetros de cartera: editables, solo admin, con bitácora anterior → 
   assert.ok(save.includes("writeAudit("), "los cambios de parámetros van a bitácora");
   assert.ok(save.includes("→"), "la bitácora debe llevar valor anterior → nuevo");
   assert.ok(save.includes("early_pay_days"), "el umbral de pronto pago se guarda en Ajustes");
-  const policyFn = ops.slice(ops.indexOf("async function policy"), ops.indexOf("export const getSettings"));
-  for (const col of ["credit_days", "invoice_days", "fega_rate", "collection_spread", "asr_commission", "asr_spread", "early_pay_days"]) {
+  const policyFn = ops.slice(ops.indexOf("export async function readPolicy"), ops.indexOf("export const getSettings"));
+  for (const col of ["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_commission", "asr_spread", "early_pay_days"]) {
     assert.ok(policyFn.includes(col), `la política debe leer ${col} de Ajustes (no constantes)`);
   }
+  // Y si el renglón no está, se detiene: no hay DEFAULT_POLICY ni `?? número`.
+  assert.ok(!ops.includes("DEFAULT_POLICY"), "sin política de respaldo en el código");
+  assert.ok(policyFn.includes("missingPolicyMessage"), "Ajustes incompletos = error visible");
   const credit = src("src/lib/erp/credit.ts");
   assert.ok(credit.includes("thresholdDays"), "el umbral del pronto pago es parámetro, no número quemado");
   assert.ok(credit.includes("financialDays"), "el plazo financiero es parámetro, no número quemado");

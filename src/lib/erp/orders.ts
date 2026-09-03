@@ -53,7 +53,7 @@ const orderSchema = z.object({
   locationId: z.number(),
   notes: z.string().optional().default(""),
   currency: z.enum(["MXN", "USD"]),
-  fxRate: z.number(),
+  fxRate: z.number().nonnegative(),
   deliveryTo: z.string().optional().default(""),
   termKind: z.enum(["contado", "credit_days", "date", "harvest"]),
   invoiceDays: z.number(),
@@ -99,16 +99,23 @@ export const orderLookups = createServerFn({ method: "GET" })
     const policies = await sql<{ code: string; name: string }>`
       select code, name from credit_policies where company_id = ${companyId} order by code
     `;
-    const fx = await sql<{ usd_mxn: string }>`
-      select usd_mxn::text from fx_rates where company_id = ${companyId} order by date desc limit 1
+    // Tipo de cambio propuesto: el renglón más reciente de la tabla, con su
+    // fecha, para que la pantalla diga de cuándo es. Tabla vacía = null y un
+    // pedido en dólares no se guarda hasta capturar uno.
+    const fx = await sql<{ usd_mxn: string; date: string }>`
+      select usd_mxn::text, date::text from fx_rates where company_id = ${companyId} order by date desc limit 1
     `;
+    // Plazos de Ajustes (factura / crédito): si faltan, policy() se detiene
+    // con "Ajustes incompletos".
+    const pol = await policy(sql, companyId);
     return {
       customers,
       asr,
       products,
       locations,
       policies,
-      fxRate: Number(fx[0]?.usd_mxn ?? 18),
+      fx: fx[0] ? { rate: Number(fx[0].usd_mxn), date: fx[0].date } : null,
+      terms: { invoiceDays: pol.invoiceDays, creditDays: pol.creditDays },
       nextName: await nextOrderName(sql, companyId),
     };
   });
@@ -437,7 +444,7 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
       total += Number(l.qty) * price;
     }
     const termKind = days > 0 ? "credit_days" : "contado";
-    const invoiceDays = days > 0 ? Math.min(pol.invoiceDays || days, days) : 0;
+    const invoiceDays = days > 0 ? Math.min(pol.invoiceDays, days) : 0;
     const dues = computeDues({ date: so[0].date, termKind, invoiceDays, creditDays: days });
     if (Math.abs(Number(so[0].total) - total) > 0.009) cambios.push(`total ${Number(so[0].total)} → ${Math.round(total * 100) / 100}`);
     if ((so[0].invoice_due ?? "") !== dues.invoiceDue) cambios.push(`vencimiento ${so[0].invoice_due ?? "—"} → ${dues.invoiceDue}`);
@@ -476,6 +483,10 @@ export const saveOrder = createServerFn({ method: "POST" })
     const companyId = await cid(sql, context.userId);
     const member = await assertCan(sql, context.userId, "sales", "edit");
 
+    // Un pedido en dólares necesita tipo de cambio real (tabla o capturado).
+    if (data.currency === "USD" && !(data.fxRate > 0)) {
+      throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de guardar un pedido en dólares.");
+    }
     const dues = computeDues(data);
     assertDueOk(
       validateDueDates({

@@ -196,7 +196,69 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
          pedido nuevo", y el servidor tampoco deja revisar esa cotización.
       3. *Pedido capturado directo (sin cotización)*: igual que siempre.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, casi 280 hoy,
+16. **Sin valores por omisión de negocio** (3-sep, migración
+    `0019_sin_valores_por_omision.sql`, prueba `scripts/erp-sin-numeros.test.mjs`).
+    REGLA ÚNICA del dueño: *todo número de negocio se lee de Ajustes o de su
+    tabla; si no está, el sistema se detiene y avisa; nunca inventa un número.*
+    - **Márgenes**: las partidas que la 0018 dejó en 12% con origen
+      `migracion` (la firma exacta del `default 12` viejo: modo %, 12 exacto,
+      sin nominal) pasan a "sin margen". Un 12% capturado a mano (origen
+      `captura`), o con nominal, se queda.
+    - **Tipo de cambio**: ya no existe el 18. Pedido, cotización y solicitud
+      proponen el renglón más reciente de la tabla `fx_rates` y dicen de qué
+      fecha es ("TC tabla 18.60 (2026-09-01)"). Tabla vacía y nada capturado =
+      el servidor no guarda un documento en dólares (`orders.ts`, `createQuote`,
+      `cpo.ts` al convertir una OC en USD). En la solicitud el TC pactado manda
+      sobre la propuesta de la tabla.
+    - **TIIE**: siempre el renglón de `tiie_rates` con fecha igual o anterior
+      a la fecha que toque (`nearestRate(tabla, fecha)` → renglón o `null`;
+      `requireRate` truena con "No hay TIIE en la tabla con fecha igual o
+      anterior al …"). La pantalla muestra cuál usó y de qué fecha: "TIIE 6.90%
+      (tabla, 01/09/2026)". Se fueron el 7.06 del código y la "TIIE por
+      omisión" de Ajustes (columna `default_tiie`). Sin renglón: no se cotiza a
+      crédito, no se emite factura de interés, el estado de cuenta marca "sin
+      TIIE" en esa fila y los reportes dicen "sin TIIE" en vez de estimar.
+      `createQuote` toma la TIIE de la tabla en el servidor y rechaza si la
+      pantalla mandó otra ("La TIIE de la tabla cambió desde que abriste la
+      pantalla").
+    - **Ajustes obligatorio**: `company_settings` perdió todos los defaults
+      y NOT NULL de negocio (plazo factura, plazo crédito, umbral de pronto
+      pago `early_pay_days`, comisión + FEGA `fega_rate`, comisión sola
+      `fega_commission`, spread de mora, comisión ASR, spread ASR). Si falta
+      un renglón, `policy()` truena con "Ajustes incompletos: falta …" en
+      servidor, y la pantalla lo muestra en Ajustes, Cotizaciones, Solicitud,
+      Cartera y Estado de cuenta en lugar de operar con números del código.
+      `DEFAULT_POLICY` ya no existe. **Una base que ya existía tiene que
+      capturar `fega_commission` y `early_pay_days` en Ajustes** antes de
+      volver a cotizar/cobrar (la pantalla lo pide).
+    - **Plazos**: 90/30 del código se fueron; salen de Ajustes (plazo factura
+      / plazo crédito). `partners.payment_days` perdió su `default 30` (sigue
+      obligatorio: quien da de alta captura el plazo, 0 = contado; convertir
+      una OC de cliente sin plazo se detiene).
+    - **Reportes**: una partida sin costo se etiqueta "sin costo", queda
+      **fuera** del cálculo de utilidad (antes entraba como 100% de ganancia)
+      y se cuenta aparte con su motivo (Panorama, por razón, por pedido y el
+      P&L del pedido).
+    - **Extras del barrido**: la mora "16.06%" fija en el alta de socio y en
+      la importación Compaq (ahora `late_rate` es informativa y vale 0); el
+      "+ 9%" fijo en estado de cuenta, solicitud y ayuda; las etiquetas de
+      política de cobro (`CREDIT_POLICY_CATALOG`) ya no llevan "9% / 1% /
+      2.04%" (solo son un nombre; `credit_policies.spread/fega_rate` no las
+      lee nadie); la comisión ASR editable de la solicitud (el servidor la
+      ignoraba) pasó a solo lectura desde Ajustes; CPO→PV grababa TC 1 y plazo
+      0/0 fijos.
+    - **Prueba de barrido**: `erp-sin-numeros.test.mjs` recorre `src/` (sin
+      comentarios, exenta solo `catalog.ts` como semilla de tabla) y falla ante
+      `useState(18)`, `?? 18`, `0.0706`, `16.06`, `?? 0.09`, `spread: 0.04`,
+      `0.0304`, `?? 90`, `default 30`, `default 12`, `DEFAULT_POLICY`,
+      `default_tiie`, `nearestRate` con tercer argumento, etc. También vigila
+      que las semillas de `catalog.ts` solo las importe el sembrado.
+    - Lo que sí queda en código y **no** es configuración: 360 días del año
+      (fórmula), las semillas de `TIIE_SEED` (van a la tabla), los placeholders
+      "p. ej. 18.60" de los inputs, y `reports.ts` "× 30 / 360" como unidad
+      del reporte mensual.
+
+Todo lo anterior quedó con pruebas automáticas (`npm test`, casi 290 hoy,
 incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
 
@@ -250,23 +312,16 @@ natural de trabajo grande.
 
 ## Qué falta
 
-- **Valores por omisión que siguen escritos en el código** (reportados al
-  dueño el 2-sep junto con la muerte del 12%; **no se han tocado, esperan su
-  decisión**). El criterio: un número que decide dinero sin que nadie lo haya
-  elegido es un error, aunque sea "razonable".
-  - *Tipo de cambio 18 MXN/USD* en cuatro lugares (`orders.ts` cuando no hay
-    tipo de cambio capturado, `sales.nuevo.tsx`, y el arranque de las
-    pantallas de cotización y solicitud). Es el que más pesa: multiplica todo
-    el pedido.
-  - *Plazos*: 90 días al abrir el alta manual de cotización (Ajustes dice
-    150); 30 días en el pedido directo nuevo, al cambiar a "crédito días" y en
-    el vencimiento de la factura de proveedor sin plazo capturado.
-  - *Tasas de respaldo*: TIIE 7.06% / spread 4% / mora 9% / FEGA 3.04% cuando
-    no hay renglón en Ajustes (`DEFAULT_POLICY`), y los mismos números como
-    respaldo en la pantalla de cartera y como estado inicial de Ajustes. La
-    TIIE es la delicada: es una tasa de mercado que cambia cada semana.
-  - *Reportes*: una partida sin costo se etiqueta "catálogo" (no "sin costo")
-    y su utilidad sale del 100% del precio.
+- **Valores por omisión**: cerrados el 3-sep (punto 16 de la bitácora de
+  arriba). No volver a escribir un número de negocio en el código: lo vigila
+  `scripts/erp-sin-numeros.test.mjs`. Pendiente operativo, no de código: en
+  una base que ya existía hay que capturar `fega_commission` y
+  `early_pay_days` en Ajustes (la pantalla lo pide y todo se detiene hasta
+  entonces).
+- Columnas sin uso que quedaron por no romper nada: `credit_policies.spread`
+  y `fega_rate` (nadie las lee; la mora sale de Ajustes) y
+  `customer_pos.fx_rate default 1` (nadie la lee; la OC convertida toma el TC
+  de la tabla). Quitarlas cuando toque una limpieza de esquema.
 - **Sesión D pendiente**: un barrido de uso real, simplificación de
   pantallas y detección de huecos operativos — no se ha hecho todavía.
 - **INCOMPLETOS de `LOGICA.md` sin tocar**: no hay forma de revertir un pago
@@ -301,11 +356,12 @@ natural de trabajo grande.
 ## Fórmulas vigentes (confirmadas, no negociables sin decisión del dueño)
 
 - Días **calendario exactos**, no meses de 30.
-- Interés de mora = Cargo original × (TIIE al plazo financiero + 9%) ×
-  días vencidos desde el día 150 / **360**. Con signo en el estado de
+- Interés de mora = Cargo original × (TIIE al plazo financiero, renglón de
+  la tabla + spread de mora de Ajustes; hoy 9%) × días vencidos desde el
+  plazo financiero (Ajustes; hoy 150) / **360**. Con signo en el estado de
   cuenta: negativo = pronto pago.
-- Comisión 1% + FEGA 2.04% = **3.04%** una sola vez sobre el cargo, cuando
-  ya venció.
+- Comisión + FEGA (Ajustes; hoy 1% + 2.04% = **3.04%**) una sola vez sobre
+  el cargo, cuando ya venció.
 - Precio al cliente = costo de mercancía + margen elegido + financiamiento
   por unidad: costo × comisión ASR 1% (una sola vez, no depende de los días)
   + costo × **1.01** × (TIIE vigente al cotizar + spread ASR 4%) × días de

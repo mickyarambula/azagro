@@ -10,7 +10,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 - Postgres: Neon si hay `DATABASE_URL`, si no PGLite embebido (`src/lib/db.ts`)
 - better-auth
 - Server functions: `createServerFn` + `authMiddleware`
-- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud; 0018 = copia marcada del margen viejo y muerte del 12% por omisión)
+- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud; 0018 = copia marcada del margen viejo y muerte del 12% por omisión; 0019 = sin valores por omisión de negocio: `company_settings` sin defaults ni NOT NULL, `fega_commission`, `early_pay_days`, sin `default_tiie`, `partners.payment_days` sin default, el 12% de migración pasa a "sin margen")
 
 ## No romper
 
@@ -21,7 +21,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 5. **Pared de privacidad:** el cliente no ve al proveedor. Brokeraje/directo no recibe en bodega Azagro.
 6. Folios existentes (SOL/SC/COT/PV/OC/FV/FP/NC/FI). No series nuevas salvo que lo pidan.
 7. UI y copy en español. Sin emojis salvo que lo pidan.
-8. **Nada de valores por omisión que decidan dinero.** Sin margen capturado la pantalla dice “Sin margen” y no cotiza; igual que sin costo. No reponer el 12% ni un 0% “para que calcule”. Los defaults que quedan (TC 18, plazos 30/90, tasas de respaldo) están listados en `HANDOFF.md` y solo los quita el dueño.
+8. **Nada de valores por omisión que decidan dinero. REGLA ÚNICA: todo número de negocio se lee de Ajustes o de su tabla; si no está, el sistema se detiene y avisa; nunca inventa un número.** Sin margen capturado la pantalla dice “Sin margen” y no cotiza; igual que sin costo. Sin renglón de TIIE en la tabla no se cotiza a crédito ni se factura interés. Sin renglón completo de Ajustes, `policy()` truena. Sin TC en la tabla no se guarda nada en dólares. No reponer el 12%, el TC 18, el 7.06%, los 90/30 días ni un 0% “para que calcule”. `scripts/erp-sin-numeros.test.mjs` barre `src/` y falla si vuelve un número de negocio al código; la TIIE viene de `nearestRate(tabla, fecha)` (2 argumentos, sin respaldo).
 
 ## Mapa
 
@@ -40,6 +40,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 | Candado de solicitud ya cotizada | `src/lib/erp/request-lock.ts` |
 | Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
 | Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |
+| Barrido: ningún número de negocio en código | `scripts/erp-sin-numeros.test.mjs` |
 
 Movimientos de stock y cobros: **transacción + `FOR UPDATE`**. Alter table **fuera** de `withTx`.
 

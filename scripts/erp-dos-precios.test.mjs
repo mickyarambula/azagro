@@ -316,7 +316,7 @@ test("changeOrderTerm: solo borrador, rehace precios con el margen de crédito g
   assert.ok(body.includes("priceFromMargin({ landed, finance: fin, margin: mCredit })"), "precio = costo + margen crédito + financiamiento");
   assert.ok(body.includes('cambios.push(`${l.code} ${landed > 0.0001 ? "sin margen" : "sin costo"}: precio sin recalcular`)'), "sin margen no se inventa uno para recalcular");
   assert.ok(body.includes("price = Number(l.cash_price);"), "a 0 días vuelve al precio de contado");
-  assert.ok(body.includes("Math.min(pol.invoiceDays || days, days)"), "días factura de Ajustes sin pasar del plazo");
+  assert.ok(body.includes("Math.min(pol.invoiceDays, days)"), "días factura de Ajustes sin pasar del plazo (sin respaldo: Ajustes es obligatorio)");
   assert.ok(body.includes(`action: "cambiar-plazo-pedido"`), "bitácora");
   assert.ok(body.includes("`plazo ${so[0].credit_days} → ${days} d`"), "anterior → nuevo");
   assert.ok(body.includes("${l.code} precio ${Number(l.unit_price)} → ${price}"), "precio por partida anterior → nuevo");
@@ -360,7 +360,7 @@ test("panel de la cotización: captura inversa por columna, sin fórmula crédit
   // margen guardados, así que su precio a crédito se arma con la base que
   // manda el servidor (igual que el alta manual). Nunca con el costo en pantalla.
   assert.equal((panel.match(/creditFromCash\(\{/g) ?? []).length, 1, "solo la partida nueva deriva el crédito");
-  assert.ok(panel.includes("creditFromCash({ cash: p, fin: prod.fin, days: qrow.credit_days })"), "y con la base del servidor");
+  assert.ok(panel.includes("creditFromCash({ cash: p, fin: prod.fin ?? SIN_FIN, days: qrow.credit_days })"), "y con la base del servidor (sin TIIE en la tabla la base es 0 y el servidor no deja cotizar a crédito)");
   assert.ok(q.includes("validateSearch"), "?ver= abre el folio desde la solicitud/pedido");
   assert.ok(q.includes("El cliente aceptó el precio de {OFFER_LABEL[qrow.accepted_offer]}"), "muestra cuál precio aceptó");
 });

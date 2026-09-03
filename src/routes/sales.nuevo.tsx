@@ -21,12 +21,14 @@ function empty(lookups: OrderLookups): OrderDraft {
     date: todayMx(),
     ocCliente: "",
     termKind: "credit_days",
-    invoiceDays: 30,
-    creditDays: 30,
+    // Plazos de Ajustes (factura / crédito) y TC propuesto de la tabla (0 =
+    // tabla vacía: el servidor no deja guardar en dólares sin capturarlo).
+    invoiceDays: lookups.terms.invoiceDays,
+    creditDays: lookups.terms.creditDays,
     invoiceDue: todayMx(),
     creditDue: todayMx(),
     currency: "USD",
-    fxRate: lookups.fxRate || 18,
+    fxRate: lookups.fx?.rate ?? 0,
     routeKind: "own",
     asrPartnerId: lookups.asr[0]?.id ?? null,
     locationId: loc?.id ?? 0,

@@ -25,10 +25,13 @@ export const PARTNER_GROUP_CATALOG = [
   { code: "STA_ROSA", name: "Santa Rosa" },
 ];
 
+// Etiquetas de la política de cobro del pedido. Solo son un nombre: la mora
+// real siempre se calcula con la TIIE de la tabla + spread y comisión + FEGA de
+// Ajustes. Por eso aquí no van números.
 export const CREDIT_POLICY_CATALOG = [
-  { code: "NONE", name: "Sin mora", spread: 0, fega_rate: 0 },
-  { code: "GRUPO_SL", name: "Grupo SL — TIIE + 9% + comisión 1% + FEGA 2.04%", spread: 0.09, fega_rate: 0.0304 },
-  { code: "ESTANDAR", name: "Estándar — TIIE + 6%", spread: 0.06, fega_rate: 0 },
+  { code: "NONE", name: "Sin mora" },
+  { code: "GRUPO_SL", name: "Grupo SL — TIIE del vencimiento + spread y comisión + FEGA de Ajustes" },
+  { code: "ESTANDAR", name: "Estándar — TIIE del vencimiento + spread de Ajustes" },
 ];
 
 export const BANK_CATALOG = [

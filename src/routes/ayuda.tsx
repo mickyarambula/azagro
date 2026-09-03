@@ -56,7 +56,7 @@ function Page() {
       <ul className="mt-2 space-y-2 text-sm">
         <li><strong>Cuánto me deben y cuándo vence:</strong> Finanzas → <em>Por cobrar</em> y <em>Vencimientos</em>.</li>
         <li><strong>Cuánto debo y cuándo pago:</strong> Finanzas → <em>Por pagar</em> (FP de las OC). Registrar pago ahí.</li>
-        <li><strong>Estado de cuenta para revisar y mandar:</strong> Finanzas → Estados de cuenta. No es el export crudo de Compaq (código, serie, folio, cargo, abono, saldo). Azagro le agrega lo del Excel de trabajo: plazo, fecha de pago, días vence, días vencidos, interés s/ días, comisión 1% + FEGA 2.04% y total. MXN y USD en bloques aparte; si filtras un grupo, sale el consolidado. Interés = Cargo × (TIIE al vencimiento + 9%) × días / 360 (con signo: negativo = pronto pago). Toca la cifra para ver el desglose. Documento / Enviar cuando ya cuadra. Los saldos pagados de 2024–2026 no se pegan; el saldo abierto entra después por Importar.</li>
+        <li><strong>Estado de cuenta para revisar y mandar:</strong> Finanzas → Estados de cuenta. No es el export crudo de Compaq (código, serie, folio, cargo, abono, saldo). Azagro le agrega lo del Excel de trabajo: plazo, fecha de pago, días vence, días vencidos, interés s/ días, comisión + FEGA (lo que diga Ajustes) y total. MXN y USD en bloques aparte; si filtras un grupo, sale el consolidado. Interés = Cargo × (TIIE del vencimiento, de la tabla + spread de Ajustes) × días / 360 (con signo: negativo = pronto pago). Toca la cifra para ver el desglose. Documento / Enviar cuando ya cuadra. Los saldos pagados de 2024–2026 no se pegan; el saldo abierto entra después por Importar.</li>
         <li><strong>Cuánto debo y cuándo pago:</strong> Facturas (Proveedor) y Cadena de crédito (columna derecha).</li>
         <li><strong>Alertas de vencimiento:</strong> en Cartera (pastilla roja), Cadena, Inicio (facturas vencidas). No hay correo automático todavía: hay que entrar al tablero.</li>
         <li><strong>P&L de un pedido:</strong> dentro del PV, abajo. Utilidad para el periodo.</li>
@@ -67,7 +67,7 @@ function Page() {
 
       <h2 className="mt-8 text-base font-semibold">Tu prueba PV-0001</h2>
       <p className="mt-2 text-sm text-muted">
-        Solicitud → cotización a SL Agrícola en USD TC 18 → aceptó → PV-0001 crédito 60 d exactos (vence 22/oct/2026), política Grupo SL, entrega proveedor, guía Juan Ramon / VRG-2435.
+        Solicitud → cotización a SL Agrícola en USD al TC de la tabla (o el pactado) → aceptó → PV-0001 crédito 60 d exactos (vence 22/oct/2026), política Grupo SL, entrega proveedor, guía Juan Ramon / VRG-2435.
         OC-0001 Greenhow y OC-0002 Tepeyac en directo (bien: no se reciben). Entregado y recibido. FV-0001 abierta por USD 143,062.47.
         Margen ~7% con flete $3,000 y costo de OC. Eso está bien armado.
       </p>

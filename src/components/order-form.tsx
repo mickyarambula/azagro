@@ -42,7 +42,10 @@ export type OrderLookups = {
   products: Array<{ id: number; code: string; name: string; uom: string; list_price: string; product_type: string }>;
   locations: Array<{ id: number; name: string; loc_type: string }>;
   policies: Array<{ code: string; name: string }>;
-  fxRate: number;
+  // Tipo de cambio propuesto (renglón más reciente de la tabla, con fecha) o
+  // null si la tabla está vacía; plazos de Ajustes (factura / crédito).
+  fx: { rate: number; date: string } | null;
+  terms: { invoiceDays: number; creditDays: number };
   nextName: string;
 };
 
@@ -281,8 +284,10 @@ export function OrderFields({
                     priceMode: "cash",
                   });
                 } else if (termKind === "credit_days") {
-                  const days = form.invoiceDays || partner?.payment_days || 30;
-                  setForm({ ...form, termKind, invoiceDays: days, creditDays: form.creditDays || days, priceMode: "financed" });
+                  // Plazo del cliente si lo tiene; si no, los de Ajustes.
+                  const days = form.invoiceDays || partner?.payment_days || lookups.terms.invoiceDays;
+                  const credit = form.creditDays || partner?.payment_days || lookups.terms.creditDays;
+                  setForm({ ...form, termKind, invoiceDays: days, creditDays: credit, priceMode: "financed" });
                 } else {
                   setForm({ ...form, termKind, priceMode: "financed" });
                 }
@@ -305,13 +310,15 @@ export function OrderFields({
               value={form.currency}
               onChange={(e) => {
                 const currency = e.target.value as "MXN" | "USD";
-                setForm({ ...form, currency, fxRate: currency === "MXN" ? 1 : form.fxRate || lookups.fxRate });
+                // En USD se propone el TC de la tabla; 0 = no hay y el servidor no deja guardar.
+                setForm({ ...form, currency, fxRate: currency === "MXN" ? 1 : form.fxRate || lookups.fx?.rate || 0 });
               }}
             >
               <option value="USD">USD</option>
               <option value="MXN">MXN</option>
             </select>
             {form.currency === "USD" ? (
+            <>
             <input
               className="erp-input w-24"
               type="number"
@@ -321,6 +328,12 @@ export function OrderFields({
               onChange={(e) => setForm({ ...form, fxRate: Number(e.target.value) })}
               title="Dólar pactado"
             />
+            <span className="self-center text-xs text-[color:var(--erp-muted)]">
+              {lookups.fx
+                ? `TC tabla ${lookups.fx.rate} (${lookups.fx.date})`
+                : "Sin tipo de cambio en la tabla: captúralo en Ajustes o escribe el pactado."}
+            </span>
+            </>
             ) : null}
           </div>
         </div>

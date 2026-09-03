@@ -5,6 +5,7 @@ import { getSql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
 import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
+import { nearestRate } from "@/lib/erp/credit";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -170,15 +171,38 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${companyId}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const total = lines.reduce((s, l) => s + Number(l.qty) * Number(l.unit_price), 0);
+    const today = todayMx();
+    // Tipo de cambio: en dólares se propone el renglón más reciente de la
+    // tabla; tabla vacía = no se convierte. En pesos es 1 por definición.
+    let fxRate = 1;
+    if (cpo[0].currency === "USD") {
+      const fx = await sql<{ date: string; usd_mxn: string }>`
+        select date::text, usd_mxn::text from fx_rates where company_id = ${companyId} order by date
+      `;
+      const pick = nearestRate(fx.map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), today);
+      if (!pick) {
+        throw new Error("Sin tipo de cambio: la tabla está vacía. Captúralo en Ajustes → Tipo de cambio antes de convertir una OC en dólares.");
+      }
+      fxRate = pick.rate;
+    }
+    // Plazo: el capturado en la ficha del cliente (0 = contado). No hay plazo
+    // escrito en el código; el pedido nace en borrador y se revisa antes de confirmar.
+    const partner = await sql<{ payment_days: number | null }>`
+      select payment_days from partners where id = ${cpo[0].partner_id} and company_id = ${companyId}
+    `;
+    if (!partner[0] || partner[0].payment_days == null) {
+      throw new Error("El cliente no tiene plazo de pago capturado. Captúralo en su ficha (0 = contado) antes de convertir la OC.");
+    }
+    const plazo = partner[0].payment_days;
     const so = await sql<{ id: number }>`
       insert into sales_orders (
         company_id, name, partner_id, date, state, location_id, notes, total,
         currency, fx_rate, delivery_to, owner_id,
         term_kind, invoice_days, credit_days, route_kind, policy_code, oc_cliente, price_mode
       ) values (
-        ${companyId}, ${name}, ${cpo[0].partner_id}, ${todayMx()}, 'draft', ${data.locationId},
-        ${cpo[0].notes}, ${total}, ${cpo[0].currency}, 1, '', ${context.userId},
-        'credit_days', 0, 0, 'own', 'NONE', ${cpo[0].customer_po_number}, 'custom'
+        ${companyId}, ${name}, ${cpo[0].partner_id}, ${today}, 'draft', ${data.locationId},
+        ${cpo[0].notes}, ${total}, ${cpo[0].currency}, ${fxRate}, '', ${context.userId},
+        'credit_days', ${plazo}, ${plazo}, 'own', 'NONE', ${cpo[0].customer_po_number}, 'custom'
       )
       returning id
     `;

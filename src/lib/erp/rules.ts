@@ -1,13 +1,14 @@
-/** Fuente única de las reglas de negocio Azagro. El motor y la pantalla de Ajustes leen esto. */
+/**
+ * Fuente única de las reglas de negocio Azagro (texto). El motor y la pantalla
+ * de Ajustes leen esto.
+ *
+ * Aquí NO hay tasas, plazos ni umbrales: todo número de negocio (TIIE, spread,
+ * comisión, FEGA, plazos, umbral de pronto pago, tipo de cambio) vive en
+ * Ajustes o en su tabla. Lo único fijo es la convención del año comercial.
+ */
 
+/** Año comercial: el factor de interés es días exactos / 360. Convención, no parámetro. */
 export const YEAR_DAYS = 360;
-
-/** 1% comisión del Excel de cartera (columna «Comisión + FEGA»). */
-export const COMMISSION_RATE = 0.01;
-/** FEGA sola (2.04%). */
-export const FEGA_ONLY_RATE = 0.0204;
-/** Comisión + FEGA = 3.04%. Es lo que se factura en FI, una sola vez. */
-export const FEGA_BUNDLE_RATE = 0.0304;
 
 export const BUSINESS_RULES = [
   {
@@ -23,12 +24,12 @@ export const BUSINESS_RULES = [
   {
     id: "finance",
     title: "Financiamiento dentro del precio",
-    body: "Si hay días de crédito, el precio incluye por unidad: costo × comisión ASR (1%, una sola vez) + costo × 1.01 × (TIIE vigente al cotizar + spread ASR 4%) × días / 360. La línea adelanta costo + comisión, por eso el 1.01. De contado es $0, comisión incluida. Eso no es mora.",
+    body: "Si hay días de crédito, el precio incluye por unidad: costo × comisión ASR (Ajustes, una sola vez) + costo × (1 + comisión ASR) × (TIIE de la tabla vigente al cotizar + spread ASR de Ajustes) × días / 360. La línea adelanta costo + comisión, por eso el (1 + comisión). De contado es $0, comisión incluida. Eso no es mora.",
   },
   {
     id: "mora",
     title: "Mora aparte",
-    body: "TIIE en la fecha de vencimiento + 9% sobre el cargo, × días exactos / 360 (puede ser negativo si pagaron antes: pronto pago). Comisión 1% + FEGA 2.04% = 3.04% una sola vez sobre el cargo. En el estado de cuenta se ven las tres columnas del Excel. La factura FI solo sale si ya venció; no se suma al precio ni a la factura del producto.",
+    body: "TIIE de la tabla en la fecha del plazo financiero + spread de cobro (Ajustes) sobre el cargo, × días exactos / 360 (puede ser negativo si pagaron antes: pronto pago). Comisión + FEGA (Ajustes) una sola vez sobre el cargo. En el estado de cuenta se ven las tres columnas del Excel. La factura FI solo sale si ya venció y hay TIIE en la tabla para esa fecha; no se suma al precio ni a la factura del producto.",
   },
   {
     id: "ec",
@@ -58,7 +59,7 @@ export const BUSINESS_RULES = [
   {
     id: "fx",
     title: "Tipo de cambio",
-    body: "El dólar pactado solo aplica en USD. En MXN no hay TC. En el estado de cuenta, la columna Ut. cambiaria es Importe USD × (TC pactado − TC pagado).",
+    body: "El dólar pactado solo aplica en USD y se propone del renglón más reciente de la tabla de tipo de cambio (Ajustes), mostrando de qué fecha es; sin tabla no se guarda un documento en dólares. En MXN no hay TC. En el estado de cuenta, la columna Ut. cambiaria es Importe USD × (TC pactado − TC pagado).",
   },
   {
     id: "buy",

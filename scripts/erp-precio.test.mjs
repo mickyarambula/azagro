@@ -118,7 +118,7 @@ test("cableado: el cotizador y el P&L usan el mismo modelo", () => {
   const req = src("src/lib/erp/requests.ts");
   assert.ok(req.includes("commissionRate: pol.asrCommission"), "la comisión del precio sale de Ajustes");
   const az = src("src/lib/azagro.ts");
-  assert.ok(az.includes("financialDays: so[0].credit_days ?? 0"), "la FV congela los días de SU pedido, no un fijo");
+  assert.ok(az.includes("const financedDays = so[0].credit_days ?? 0;") && az.includes("financialDays: financedDays,"), "la FV congela los días de SU pedido, no un fijo");
   const rep = src("src/lib/erp/reports.ts");
   assert.ok(rep.includes("financialDays > 0 || daysExceeded > 0"), "P&L: contado sin circuito, nada que restar");
   const ui = src("src/routes/solicitudes.$solicitudId.tsx");

@@ -170,8 +170,13 @@ function Page() {
           <h2 className="text-base font-semibold">Saldos por vencer por mes (plazo financiero)</h2>
           <p className="mt-0.5 text-sm text-muted">
             Base de la propuesta de pago: cuánto capital llega a su plazo financiero cada mes, y el interés que
-            correría por mes de 30 días si no se paga (cargo × TIIE + {(porMes.spread * 100).toFixed(0)}% × 30/360).
+            correría por mes de 30 días si no se paga (cargo × TIIE del vencimiento + {(porMes.spread * 100).toFixed(2)}% × 30/360).
           </p>
+          {porMes.sinTiie > 0 && (
+            <p className="mt-2 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+              {porMes.sinTiie} factura(s) sin TIIE en la tabla para su vencimiento: su interés aparece en 0 porque no se calcula ni se estima. Captura la TIIE en Ajustes → Tabla TIIE.
+            </p>
+          )}
           <div className="mt-3 overflow-x-auto erp-card">
             <table className="w-full min-w-[640px] text-left text-[13px]">
               <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">

@@ -5,6 +5,7 @@ import { MoneyField, QtyField } from "@/components/fields";
 import { OpsPipeline } from "@/components/pipeline";
 import { SendButton } from "@/components/send-doc";
 import { getSettings } from "@/lib/erp/ops";
+import { missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { saveRfqBid } from "@/lib/erp/rfq";
 import { annualRate, priceSale } from "@/lib/erp/pricing";
 import { marginOf, OFFER_LABEL, SIN_MARGEN, type Offer } from "@/lib/erp/margins";
@@ -24,7 +25,7 @@ import {
 import { destText, RequestFields, type RequestDraft } from "@/components/request-form";
 import { Expediente } from "@/components/expediente";
 import { listDeliveryPoints } from "@/lib/erp/locations";
-import { money, num, qty, humanError } from "@/lib/utils";
+import { money, num, qty, humanError, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/solicitudes/$solicitudId")({ component: Page });
 
@@ -134,12 +135,17 @@ function Page() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [targets, setTargets] = useState<Record<string, boolean>>({});
+  // TIIE y TC salen de sus tablas (renglón vigente hoy, con fecha); spread y
+  // comisión ASR de Ajustes. Nada nace escrito aquí: 0 = todavía sin dato.
   const [tiiePct, setTiiePct] = useState(0);
+  const [tiieFrom, setTiieFrom] = useState<string | null>(null);
   const [spreadPct, setSpreadPct] = useState(0);
-  const [commissionPct, setCommissionPct] = useState(1);
+  const [commissionPct, setCommissionPct] = useState(0);
   const [days, setDays] = useState(0);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
-  const [fxRate, setFxRate] = useState(18);
+  const [fxRate, setFxRate] = useState(0);
+  const [fxFrom, setFxFrom] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function load() {
@@ -164,7 +170,11 @@ function Page() {
     const termFx = d.quote ? d.quote.fx_rate : d.request.fx_rate;
     if (termDays != null) setDays(termDays);
     if (termCur === "USD" || termCur === "MXN") setCurrency(termCur);
-    if (termFx != null && Number(termFx) > 0) setFxRate(Number(termFx));
+    // Un TC ya pactado en la solicitud manda sobre la propuesta de la tabla.
+    if (termFx != null && Number(termFx) > 0) {
+      setFxRate(Number(termFx));
+      setFxFrom("pactado");
+    }
     if (!d.request.quote_id) {
       setDraft({
         partnerId: String(d.request.partner_id),
@@ -187,13 +197,23 @@ function Page() {
       .catch(() => undefined);
     void getSettings()
       .then((s) => {
-        const latest = s.tiie[0];
-        setTiiePct(Number(((latest ? Number(latest.rate) : s.defaultTiie) * 100).toFixed(2)));
+        setSettingsError(null);
+        const hoy = todayMx();
+        // TIIE: renglón más reciente de la tabla a la fecha de hoy. Sin renglón
+        // no hay TIIE (y no se cotiza a crédito); nunca un número de respaldo.
+        const tiie = nearestRate(s.tiie.map((r) => ({ date: r.date, rate: Number(r.rate) })), hoy);
+        setTiiePct(tiie ? Number((tiie.rate * 100).toFixed(2)) : 0);
+        setTiieFrom(tiie?.date ?? null);
         // El spread del precio es el de ASR (spread de costo), no el de mora.
         setSpreadPct(Number((s.asrSpread * 100).toFixed(2)));
         setCommissionPct(Number((s.asrCommission * 100).toFixed(2)));
+        // TC propuesto: el más reciente de la tabla, salvo que la solicitud ya
+        // traiga uno pactado.
+        const fx = nearestRate(s.fx.map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), hoy);
+        setFxFrom((prev) => (prev === "pactado" ? prev : fx?.date ?? null));
+        setFxRate((prev) => (prev > 0 ? prev : fx?.rate ?? 0));
       })
-      .catch(() => undefined);
+      .catch((e: unknown) => setSettingsError(humanError(e)));
   }, [id]);
 
   const rate = annualRate(tiiePct / 100, spreadPct / 100);
@@ -632,14 +652,18 @@ function Page() {
             </select>
           </HeadBox>
           {currency === "USD" ? (
-            <HeadBox label="TC">
+            <HeadBox label={fxFrom === "pactado" ? "TC (pactado)" : fxFrom ? `TC (tabla ${fxFrom})` : "TC (sin tabla)"}>
               <MoneyField
                 className="w-full border-0 bg-transparent px-0"
                 value={fxRate}
                 disabled={locked}
-                onChange={setFxRate}
+                onChange={(n) => {
+                  setFxRate(n);
+                  setFxFrom("pactado");
+                }}
                 onCommit={(n) => saveTerms({ fxRate: n })}
               />
+              {!fxFrom ? <p className="text-[11px] text-danger">Sin tipo de cambio en la tabla: captúralo en Ajustes o escribe el pactado.</p> : null}
             </HeadBox>
           ) : null}
           <HeadBox label="Plazo días">
@@ -651,19 +675,21 @@ function Page() {
               onCommit={(n) => saveTerms({ creditDays: Math.max(0, Math.floor(n)) })}
             />
           </HeadBox>
-          <HeadBox label="TIIE %">
-            <QtyField className="w-full border-0 bg-transparent px-0" value={tiiePct} disabled={locked} onChange={setTiiePct} />
+          <HeadBox label={tiieFrom ? `TIIE % (tabla ${tiieFrom})` : "TIIE % (sin tabla)"}>
+            <p className="text-sm tabular-nums">{tiieFrom ? tiiePct.toFixed(2) : "—"}</p>
           </HeadBox>
-          <HeadBox label="Spread ASR %">
+          <HeadBox label="Spread ASR % (Ajustes)">
             <QtyField className="w-full border-0 bg-transparent px-0" value={spreadPct} disabled={locked} onChange={setSpreadPct} />
           </HeadBox>
-          <HeadBox label="Comisión ASR %">
-            <QtyField className="w-full border-0 bg-transparent px-0" value={commissionPct} disabled={locked} onChange={setCommissionPct} />
+          <HeadBox label="Comisión ASR % (Ajustes)">
+            <p className="text-sm tabular-nums">{commissionPct.toFixed(2)}</p>
           </HeadBox>
         </div>
+        {settingsError ? <p className="mb-3 text-[12px] text-danger">Ajustes no disponibles: {settingsError}</p> : null}
+        {!tiieFrom && days > 0 && !settingsError ? <p className="mb-3 text-[12px] text-danger">{missingRateMessage(todayMx(), "cotización a crédito")}</p> : null}
         <p className="mb-3 text-[13px] text-muted">
           Financiamiento por unidad (solo en el precio a crédito): costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × {(1 + commissionPct / 100).toFixed(2)} × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × {days} d / 360.
-          {days === 0 ? " Con 0 días solo se ofrece contado." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El 9% de mora NO va aquí: es factura de intereses al vencimiento.
+          {days === 0 ? " Con 0 días solo se ofrece contado." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El spread de mora NO va aquí: es factura de intereses al vencimiento.
         </p>
         <div className="overflow-x-auto erp-card">
           <table className="w-full min-w-[1180px] text-left text-[13px]">
@@ -793,7 +819,13 @@ function Page() {
           <button
             type="button"
             className="erp-btn-primary"
-            disabled={busy || lines.some((l) => num(l.cost) <= 0 || !marginOf(l, "cash") || (days > 0 && !marginOf(l, "credit")))}
+            disabled={
+              busy ||
+              Boolean(settingsError) ||
+              (days > 0 && !tiieFrom) ||
+              (currency === "USD" && !(fxRate > 0)) ||
+              lines.some((l) => num(l.cost) <= 0 || !marginOf(l, "cash") || (days > 0 && !marginOf(l, "credit")))
+            }
             onClick={async () => {
               setBusy(true);
               setError(null);

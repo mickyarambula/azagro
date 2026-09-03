@@ -443,7 +443,11 @@ function Ficha() {
             <PnlKpi
               label="Costo financiero"
               value={money(pnl.finance)}
-              hint={`Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% + spread. Comisión y Capa 1 van cobradas al cliente dentro del precio.`}
+              hint={
+                pnl.tiieIssue == null
+                  ? `Sin TIIE en la tabla para la emisión (${pnl.tiieDate ?? "sin fecha"}): el costo financiero no se calcula ni se estima.`
+                  : `Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% (tabla${pnl.tiieDate ? `, ${dateDMY(pnl.tiieDate)}` : ""}) + spread. Comisión y Capa 1 van cobradas al cliente dentro del precio.`
+              }
             />
             <PnlKpi
               label="Utilidad final"
@@ -451,6 +455,11 @@ function Ficha() {
               hint={`${pnl.netProfitPct.toFixed(1)}% · ≈ el margen elegido: el financiamiento cobrado en el precio se netea contra el pagado. Solo restan de verdad la Capa 2 y el pronto pago; la mora suma.`}
             />
           </div>
+          {pnl.excluded.n > 0 && (
+            <p className="mt-2 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+              {pnl.excluded.n} partida(s) fuera del cálculo de utilidad (venta {money(pnl.excluded.venta)}): {pnl.excluded.motivos.join("; ")}. No se les inventa costo ni tasa; los totales de arriba solo suman las partidas con dato.
+            </p>
+          )}
           {(pnl.mora > 0 || pnl.discount > 0 || pnl.fxIncome !== 0) && (
             <p className="mt-2 text-[12px] text-muted">
               {pnl.mora > 0 ? `Mora facturada: ${money(pnl.mora)} (entra como ingreso). ` : ""}
@@ -473,19 +482,19 @@ function Ficha() {
               </thead>
               <tbody>
                 {pnl.lines.map((l) => (
-                  <tr key={l.productId} className="border-t border-line">
+                  <tr key={l.productId} className={`border-t border-line ${l.excluded ? "text-warn" : ""}`}>
                     <td className="px-3 py-2">
                       <span className="font-medium">{l.name}</span>
                       <span className="ml-2 font-mono text-[11px] text-muted">{l.code}</span>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{l.qty} {l.uom}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{money(l.sale)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{money(l.costUnit)}</td>
-                    <td className="px-3 py-2 text-muted">{l.costSource}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{money(l.freight)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{l.excluded ? "—" : money(l.costUnit)}</td>
+                    <td className="px-3 py-2 text-muted">{l.excluded ? `excluida: ${l.excludeReason}` : l.costSource}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{l.excluded ? "—" : money(l.freight)}</td>
                     <td className="px-3 py-2 text-right tabular-nums">
-                      {money(l.margin)}
-                      <span className="ml-1 text-[11px] text-muted">{l.marginPct.toFixed(1)}%</span>
+                      {l.excluded ? "—" : money(l.margin)}
+                      {l.excluded ? null : <span className="ml-1 text-[11px] text-muted">{l.marginPct.toFixed(1)}%</span>}
                     </td>
                   </tr>
                 ))}

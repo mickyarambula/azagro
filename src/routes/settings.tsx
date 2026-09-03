@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Field, PageHead, Panel } from "@/components/erp";
 import { useAccess } from "@/lib/access";
-import { getSettings, saveFx, saveSettings, saveTiie } from "@/lib/erp/ops";
+import { getSettingsForm, POLICY_FIELDS, saveFx, saveSettings, saveTiie, type PolicyField } from "@/lib/erp/ops";
 import { BUSINESS_RULES, YEAR_DAYS } from "@/lib/erp/rules";
 import { dbStatus, exportBackup } from "@/lib/erp/cutover";
 import { applyTheme, readThemePref, type ThemePref } from "@/lib/theme";
@@ -22,17 +22,13 @@ function Page() {
 function SettingsBody() {
   const { can, role } = useAccess();
   const editable = can("settings", "edit");
+  // Los números de negocio (plazos, spreads, comisiones, umbral) NO tienen
+  // valor inicial aquí: nacen vacíos y se leen de la base. Un renglón sin
+  // capturar se muestra como pendiente y el resto del sistema se detiene
+  // hasta que alguien lo escriba. Nunca un número de respaldo en el código.
   const [form, setForm] = useState({
-    legalName: "AZ INSUMOS AGRICOLAS SA DE CV",
+    legalName: "",
     rfc: "",
-    creditDays: 150,
-    invoiceDays: 120,
-    fegaRate: 0.0304,
-    collectionSpread: 0.09,
-    defaultTiie: 0.0706,
-    asrCommission: 0.01,
-    asrSpread: 0.04,
-    earlyPayDays: 120,
     emailFrom: "",
     phone: "",
     alertDaysCxc: 7,
@@ -42,29 +38,35 @@ function SettingsBody() {
     resendKey: "",
     mailReady: false,
   });
+  const [policy, setPolicy] = useState<Record<PolicyField, number | null>>({
+    creditDays: null,
+    invoiceDays: null,
+    fegaRate: null,
+    fegaCommission: null,
+    collectionSpread: null,
+    asrCommission: null,
+    asrSpread: null,
+    earlyPayDays: null,
+  });
+  const [missing, setMissing] = useState<string[]>([]);
   const [tiie, setTiie] = useState<Array<{ date: string; rate: string }>>([]);
   const [fx, setFx] = useState<Array<{ date: string; usd_mxn: string }>>([]);
   const [tDate, setTDate] = useState(() => todayMx());
-  const [tRate, setTRate] = useState(0.0706);
+  const [tRate, setTRate] = useState<number | null>(null);
   const [fDate, setFDate] = useState(() => todayMx());
-  const [fRate, setFRate] = useState(18);
+  const [fRate, setFRate] = useState<number | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<ThemePref>("system");
   const [dbLabel, setDbLabel] = useState("");
 
   async function load() {
-    const s = await getSettings();
+    // Lectura tolerante: esta es la única pantalla que puede abrirse con
+    // Ajustes incompletos, precisamente para completarlos.
+    const s = await getSettingsForm();
     setForm({
       legalName: s.legalName,
       rfc: s.rfc,
-      creditDays: s.creditDays,
-      invoiceDays: s.invoiceDays,
-      fegaRate: s.fegaRate,
-      collectionSpread: s.collectionSpread,
-      defaultTiie: s.defaultTiie,
-      asrCommission: s.asrCommission,
-      asrSpread: s.asrSpread,
-      earlyPayDays: s.earlyPayDays ?? 120,
       emailFrom: s.emailFrom,
       phone: s.phone,
       alertDaysCxc: s.alertDaysCxc ?? 7,
@@ -74,11 +76,24 @@ function SettingsBody() {
       resendKey: "",
       mailReady: s.mailReady ?? false,
     });
+    setPolicy(s.values);
+    setMissing(s.missing);
     setTiie(s.tiie);
     setFx(s.fx);
   }
+  const setNum = (k: PolicyField, raw: string) => setPolicy({ ...policy, [k]: raw.trim() === "" ? null : Number(raw) });
+  const numInput = (k: PolicyField, step?: string) => (
+    <input
+      className="erp-input"
+      type="number"
+      step={step}
+      value={policy[k] ?? ""}
+      placeholder="sin capturar"
+      onChange={(e) => setNum(k, e.target.value)}
+    />
+  );
   useEffect(() => {
-    void load();
+    void load().catch((e) => setError(e instanceof Error ? e.message : "No se pudieron leer los Ajustes"));
     setTheme(readThemePref());
     void dbStatus()
       .then((d) => setDbLabel(d.label))
@@ -87,11 +102,23 @@ function SettingsBody() {
 
   async function onSave(e: FormEvent) {
     e.preventDefault();
+    setError(null);
+    setMsg(null);
+    const faltan = POLICY_FIELDS.filter(([k]) => policy[k] == null).map(([, label]) => label);
+    if (faltan.length) {
+      setError(`Falta capturar: ${faltan.join(", ")}. Sin esos números el sistema no opera.`);
+      return;
+    }
     const { mailReady: _ready, ...rest } = form;
-    await saveSettings({ data: rest });
-    setMsg("Política guardada");
-    await load();
+    try {
+      await saveSettings({ data: { ...rest, ...(policy as Record<PolicyField, number>) } });
+      setMsg("Política guardada");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo guardar");
+    }
   }
+  const pct = (v: number | null, d = 2) => (v == null ? "—" : (v * 100).toFixed(d) + "%");
 
   return (
     <>
@@ -100,6 +127,12 @@ function SettingsBody() {
         hint="Reglas de crédito, TIIE, tipo de cambio y circuito ASR. Los días se cuentan calendario exacto; el interés usa año comercial 360."
       />
       {msg && <p className="mb-3 text-sm text-ok">{msg}</p>}
+      {error && <p className="mb-3 text-sm text-danger">{error}</p>}
+      {missing.length > 0 && (
+        <p className="mb-3 rounded-md border border-danger bg-cream px-3 py-2 text-sm text-danger">
+          Ajustes incompletos: falta {missing.join(", ")}. Cotizar, facturar, cobrar y el estado de cuenta se detienen hasta que se capturen abajo.
+        </p>
+      )}
       {dbLabel && (
         <Panel className="mb-4">
           <h2 className="text-sm font-semibold">Base de datos</h2>
@@ -249,33 +282,17 @@ function SettingsBody() {
             Mostrar barra y permitir envío
           </label>
         </Field>
-        <Field label="Plazo factura (días) — vencimiento visible al cliente">
-          <input className="erp-input" type="number" value={form.invoiceDays} onChange={(e) => setForm({ ...form, invoiceDays: Number(e.target.value) })} />
-        </Field>
-        <Field label="Plazo financiero / mora (días) — aquí arranca el interés">
-          <input className="erp-input" type="number" value={form.creditDays} onChange={(e) => setForm({ ...form, creditDays: Number(e.target.value) })} />
-        </Field>
-        <Field label="Umbral pronto pago (días)">
-          <input className="erp-input" type="number" value={form.earlyPayDays} onChange={(e) => setForm({ ...form, earlyPayDays: Number(e.target.value) })} />
-        </Field>
-        <Field label="FEGA + comisión (única vez)">
-          <input className="erp-input" type="number" step="0.0001" value={form.fegaRate} onChange={(e) => setForm({ ...form, fegaRate: Number(e.target.value) })} />
-        </Field>
-        <Field label="Spread mora (factura de intereses, %)">
-          <input className="erp-input" type="number" step="0.0001" value={form.collectionSpread} onChange={(e) => setForm({ ...form, collectionSpread: Number(e.target.value) })} />
-        </Field>
-        <Field label="TIIE por omisión">
-          <input className="erp-input" type="number" step="0.0001" value={form.defaultTiie} onChange={(e) => setForm({ ...form, defaultTiie: Number(e.target.value) })} />
-        </Field>
-        <Field label="Comisión ASR (en precio, una sola vez)">
-          <input className="erp-input" type="number" step="0.0001" value={form.asrCommission} onChange={(e) => setForm({ ...form, asrCommission: Number(e.target.value) })} />
-        </Field>
-        <Field label="Spread ASR (en precio, TIIE + )">
-          <input className="erp-input" type="number" step="0.0001" value={form.asrSpread} onChange={(e) => setForm({ ...form, asrSpread: Number(e.target.value) })} />
-        </Field>
+        <Field label="Plazo factura (días) — vencimiento visible al cliente">{numInput("invoiceDays")}</Field>
+        <Field label="Plazo financiero / mora (días) — aquí arranca el interés">{numInput("creditDays")}</Field>
+        <Field label="Umbral pronto pago (días)">{numInput("earlyPayDays")}</Field>
+        <Field label="Comisión + FEGA (única vez, fracción)">{numInput("fegaRate", "0.0001")}</Field>
+        <Field label="Comisión dentro de «comisión + FEGA» (fracción)">{numInput("fegaCommission", "0.0001")}</Field>
+        <Field label="Spread mora (factura de intereses, fracción)">{numInput("collectionSpread", "0.0001")}</Field>
+        <Field label="Comisión ASR (en precio, una sola vez, fracción)">{numInput("asrCommission", "0.0001")}</Field>
+        <Field label="Spread ASR (en precio, TIIE +, fracción)">{numInput("asrSpread", "0.0001")}</Field>
         <p className="md:col-span-3 text-sm text-muted">
-          Financiamiento dentro del precio de venta (por unidad) = costo × {((form.asrCommission || 0) * 100).toFixed(2)}% + costo × {(1 + (form.asrCommission || 0)).toFixed(2)} × (TIIE + {((form.asrSpread || 0) * 100).toFixed(2)}%) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días, y además genera interés porque la línea adelanta costo + comisión. De contado (0 días) el financiamiento es $0, comisión incluida.
-          Mora (solo factura FI si ya venció) = Cargo × (TIIE + {((form.collectionSpread || 0) * 100).toFixed(1)}%) × días exactos / {YEAR_DAYS}. En el estado de cuenta, Comisión 1% + FEGA 2.04% = 3.04% sobre el cargo (columna «Comisión + FEGA»); no se mete al precio del producto.
+          La TIIE no se captura aquí: siempre sale de la tabla de abajo (renglón vigente en la fecha que toque, con su fecha a la vista). Financiamiento dentro del precio de venta (por unidad) = costo × {pct(policy.asrCommission)} + costo × {policy.asrCommission == null ? "—" : (1 + policy.asrCommission).toFixed(2)} × (TIIE + {pct(policy.asrSpread)}) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días, y además genera interés porque la línea adelanta costo + comisión. De contado (0 días) el financiamiento es $0, comisión incluida.
+          Mora (solo factura FI si ya venció) = Cargo × (TIIE + {pct(policy.collectionSpread, 1)}) × días exactos / {YEAR_DAYS}. En el estado de cuenta, comisión {pct(policy.fegaCommission)} + FEGA {policy.fegaRate == null || policy.fegaCommission == null ? "—" : ((policy.fegaRate - policy.fegaCommission) * 100).toFixed(2) + "%"} = {pct(policy.fegaRate)} sobre el cargo (columna «Comisión + FEGA»); no se mete al precio del producto.
         </p>
         {editable && <button className="erp-btn-primary">Guardar política</button>}
       </form>
@@ -286,11 +303,19 @@ function SettingsBody() {
           {role === "admin" ? (
             <div className="mt-3 flex flex-wrap gap-2">
               <input className="erp-input" type="date" value={tDate} onChange={(e) => setTDate(e.target.value)} />
-              <input className="erp-input w-28" type="number" step="0.0001" value={tRate} onChange={(e) => setTRate(Number(e.target.value))} />
+              <input
+                className="erp-input w-28"
+                type="number"
+                step="0.0001"
+                placeholder="fracción"
+                value={tRate ?? ""}
+                onChange={(e) => setTRate(e.target.value.trim() === "" ? null : Number(e.target.value))}
+              />
               <button
                 type="button"
                 className="erp-btn"
-                onClick={() => saveTiie({ data: { date: tDate, rate: tRate } }).then(load)}
+                disabled={tRate == null}
+                onClick={() => (tRate == null ? undefined : saveTiie({ data: { date: tDate, rate: tRate } }).then(load).catch((e) => setError(e instanceof Error ? e.message : "Error")))}
               >
                 Agregar
               </button>
@@ -312,8 +337,20 @@ function SettingsBody() {
           {role === "admin" ? (
             <div className="mt-3 flex flex-wrap gap-2">
               <input className="erp-input" type="date" value={fDate} onChange={(e) => setFDate(e.target.value)} />
-              <input className="erp-input w-28" type="number" step="0.0001" value={fRate} onChange={(e) => setFRate(Number(e.target.value))} />
-              <button type="button" className="erp-btn" onClick={() => saveFx({ data: { date: fDate, usdMxn: fRate } }).then(load)}>
+              <input
+                className="erp-input w-28"
+                type="number"
+                step="0.0001"
+                placeholder="MXN por USD"
+                value={fRate ?? ""}
+                onChange={(e) => setFRate(e.target.value.trim() === "" ? null : Number(e.target.value))}
+              />
+              <button
+                type="button"
+                className="erp-btn"
+                disabled={fRate == null}
+                onClick={() => (fRate == null ? undefined : saveFx({ data: { date: fDate, usdMxn: fRate } }).then(load).catch((e) => setError(e instanceof Error ? e.message : "Error")))}
+              >
                 Agregar
               </button>
             </div>

@@ -255,16 +255,21 @@ test("cableado: el 4.5% (spread de línea) ya no existe en Ajustes, política ni
   assert.ok(!settings.includes("Costo de línea en cotización"), "el texto de ayuda viejo se quitó");
   assert.ok(settings.includes("Financiamiento dentro del precio de venta (por unidad) = costo ×"), "el texto de ayuda describe la fórmula real");
   assert.ok(settings.includes("De contado (0 días) el financiamiento es $0, comisión incluida."), "y aclara el contado");
-  // El 3.04% del estado de cuenta sigue intacto y separado del precio.
-  assert.ok(settings.includes("Comisión 1% + FEGA 2.04% = 3.04% sobre el cargo"), "FEGA + comisión del estado de cuenta no se tocó");
+  // Comisión + FEGA del estado de cuenta: sigue separado del precio, pero ya
+  // no está escrito en la pantalla: se muestra lo que dice Ajustes.
+  assert.ok(!settings.includes("Comisión 1% + FEGA 2.04% = 3.04%"), "el 3.04% no va escrito en la pantalla");
+  assert.ok(settings.includes("pct(policy.fegaCommission)"), "la comisión se muestra desde Ajustes");
+  assert.ok(settings.includes("pct(policy.fegaRate)"), "comisión + FEGA se muestra desde Ajustes");
   const rules = src("src/lib/erp/rules.ts");
-  assert.ok(rules.includes("Comisión 1% + FEGA 2.04% = 3.04% una sola vez sobre el cargo"), "regla de mora intacta");
+  assert.ok(rules.includes("Comisión + FEGA (Ajustes) una sola vez sobre el cargo"), "regla de mora: comisión + FEGA una sola vez, leída de Ajustes");
 });
 
 test("cableado: el servidor calcula el financiamiento con el costo real ANTES de escondérselo a ventas", () => {
   const ops = src("src/lib/erp/ops.ts");
   const fn = ops.slice(ops.indexOf("export const listQuotes"), ops.indexOf("export const createQuote"));
-  assert.ok(fn.includes("financeBase({ cost, tiie: pol.defaultTiie, costSpread: pol.asrSpread, commissionRate: pol.asrCommission })"), "la base sale del costo resuelto y de Ajustes");
+  assert.ok(fn.includes("financeBase({ cost, tiie: tiieToday.rate, costSpread: pol.asrSpread, commissionRate: pol.asrCommission })"), "la base sale del costo resuelto, la TIIE de la tabla (hoy) y el spread/comisión de Ajustes");
+  assert.ok(fn.includes("const tiieToday = nearestRate(await tiieTableOf(sql, cid), todayMx());"), "la TIIE es el renglón vigente de la tabla, con fecha");
+  assert.ok(fn.includes("fin: tiieToday ? financeBase(") && fn.includes(": null"), "sin renglón de TIIE no hay base de financiamiento (null), no un número");
   assert.ok(fn.includes("resolveCost({ avgCost: row.cost, refCost: row.ref_cost })"), "y el costo sale del orden único (kardex → referencia)");
   assert.ok(fn.indexOf("const pricedProducts") < fn.indexOf("if (!canSeeCosts(me.role))"), "primero se calcula, después se esconde el costo");
   assert.ok(fn.includes("pricedLines.map((l) => ({ ...l, cost: \"0\", ref_cost: \"0\", freight: \"0\" }))"), "a ventas se le esconde costo y flete, no el precio");

@@ -58,9 +58,9 @@ function rowCells(r: Row, cur: string, withFx: boolean) {
     moneyIn(r.saldo ?? r.residual, cur),
     r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
     String(r.daysVencidos ?? r.daysOverdue ?? 0),
-    Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
-    r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
-    Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
+    r.sinTiie ? "sin TIIE" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
+    r.sinTiie ? "sin TIIE" : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
+    r.sinTiie ? "sin TIIE" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
   ];
   if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, cur) : "—");
   return cells;
@@ -94,16 +94,18 @@ function totalsCells(rows: Row[], cur: string, withFx: boolean) {
   return cells;
 }
 
+// Las tasas del encabezado salen de Ajustes tal cual llegan en el estado de
+// cuenta; sin estado de cuenta se muestran guiones, nunca un número de
+// respaldo. La TIIE no es una sola: cada renglón usa la de su vencimiento
+// (tabla), por eso la tasa anual se describe y no se suma aquí.
 function ratesOf(st: Live | null) {
-  const annual = (st?.policy.defaultTiie ?? 0) + (st?.policy.collectionSpread ?? 0.09);
-  const commission = st?.policy.commissionRate ?? 0.01;
-  const fega = st?.policy.fegaOnlyRate ?? 0.0204;
-  const bundle = st?.policy.fegaBundle ?? st?.policy.fegaRate ?? 0.0304;
+  if (!st) return { commission: "—", annual: "—", fega: "—", total: "—" };
+  const p = st.policy;
   return {
-    commission: pctRate(commission),
-    annual: pctRate(annual),
-    fega: pctRate(fega),
-    total: pctRate(bundle),
+    commission: pctRate(p.commissionRate),
+    annual: `TIIE al vencimiento + ${pctRate(p.collectionSpread)}`,
+    fega: pctRate(p.fegaOnlyRate),
+    total: pctRate(p.fegaBundle),
   };
 }
 
@@ -136,7 +138,7 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       sections,
       notes: [
         "Compaq solo trae cargo, abono y saldo. Este papel le agrega plazo, fecha de pago, días, interés, comisión y FEGA — igual que el Excel de cartera.",
-        "Interés = Cargo × (TIIE al vencimiento + 9%) × días vencidos / 360. Días negativos = pronto pago.",
+        `Interés = Cargo × (${ratesOf(st).annual}) × días vencidos / 360. Días negativos = pronto pago. Sin renglón de TIIE en la tabla el interés queda sin calcular y se marca.`,
         `Comisión ${ratesOf(st).commission} + FEGA ${ratesOf(st).fega} = ${ratesOf(st).total} sobre el cargo, una sola vez, factura FI.`,
         "Saldo = cargo − abonos. No se mezcla con intereses. Ut. cambiaria = USD × (TC pactado − TC pagado).",
       ].join("\n"),
@@ -378,7 +380,7 @@ function Page() {
       </div>
 
       <p className="mb-3 text-[12px] text-muted">
-        Encabezado del papel: Comisión {rates.commission} · Tasa anual {rates.annual} (TIIE + 9%) · FEGA {rates.fega} · Total {rates.total}.
+        Encabezado del papel: Comisión {rates.commission} · Tasa anual {rates.annual} · FEGA {rates.fega} · Total {rates.total}.
         La tasa de cada factura usa la TIIE de su vencimiento.
       </p>
 
@@ -541,8 +543,13 @@ function StatementView({
           </div>
         </header>
         <p className="mt-3 text-[12px] text-muted">
-          Compaq no trae plazo, pago, mora ni FEGA. Aquí sí: interés = cargo × (TIIE al vencimiento + 9%) × días / 360 (con signo). Toca el interés para ver el desglose.
+          Compaq no trae plazo, pago, mora ni FEGA. Aquí sí: interés = cargo × ({rates.annual}) × días / 360 (con signo). Toca el interés para ver el desglose.
         </p>
+        {rows.some((r) => r.sinTiie) ? (
+          <p className="mt-2 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+            {rows.filter((r) => r.sinTiie).length} documento(s) sin TIIE en la tabla para su vencimiento: interés y comisión/FEGA sin calcular (no se estiman). Captura la TIIE en Ajustes → Tabla TIIE.
+          </p>
+        ) : null}
         {currencies.map((cur) => {
           const set = rows.filter((r) => (r.currency || "MXN") === cur);
           const withFx = cur === "USD";

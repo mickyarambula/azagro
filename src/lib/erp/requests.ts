@@ -4,7 +4,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { activeMember, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
-import { addDays } from "@/lib/erp/credit";
+import { addDays, missingRateMessage } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
 import { policy } from "@/lib/erp/ops";
@@ -796,10 +796,10 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     z.object({
       requestId: z.number(),
       currency: z.enum(["MXN", "USD"]),
-      fxRate: z.number(),
-      tiie: z.number(),
-      spread: z.number(),
-      creditDays: z.number(),
+      fxRate: z.number().nonnegative(),
+      tiie: z.number().nonnegative(),
+      spread: z.number().nonnegative(),
+      creditDays: z.number().int().nonnegative(),
       send: z.boolean().optional().default(true),
     }),
   )
@@ -807,6 +807,12 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     const sql = await getSql();
     await assertCan(sql, context.userId, "quotes", "edit");
     const companyId = await cid(sql, context.userId);
+    // Nunca se inventa un número: en dólares hace falta tipo de cambio y a
+    // crédito hace falta la TIIE de la tabla (la pantalla la propone con fecha).
+    if (data.currency === "USD" && !(data.fxRate > 0)) {
+      throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de cotizar en dólares.");
+    }
+    if (data.creditDays > 0 && !(data.tiie > 0)) throw new Error(missingRateMessage(todayMx(), "cotización a crédito"));
     const req = await sql<{ id: number; name: string; partner_id: number; delivery_to: string; delivery_mode: string; quote_id: number | null }>`
       select id, name, partner_id, delivery_to, delivery_mode, quote_id from customer_requests
       where id = ${data.requestId} and company_id = ${companyId}

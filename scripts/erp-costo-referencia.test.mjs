@@ -126,7 +126,7 @@ test("cableado: el candado corre en el servidor al crear y al revisar cotizacion
   const ops = src("src/lib/erp/ops.ts");
   const crear = ops.slice(ops.indexOf("export const createQuote"), ops.indexOf("export const reviseQuote"));
   assert.ok(crear.includes("await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazo)"), "candado al crear");
-  assert.ok(crear.includes('const plazo = (data.priceOffer ?? "both") === "cash" ? 0 : (data.creditDays ?? 0)'), "de contado no aplica");
+  assert.ok(crear.includes('const plazo = (data.priceOffer ?? "both") === "cash" ? 0 : data.creditDays'), "de contado no aplica");
   assert.ok(crear.indexOf("assertCostForCredit") < crear.indexOf("insert into quotes"), "se valida antes de escribir");
   const revisar = ops.slice(ops.indexOf("export const reviseQuote"), ops.indexOf("export const decideQuote"));
   assert.ok(revisar.includes("await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev)"), "candado al revisar");
