@@ -109,10 +109,13 @@ function Page() {
   const [deliveryTo, setDeliveryTo] = useState("");
   const [lines, setLines] = useState<Line[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [viewId, setViewId] = useState<number | null>(null);
   const [take, setTake] = useState<Record<number, number>>({});
   const [revPrices, setRevPrices] = useState<Record<number, { cash: number; credit: number; qty: number }>>({});
+  /** Partidas que se están agregando a la cotización abierta (punto C3): entran al guardar la revisión. */
+  const [addLines, setAddLines] = useState<Array<{ productId: number; qty: number }>>([]);
   const [locationId, setLocationId] = useState(0);
   const [fulfillKind, setFulfillKind] = useState<"inventory" | "direct">("inventory");
 
@@ -148,6 +151,7 @@ function Page() {
   /** Abre (o cierra) el panel de un folio y deja listos los precios/cantidades para revisar o aceptar. */
   function openQuote(id: number | null, qlines: NonNullable<typeof data>["lines"]) {
     setViewId(id);
+    setAddLines([]);
     if (!id) return;
     const next: Record<number, number> = {};
     const prices: Record<number, { cash: number; credit: number; qty: number }> = {};
@@ -294,6 +298,7 @@ function Page() {
     <AppShell>
       <OpsPipeline current="cotizar" />
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}
+      {msg && <p className="mb-3 text-sm text-ok">{msg}</p>}
 
       <p className="mb-3 text-sm text-muted">
         Lo normal: <Link to="/solicitudes" className="font-semibold text-accent">Solicitud → proveedores → cotización</Link>. Se puede mandar precio de contado, a crédito, o ambos. Si el cliente pide otro precio, se renegocia (Rev. 2, 3…).
@@ -494,6 +499,11 @@ function Page() {
               const qlines = (data.lines ?? []).filter((l) => l.quote_id === qrow.id);
               const open = viewId === qrow.id;
               const closed = qrow.state === "accepted" || qrow.state === "rejected" || qrow.state === "partial";
+              // Aceptada pero con el pedido todavía en borrador: se puede
+              // revisar (es donde se agrega una partida a ese pedido). Con el
+              // pedido confirmado, no: se levanta un pedido nuevo.
+              const borrador = Boolean(qrow.order_id) && qrow.order_state === "draft";
+              const revisable = qrow.state !== "rejected" && (!closed || borrador);
               const cur = qrow.currency;
               const both = (qrow.price_offer || "both") === "both";
               const expired = !closed && qrow.valid_until < todayMx();
@@ -652,12 +662,12 @@ function Page() {
                                     )}
                                   </td>
                                   {both || qrow.price_offer === "cash" ? (
-                                    <OfferCells price={rp.cash} landed={landed} fin={0} cur={cur} editable={!closed} onPrice={(p) => setPrice("cash", p)} />
+                                    <OfferCells price={rp.cash} landed={landed} fin={0} cur={cur} editable={revisable} onPrice={(p) => setPrice("cash", p)} />
                                   ) : null}
                                   {both || qrow.price_offer === "credit" ? (
                                     <>
                                       <td className="py-1.5 text-right tabular-nums text-muted">{fin > 0.009 ? moneyIn(fin, cur) : "—"}</td>
-                                      <OfferCells price={rp.credit} landed={landed} fin={fin} cur={cur} editable={!closed} onPrice={(p) => setPrice("credit", p)} />
+                                      <OfferCells price={rp.credit} landed={landed} fin={fin} cur={cur} editable={revisable} onPrice={(p) => setPrice("credit", p)} />
                                     </>
                                   ) : null}
                                   <td className="py-1.5 text-right tabular-nums">
@@ -676,9 +686,83 @@ function Page() {
                                 </tr>
                               );
                             })}
+                            {/* Partidas que se están agregando: el costo, el margen y el financiamiento
+                                los resuelve el servidor al guardar la revisión, así que aquí solo se
+                                captura el precio (el de crédito se arma con la base que mandó el servidor). */}
+                            {open
+                              ? addLines.map((al, i) => {
+                                  const prod = data.products.find((p) => p.id === al.productId);
+                                  const rp = revPrices[al.productId] ?? { cash: 0, credit: 0, qty: al.qty };
+                                  const setPrice = (which: "cash" | "credit", p: number) =>
+                                    setRevPrices((prev) => {
+                                      const base = { ...(prev[al.productId] ?? rp), [which]: p };
+                                      const credit =
+                                        which === "cash" && prod ? creditFromCash({ cash: p, fin: prod.fin, days: qrow.credit_days }) : base.credit;
+                                      return { ...prev, [al.productId]: { ...base, credit, qty: al.qty } };
+                                    });
+                                  return (
+                                    <tr key={`add-${i}`} className="border-t border-line/60 bg-brand-soft/40">
+                                      <td className="py-1.5">
+                                        <div className="flex items-center gap-2">
+                                          <SearchSelect
+                                            value={al.productId ? String(al.productId) : ""}
+                                            options={asOpts(data.products, (p) => p.id, (p) => `${p.code} — ${p.name}`)}
+                                            onChange={(v) => setAddLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: Number(v) } : x)))}
+                                            placeholder="Producto…"
+                                          />
+                                          <button
+                                            type="button"
+                                            className="erp-btn h-8 px-2 text-[12px]"
+                                            onClick={() => setAddLines((ls) => ls.filter((_, j) => j !== i))}
+                                          >
+                                            <Trash2 className="size-3.5" />
+                                          </button>
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 text-right">
+                                        <QtyField
+                                          className="w-20"
+                                          value={al.qty}
+                                          onChange={(n) => setAddLines((ls) => ls.map((x, j) => (j === i ? { ...x, qty: n } : x)))}
+                                        />
+                                      </td>
+                                      <td className="py-1.5 text-right text-[12px] text-muted">al guardar</td>
+                                      {both || qrow.price_offer === "cash" ? (
+                                        <OfferCells price={rp.cash} landed={0} fin={0} cur={cur} editable onPrice={(p) => setPrice("cash", p)} />
+                                      ) : null}
+                                      {both || qrow.price_offer === "credit" ? (
+                                        <>
+                                          <td className="py-1.5 text-right text-[12px] text-muted">al guardar</td>
+                                          <OfferCells price={rp.credit} landed={0} fin={0} cur={cur} editable onPrice={(p) => setPrice("credit", p)} />
+                                        </>
+                                      ) : null}
+                                      <td className="py-1.5 text-right tabular-nums">
+                                        {moneyIn(al.qty * (qrow.price_offer === "credit" ? rp.credit : rp.cash), cur)}
+                                      </td>
+                                      <td className="py-1.5 text-right text-[12px] text-muted">—</td>
+                                    </tr>
+                                  );
+                                })
+                              : null}
                           </tbody>
                         </table>
                       </div>
+                      {revisable ? (
+                        <div className="mb-4 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className="erp-btn h-8 text-[12px]"
+                            onClick={() => setAddLines((ls) => [...ls, { productId: data.products[0]?.id ?? 0, qty: 1 }])}
+                          >
+                            <Plus className="mr-1 inline size-3.5" />
+                            Agregar partida
+                          </button>
+                          <span className="text-[12px] text-muted">
+                            Entra al guardar la revisión: ahí pasa por costo, margen y financiamiento
+                            {borrador && qrow.order_name ? `, y ${qrow.order_name} se actualiza solo` : ""}.
+                          </span>
+                        </div>
+                      ) : null}
                       {(() => {
                         // Aviso, no candado: se puede guardar con utilidad negativa, pero que se vea.
                         const rojas = qlines
@@ -699,46 +783,62 @@ function Page() {
                           </p>
                         ) : null;
                       })()}
-                      {!closed && (() => {
+                      {revisable && (() => {
                         const priceDirty = qlines.some((l) => {
                           const rp = revPrices[l.product_id];
                           if (!rp) return false;
                           return Math.abs(rp.cash - Number(l.cash_price)) > 0.009 || Math.abs(rp.credit - Number(l.credit_price)) > 0.009;
                         });
+                        // Una partida nueva cuenta como cambio en cuanto tiene producto y cantidad.
+                        const nuevas = addLines.filter((a) => a.productId && a.qty > 0 && !qlines.some((l) => l.product_id === a.productId));
+                        const dirty = priceDirty || nuevas.length > 0;
                         return (
                           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-cream px-3 py-2">
                             <p className="text-[12px]">
-                              {priceDirty ? (
-                                <span className="font-medium text-warn">Cambiaste precios — todavía no se guardan.</span>
+                              {dirty ? (
+                                <span className="font-medium text-warn">
+                                  {nuevas.length ? `${nuevas.length} partida(s) nueva(s) y precios sin guardar.` : "Cambiaste precios — todavía no se guardan."}
+                                </span>
                               ) : (
                                 <span className="text-muted">Sin cambios de precio.</span>
                               )}{" "}
                               Al guardar, la Revisión {qrow.revision} con estos precios de hoy queda en la bitácora, y el
                               documento pasa a la Revisión {qrow.revision + 1}.
+                              {borrador && qrow.order_name ? ` ${qrow.order_name} (borrador) se pone al día con esta revisión.` : ""}
                             </p>
                             <button
                               type="button"
                               className="erp-btn-primary h-9 shrink-0 text-[12px]"
-                              disabled={!priceDirty}
+                              disabled={!dirty}
                               onClick={() =>
                                 reviseQuote({
                                   data: {
                                     quoteId: qrow.id,
                                     priceOffer: (qrow.price_offer as Offer) || "both",
                                     creditDays: qrow.credit_days,
-                                    lines: qlines.map((l) => {
-                                      const rp = revPrices[l.product_id];
-                                      return {
-                                        productId: l.product_id,
-                                        qty: rp?.qty ?? Number(l.qty),
-                                        cashPrice: rp?.cash ?? Number(l.cash_price),
-                                        creditPrice: rp?.credit ?? Number(l.credit_price),
-                                      };
-                                    }),
+                                    lines: [
+                                      ...qlines.map((l) => {
+                                        const rp = revPrices[l.product_id];
+                                        return {
+                                          productId: l.product_id,
+                                          qty: rp?.qty ?? Number(l.qty),
+                                          cashPrice: rp?.cash ?? Number(l.cash_price),
+                                          creditPrice: rp?.credit ?? Number(l.credit_price),
+                                        };
+                                      }),
+                                      ...nuevas.map((a) => ({
+                                        productId: a.productId,
+                                        qty: a.qty,
+                                        cashPrice: revPrices[a.productId]?.cash ?? 0,
+                                        creditPrice: revPrices[a.productId]?.credit ?? 0,
+                                      })),
+                                    ],
                                   },
                                 })
-                                  .then(() => {
+                                  .then((r) => {
                                     setError(null);
+                                    setAddLines([]);
+                                    if (r.orders.length) setMsg(`Revisión ${r.revision} guardada · ${r.orders.join(", ")} actualizado`);
                                     return load();
                                   })
                                   .catch((e) => setError(humanError(e)))

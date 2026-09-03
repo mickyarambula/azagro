@@ -33,6 +33,7 @@ async function ensureTwoPrices(sql: Sql) {
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_mode text`);
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_pct numeric(8,4)`);
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_nominal numeric(14,4)`);
+    await sql.query(`alter table quote_lines add column if not exists margin_${col}_source text`);
   }
   await sql`alter table quote_lines add column if not exists finance_unit numeric(14,4)`;
   await sql`alter table quotes add column if not exists accepted_offer text`;
@@ -370,6 +371,7 @@ export const listQuotes = createServerFn({ method: "GET" })
       request_name: string | null;
       order_name: string | null;
       order_id: number | null;
+      order_state: string | null;
     }>`
       select q.id, q.name, q.partner_id, p.name as partner, q.date::text, q.valid_until::text,
         q.currency, q.fx_rate::text, q.state, q.total::text, q.notes, q.delivery_to,
@@ -381,7 +383,8 @@ export const listQuotes = createServerFn({ method: "GET" })
         q.accepted_offer,
         (select name from customer_requests r where r.quote_id = q.id limit 1) as request_name,
         (select name from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_name,
-        (select id from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_id
+        (select id from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_id,
+        (select state from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_state
       from quotes q join partners p on p.id = q.partner_id
       where q.company_id = ${cid}
       order by q.id desc
@@ -586,9 +589,11 @@ export const createQuote = createServerFn({ method: "POST" })
       const mCredit = conMargen ? marginFromPrice({ price: line.credit, landed, finance: fin, mode: "pct" }) : null;
       await sql`
         insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price,
-          margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_credit_mode, margin_credit_pct, margin_credit_nominal, finance_unit)
+          margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
+          margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit)
         values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit},
-          ${mCash?.mode ?? null}, ${mCash?.pct ?? null}, ${mCash?.nominal ?? null}, ${mCredit?.mode ?? null}, ${mCredit?.pct ?? null}, ${mCredit?.nominal ?? null}, ${Number(fin.toFixed(4))})
+          ${mCash?.mode ?? null}, ${mCash?.pct ?? null}, ${mCash?.nominal ?? null}, ${mCash ? "captura" : null},
+          ${mCredit?.mode ?? null}, ${mCredit?.pct ?? null}, ${mCredit?.nominal ?? null}, ${mCredit ? "captura" : null}, ${Number(fin.toFixed(4))})
       `;
     }
     await rememberTrade(sql, {
@@ -640,8 +645,23 @@ export const reviseQuote = createServerFn({ method: "POST" })
       from quotes where id = ${data.quoteId} and company_id = ${cid}
     `;
     if (!q[0]) throw new Error("Cotización no encontrada");
-    if (q[0].state === "accepted" || q[0].state === "rejected") {
-      throw new Error("Ya se cerró. Abre una cotización nueva.");
+    // Una cotización aceptada normalmente ya no se toca. La excepción: su
+    // pedido sigue en BORRADOR — ahí sí se revisa (es donde se agrega una
+    // partida al pedido, punto C3), y al guardar el pedido se actualiza.
+    // Con el pedido confirmado no se revisa: se levanta un pedido nuevo.
+    const ordenes = await sql<{ id: number; name: string; state: string; accepted_offer: string | null }>`
+      select id, name, state, accepted_offer from sales_orders
+      where quote_id = ${q[0].id} and company_id = ${cid} order by id
+    `;
+    const borradores = ordenes.filter((o) => o.state === "draft");
+    if (q[0].state === "rejected") throw new Error("Ya se cerró. Abre una cotización nueva.");
+    if (q[0].state === "accepted" && !borradores.length) {
+      const firme = ordenes.find((o) => o.state !== "draft");
+      throw new Error(
+        firme
+          ? `${firme.name} ya está confirmado: la cotización ya no se revisa. Si falta algo, levanta un pedido nuevo.`
+          : "Ya se cerró. Abre una cotización nueva.",
+      );
     }
     const offer = data.priceOffer ?? q[0].price_offer;
     const total = data.lines.reduce((s, l) => s + l.qty * (offer === "cash" ? l.cashPrice : l.creditPrice || l.cashPrice), 0);
@@ -672,6 +692,17 @@ export const reviseQuote = createServerFn({ method: "POST" })
       from quote_lines ql join products p on p.id = ql.product_id
       where ql.quote_id = ${q[0].id}
     `;
+    // Partidas que no estaban en la cotización: se agregan en esta revisión
+    // (es la única puerta para meter un producto a un pedido que vino de una
+    // cotización). Pasan por costo, margen y financiamiento como las demás.
+    const nuevasIds = data.lines.filter((l) => !oldLines.some((o) => o.product_id === l.productId)).map((l) => l.productId);
+    const nuevos = nuevasIds.length
+      ? await sql<{ id: number; code: string; uom: string }>`
+          select id, code, coalesce(uom,'') as uom from products
+          where company_id = ${cid} and id = any(${nuevasIds}::int[])
+        `
+      : [];
+    if (nuevos.length !== nuevasIds.length) throw new Error("Producto no encontrado");
     // Una revisión es una oferta distinta: si nada cambió (precio, cantidad,
     // plazo u oferta) no se sube el número de revisión ni se escribe bitácora.
     const cambios: string[] = [];
@@ -687,6 +718,9 @@ export const reviseQuote = createServerFn({ method: "POST" })
         if (Math.abs(Number(prev.cash_price) - line.cashPrice) > 0.009 || Math.abs(Number(prev.credit_price) - line.creditPrice) > 0.009) {
           cambios.push(`${prev.code} precio ${Number(prev.cash_price)}/${Number(prev.credit_price)} → ${line.cashPrice}/${line.creditPrice}`);
         }
+      } else {
+        const p = nuevos.find((x) => x.id === line.productId);
+        cambios.push(`${p?.code ?? line.productId} partida nueva ×${line.qty} a ${offer === "cash" ? line.cashPrice : line.creditPrice}`);
       }
     }
     if (!cambios.length) {
@@ -703,29 +737,38 @@ export const reviseQuote = createServerFn({ method: "POST" })
     // utilidad negativa se guarda tal cual: la pantalla avisa, no bloquea.
     // Sin costo no hay margen que despejar y la partida se deja como estaba.
     const pol = await policy(sql, cid);
+    // Costo de las partidas nuevas: el orden único de siempre (kardex →
+    // referencia). Las que ya estaban conservan el costo con que se cotizaron.
+    const costos = nuevos.length ? await productCosts(sql, cid) : [];
+    const costoNuevo = (productId: number) => {
+      const p = costos.find((c) => c.id === productId);
+      return resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost;
+    };
     const marginUpdates = new Map<number, { cash: ReturnType<typeof marginFromPrice>; credit: ReturnType<typeof marginFromPrice>; fin: number }>();
     for (const line of data.lines) {
       const prev = oldLines.find((o) => o.product_id === line.productId);
-      if (!prev) continue;
-      const landed = Number(prev.cost) + Number(prev.freight);
+      const landed = prev ? Number(prev.cost) + Number(prev.freight) : costoNuevo(line.productId);
       if (landed <= 0.0001) continue;
       const fin =
         plazoRev <= 0
           ? 0
-          : plazoRev === q[0].credit_days && prev.finance_unit != null
+          : prev && plazoRev === q[0].credit_days && prev.finance_unit != null
             ? Number(prev.finance_unit)
             : financeUnit({ cost: landed, days: plazoRev, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: pol.asrCommission });
-      const before = { cash: marginOf(prev, "cash"), credit: marginOf(prev, "credit") };
+      // Sin margen guardado el modo se despeja como %: el número sale del
+      // precio que se acaba de capturar, no de un valor por omisión.
+      const before = { cash: prev ? marginOf(prev, "cash") : null, credit: prev ? marginOf(prev, "credit") : null };
       const next = {
-        cash: marginFromPrice({ price: line.cashPrice, landed, finance: 0, mode: before.cash.mode }),
-        credit: marginFromPrice({ price: line.creditPrice, landed, finance: fin, mode: before.credit.mode }),
+        cash: marginFromPrice({ price: line.cashPrice, landed, finance: 0, mode: before.cash?.mode ?? "pct" }),
+        credit: marginFromPrice({ price: line.creditPrice, landed, finance: fin, mode: before.credit?.mode ?? "pct" }),
         fin: Number(fin.toFixed(4)),
       };
+      const code = prev?.code ?? nuevos.find((x) => x.id === line.productId)?.code ?? String(line.productId);
       for (const which of ["cash", "credit"] as Offer[]) {
         const old = before[which];
-        const oldTxt = old.legacy ? "—" : marginText(old);
+        const oldTxt = !old || old.legacy ? "—" : marginText(old);
         const newTxt = marginText(next[which]);
-        if (oldTxt !== newTxt) cambios.push(`${prev.code} margen ${OFFER_LABEL[which]} ${oldTxt} → ${newTxt}`);
+        if (oldTxt !== newTxt) cambios.push(`${code} margen ${OFFER_LABEL[which]} ${oldTxt} → ${newTxt}`);
       }
       marginUpdates.set(line.productId, next);
     }
@@ -741,17 +784,27 @@ export const reviseQuote = createServerFn({ method: "POST" })
     `;
     for (const line of data.lines) {
       const unit = offer === "cash" ? line.cashPrice : line.creditPrice || line.cashPrice;
-      await sql`
-        update quote_lines
-        set qty = ${line.qty}, unit_price = ${unit}, cash_price = ${line.cashPrice}, credit_price = ${line.creditPrice}
-        where quote_id = ${q[0].id} and product_id = ${line.productId}
-      `;
+      const nueva = nuevos.find((x) => x.id === line.productId);
+      if (nueva) {
+        await sql`
+          insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price)
+          values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)}, 0, ${line.cashPrice}, ${line.creditPrice})
+        `;
+      } else {
+        await sql`
+          update quote_lines
+          set qty = ${line.qty}, unit_price = ${unit}, cash_price = ${line.cashPrice}, credit_price = ${line.creditPrice}
+          where quote_id = ${q[0].id} and product_id = ${line.productId}
+        `;
+      }
       const m = marginUpdates.get(line.productId);
       if (m) {
         await sql`
           update quote_lines
           set margin_cash_mode = ${m.cash.mode}, margin_cash_pct = ${m.cash.pct}, margin_cash_nominal = ${m.cash.nominal},
+              margin_cash_source = 'captura',
               margin_credit_mode = ${m.credit.mode}, margin_credit_pct = ${m.credit.pct}, margin_credit_nominal = ${m.credit.nominal},
+              margin_credit_source = 'captura',
               finance_unit = ${m.fin}
           where quote_id = ${q[0].id} and product_id = ${line.productId}
         `;
@@ -766,7 +819,57 @@ export const reviseQuote = createServerFn({ method: "POST" })
       name: q[0].name,
       detail: `Rev ${q[0].revision} → ${q[0].revision + 1} · ${cambios.join(" · ")}`,
     });
-    return { id: q[0].id, name: q[0].name, revision: q[0].revision + 1 };
+    // El pedido en borrador que salió de esta cotización se pone al día: las
+    // partidas nuevas se agregan con su cantidad y precio, y las que ya tenía
+    // toman el precio de la revisión. La cantidad de las que ya estaban NO se
+    // toca: si el cliente aceptó parcial, esa cantidad es suya. Confirmado no
+    // se toca nunca (aquí ya no llega: se rechazó arriba).
+    const pedidos: string[] = [];
+    for (const so of borradores) {
+      const which = so.accepted_offer === "cash" ? "cash" : "credit";
+      const precioDe = (l: (typeof data.lines)[number]) => (which === "cash" ? l.cashPrice : l.creditPrice || l.cashPrice);
+      const actuales = await sql<{ id: number; product_id: number; qty: string; unit_price: string; code: string }>`
+        select sl.id, sl.product_id, sl.qty::text, sl.unit_price::text, p.code
+        from sales_lines sl join products p on p.id = sl.product_id
+        where sl.so_id = ${so.id} order by sl.id
+      `;
+      const detalle: string[] = [];
+      let totalSo = 0;
+      for (const l of data.lines) {
+        const actual = actuales.find((a) => a.product_id === l.productId);
+        const precio = Math.round(precioDe(l) * 10000) / 10000;
+        if (actual) {
+          if (Math.abs(Number(actual.unit_price) - precio) > 0.009) {
+            detalle.push(`${actual.code} precio ${Number(actual.unit_price)} → ${precio}`);
+            await sql`update sales_lines set unit_price = ${precio} where id = ${actual.id}`;
+          }
+          totalSo += Number(actual.qty) * precio;
+        } else if (nuevos.some((x) => x.id === l.productId)) {
+          const p = nuevos.find((x) => x.id === l.productId)!;
+          await sql`
+            insert into sales_lines (so_id, product_id, qty, unit_price, uom)
+            values (${so.id}, ${l.productId}, ${l.qty}, ${precio}, ${p.uom})
+          `;
+          detalle.push(`${p.code} partida nueva ×${l.qty} a ${precio}`);
+          totalSo += l.qty * precio;
+        }
+        // Una partida que la cotización trae pero el pedido no (aceptación
+        // parcial) se queda fuera: el cliente no la pidió.
+      }
+      if (!detalle.length) continue;
+      await sql`update sales_orders set total = ${totalSo} where id = ${so.id} and company_id = ${cid}`;
+      await writeAudit(sql, {
+        companyId: cid,
+        userId: context.userId,
+        action: "actualizar-pedido-por-revision",
+        entity: "sale",
+        entityId: so.id,
+        name: so.name,
+        detail: `Desde ${q[0].name} Rev ${q[0].revision + 1} · ${detalle.join(" · ")}`,
+      });
+      pedidos.push(so.name);
+    }
+    return { id: q[0].id, name: q[0].name, revision: q[0].revision + 1, orders: pedidos };
   });
 
 export const decideQuote = createServerFn({ method: "POST" })

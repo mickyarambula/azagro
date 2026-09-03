@@ -7,7 +7,7 @@ import { SendButton } from "@/components/send-doc";
 import { getSettings } from "@/lib/erp/ops";
 import { saveRfqBid } from "@/lib/erp/rfq";
 import { annualRate, priceSale } from "@/lib/erp/pricing";
-import { marginOf, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
+import { marginOf, OFFER_LABEL, SIN_MARGEN, type Offer } from "@/lib/erp/margins";
 import {
   applyCheapest,
   deleteRequest,
@@ -58,16 +58,22 @@ function MarginCell({
   onSaved: () => Promise<void>;
   onError: (e: unknown) => void;
 }) {
+  // Sin margen capturado NO hay número: el campo va vacío, dice "Sin margen" y
+  // el borde queda en ámbar. El sistema no propone ninguno (ni 12% ni 0%), y
+  // pasar por el campo sin escribir no lo convierte en 0%.
   const m = marginOf(line, which);
-  const save = (marginMode: "pct" | "nominal", marginPct: number, marginNominal: number) =>
+  const [modoVacio, setModoVacio] = useState<"pct" | "nominal">("pct");
+  const mode = m?.mode ?? modoVacio;
+  const nota = !m ? null : m.legacy ? "margen único anterior" : m.source === "migracion" ? "de la migración" : null;
+  const guardar = (marginMode: "pct" | "nominal", marginPct: number, marginNominal: number) =>
     saveLineMargin({ data: { requestId, productId: line.product_id, which, marginMode, marginPct, marginNominal } })
       .then(onSaved)
       .catch(onError);
   if (disabled) {
     return (
       <span className="tabular-nums">
-        {m.mode === "nominal" ? `${money(m.nominal)} / ${line.uom}` : `${m.pct}%`}
-        {m.legacy ? <span className="block text-[11px] text-muted">margen único anterior</span> : null}
+        {!m ? <span className="text-warn">{SIN_MARGEN}</span> : m.mode === "nominal" ? `${money(m.nominal)} / ${line.uom}` : `${m.pct}%`}
+        {nota ? <span className="block text-[11px] text-muted">{nota}</span> : null}
       </span>
     );
   }
@@ -75,20 +81,24 @@ function MarginCell({
     <div className="flex items-center gap-1">
       <select
         className="erp-input w-[5.5rem]"
-        value={m.mode}
+        value={mode}
         onChange={(e) => {
           const marginMode = e.target.value as "pct" | "nominal";
-          void save(marginMode, m.pct, m.nominal || marginUnit);
+          // Sin margen, cambiar de % a $ solo cambia el campo: no guarda nada.
+          if (!m) return setModoVacio(marginMode);
+          void guardar(marginMode, m.pct, m.nominal || marginUnit);
         }}
       >
         <option value="pct">%</option>
         <option value="nominal">$ / {line.uom}</option>
       </select>
-      {m.mode === "pct" ? (
+      {mode === "pct" ? (
         <QtyField
-          className="w-20"
-          value={m.pct}
+          className={m ? "w-20" : "w-20 border-warn"}
+          placeholder={SIN_MARGEN}
+          value={m ? m.pct : 0}
           onCommit={(n) => {
+            if (!m && n === 0) return;
             void saveLineMargin({ data: { requestId, productId: line.product_id, which, marginMode: "pct", marginPct: n, marginNominal: 0 } })
               .then(onSaved)
               .catch(onError);
@@ -96,16 +106,18 @@ function MarginCell({
         />
       ) : (
         <MoneyField
-          className="w-24"
-          value={m.nominal}
+          className={m ? "w-24" : "w-24 border-warn"}
+          placeholder={SIN_MARGEN}
+          value={m ? m.nominal : 0}
           onCommit={(n) => {
+            if (!m && n === 0) return;
             void saveLineMargin({ data: { requestId, productId: line.product_id, which, marginMode: "nominal", marginPct: 0, marginNominal: n } })
               .then(onSaved)
               .catch(onError);
           }}
         />
       )}
-      {m.legacy ? <span className="text-[11px] text-muted" title="Viene del margen único de antes; al guardar queda como margen propio de esta columna">*</span> : null}
+      {nota ? <span className="text-[11px] text-muted" title={`Margen ${nota}; al guardar queda como margen propio de esta columna`}>*</span> : null}
     </div>
   );
 }
@@ -671,32 +683,24 @@ function Page() {
               {lines.map((l) => {
                 const mCash = marginOf(l, "cash");
                 const mCredit = marginOf(l, "credit");
-                const cashCalc = priceSale({
-                  cost: num(l.cost),
-                  freight: num(l.freight),
-                  other: 0,
-                  days: 0,
-                  tiie: tiiePct / 100,
-                  costSpread: spreadPct / 100,
-                  commissionRate: commissionPct / 100,
-                  marginMode: mCash.mode,
-                  marginPct: mCash.pct,
-                  marginNominal: mCash.nominal,
-                  qty: num(l.qty),
-                });
-                const calc = priceSale({
-                  cost: num(l.cost),
-                  freight: num(l.freight),
-                  other: 0,
-                  days,
-                  tiie: tiiePct / 100,
-                  costSpread: spreadPct / 100,
-                  commissionRate: commissionPct / 100,
-                  marginMode: mCredit.mode,
-                  marginPct: mCredit.pct,
-                  marginNominal: mCredit.nominal,
-                  qty: num(l.qty),
-                });
+                // Sin margen no hay precio que calcular: se muestra "Sin margen"
+                // y el precio queda en "—" hasta que alguien capture uno.
+                const precio = (m: typeof mCash, plazo: number) =>
+                  priceSale({
+                    cost: num(l.cost),
+                    freight: num(l.freight),
+                    other: 0,
+                    days: plazo,
+                    tiie: tiiePct / 100,
+                    costSpread: spreadPct / 100,
+                    commissionRate: commissionPct / 100,
+                    marginMode: m?.mode ?? "pct",
+                    marginPct: m?.pct ?? 0,
+                    marginNominal: m?.nominal ?? 0,
+                    qty: num(l.qty),
+                  });
+                const cashCalc = precio(mCash, 0);
+                const calc = precio(mCredit, days);
                 return (
                   <tr key={l.id} className="border-t border-line align-top">
                     <td className="px-4 py-2.5">
@@ -709,19 +713,29 @@ function Page() {
                     </td>
                     <td className="px-3 py-2">
                       <MarginCell requestId={id} line={l} which="cash" marginUnit={cashCalc.marginUnit} disabled={locked} onSaved={load} onError={fail} />
-                      <span className="block text-[11px] text-muted tabular-nums">
-                        {mCash.mode === "pct" ? `${money(cashCalc.marginUnit)} / ${l.uom}` : `${cashCalc.marginPct.toFixed(1)}%`} · total {money(cashCalc.margin)}
-                      </span>
+                      {mCash ? (
+                        <span className="block text-[11px] text-muted tabular-nums">
+                          {mCash.mode === "pct" ? `${money(cashCalc.marginUnit)} / ${l.uom}` : `${cashCalc.marginPct.toFixed(1)}%`} · total {money(cashCalc.margin)}
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
-                      <span className={cashCalc.marginUnit < 0 ? "text-danger" : ""}>{money(cashCalc.priceUnit)}</span>
-                      <span className="block text-[11px] text-muted">costo {money(cashCalc.landedUnit)} + margen {money(cashCalc.marginUnit)}</span>
+                      {mCash ? (
+                        <>
+                          <span className={cashCalc.marginUnit < 0 ? "text-danger" : ""}>{money(cashCalc.priceUnit)}</span>
+                          <span className="block text-[11px] text-muted">costo {money(cashCalc.landedUnit)} + margen {money(cashCalc.marginUnit)}</span>
+                        </>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
                     </td>
                     <td className="px-3 py-2">
                       <MarginCell requestId={id} line={l} which="credit" marginUnit={calc.marginUnit} disabled={locked} onSaved={load} onError={fail} />
-                      <span className="block text-[11px] text-muted tabular-nums">
-                        {mCredit.mode === "pct" ? `${money(calc.marginUnit)} / ${l.uom}` : `${calc.marginPct.toFixed(1)}%`} · total {money(calc.margin)}
-                      </span>
+                      {mCredit ? (
+                        <span className="block text-[11px] text-muted tabular-nums">
+                          {mCredit.mode === "pct" ? `${money(calc.marginUnit)} / ${l.uom}` : `${calc.marginPct.toFixed(1)}%`} · total {money(calc.margin)}
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
                       {calc.financeUnit > 0.009 ? (
@@ -736,7 +750,7 @@ function Page() {
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
-                      {days > 0 ? (
+                      {days > 0 && mCredit ? (
                         <>
                           <span className={calc.marginUnit < 0 ? "text-danger" : ""}>{money(calc.priceUnit)}</span>
                           <span className="block text-[11px] text-muted">
@@ -748,8 +762,8 @@ function Page() {
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right font-medium tabular-nums">
-                      {money(cashCalc.price)}
-                      {days > 0 ? <span className="block text-[11px] text-muted">crédito {money(calc.price)}</span> : null}
+                      {mCash ? money(cashCalc.price) : <span className="text-muted">—</span>}
+                      {days > 0 && mCredit ? <span className="block text-[11px] text-muted">crédito {money(calc.price)}</span> : null}
                     </td>
                   </tr>
                 );
@@ -757,6 +771,19 @@ function Page() {
             </tbody>
           </table>
         </div>
+        {(() => {
+          // Sin margen no se cotiza: el sistema no pone uno por omisión.
+          if (locked) return null;
+          const faltan = lines
+            .filter((l) => !marginOf(l, "cash") || (days > 0 && !marginOf(l, "credit")))
+            .map((l) => l.code);
+          return faltan.length ? (
+            <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+              Falta capturar el margen de {faltan.join(", ")}
+              {days > 0 ? " (contado y crédito)" : ""}. Sin margen no hay precio: escríbelo arriba y el precio se arma solo.
+            </p>
+          ) : null;
+        })()}
         <div className="mt-3 flex justify-end">
           {locked ? (
             <Link to="/quotes" search={{ ver: request.quote_id ?? undefined }} className="erp-btn-primary grid place-items-center">
@@ -766,7 +793,7 @@ function Page() {
           <button
             type="button"
             className="erp-btn-primary"
-            disabled={busy || lines.some((l) => num(l.cost) <= 0)}
+            disabled={busy || lines.some((l) => num(l.cost) <= 0 || !marginOf(l, "cash") || (days > 0 && !marginOf(l, "credit")))}
             onClick={async () => {
               setBusy(true);
               setError(null);

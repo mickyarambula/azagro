@@ -15,6 +15,7 @@ export function QtyField({
   onCommit,
   disabled,
   className,
+  placeholder = "0",
 }: {
   value: number;
   /** Se llama en cada tecla — úsalo solo para reflejo local (cálculo en vivo, borrador). */
@@ -23,6 +24,7 @@ export function QtyField({
   onCommit?: (n: number) => void;
   disabled?: boolean;
   className?: string;
+  placeholder?: string;
 }) {
   const [raw, setRaw] = useState(value ? String(value) : "");
   const [focus, setFocus] = useState(false);
@@ -41,7 +43,7 @@ export function QtyField({
       inputMode="decimal"
       disabled={disabled}
       value={raw}
-      placeholder="0"
+      placeholder={placeholder}
       onFocus={() => setFocus(true)}
       onChange={(e) => {
         const next = sanitizeDecimal(e.target.value);

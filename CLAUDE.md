@@ -10,7 +10,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 - Postgres: Neon si hay `DATABASE_URL`, si no PGLite embebido (`src/lib/db.ts`)
 - better-auth
 - Server functions: `createServerFn` + `authMiddleware`
-- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud — columnas nulas, sin rellenar)
+- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud; 0018 = copia marcada del margen viejo y muerte del 12% por omisión)
 
 ## No romper
 
@@ -21,6 +21,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 5. **Pared de privacidad:** el cliente no ve al proveedor. Brokeraje/directo no recibe en bodega Azagro.
 6. Folios existentes (SOL/SC/COT/PV/OC/FV/FP/NC/FI). No series nuevas salvo que lo pidan.
 7. UI y copy en español. Sin emojis salvo que lo pidan.
+8. **Nada de valores por omisión que decidan dinero.** Sin margen capturado la pantalla dice “Sin margen” y no cotiza; igual que sin costo. No reponer el 12% ni un 0% “para que calcule”. Los defaults que quedan (TC 18, plazos 30/90, tasas de respaldo) están listados en `HANDOFF.md` y solo los quita el dueño.
 
 ## Mapa
 
@@ -35,7 +36,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 | Bitácora | `src/lib/erp/audit.ts`, ruta `/bitacora` |
 | Archivos del folio | `src/lib/erp/files.ts` |
 | RFQ sin pedido de cliente | `src/lib/erp/rfq.ts`, `/rfq/nuevo` |
-| Dos márgenes (contado/crédito), precio↔margen | `src/lib/erp/margins.ts` |
+| Dos márgenes (contado/crédito), precio↔margen, **sin margen por omisión** | `src/lib/erp/margins.ts` |
 | Candado de solicitud ya cotizada | `src/lib/erp/request-lock.ts` |
 | Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
 | Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |

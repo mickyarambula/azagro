@@ -162,8 +162,43 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       días de la COT, política de mora = GRUPO_SL si el cliente es del grupo,
       si no ESTANDAR; de contado NONE.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 260 hoy)
-y pasa `npx tsc --noEmit` limpio.
+15. **Márgenes migrados, muerte del 12% por omisión y "agregar partida"**
+    (2-sep, migración `0018_margen_migrado.sql`):
+    - **Los márgenes que ya existían se copiaron** a las dos columnas nuevas
+      (contado y crédito) y quedaron marcados `margin_*_source = 'migracion'`,
+      para distinguirlos de uno capturado a mano (`'captura'`). La pantalla lo
+      dice con un asterisco y la nota "de la migración". En las cotizaciones
+      solo se copió donde había un margen mayor que cero: la columna vieja era
+      `default 0` y copiar ese 0 sería afirmar "esta venta no dejó utilidad",
+      que no es lo mismo que "no sabemos cuál fue".
+    - **Ya no existe el margen por omisión de 12%.** Se fue de la base (la
+      columna vieja perdió su `default 12` y su NOT NULL), de las consultas
+      (`coalesce(margin_pct, 12)`) y del código (`marginOf` devolvía 12% cuando
+      no había nada). Ahora una partida sin margen **dice "Sin margen"**: el
+      campo va vacío con borde ámbar, el precio queda en "—", el botón de
+      cotizar se apaga y el servidor rechaza con "Captura el margen antes de
+      cotizar: …". Pasar por el campo sin escribir nada tampoco lo convierte
+      en 0%. Al cambiar el plazo de un pedido, una partida sin margen conserva
+      su precio y la bitácora dice "sin margen: precio sin recalcular" — no se
+      inventa un margen para poder recalcular. Un 0% capturado a propósito
+      (vender al costo) sí es un margen y se respeta.
+    - **"Agregar partida", tres comportamientos** (punto C3):
+      1. *Pedido en borrador que vino de cotización*: el botón dice "Agregar
+         partida en COT-…" y lleva a la cotización. Ahí se agrega el producto,
+         se le captura el precio, y al guardar la revisión pasa por costo
+         (kardex → referencia), margen (despejado del precio) y financiamiento.
+         El pedido se actualiza solo: entra la partida nueva, los precios de
+         las que ya tenía se ponen al día, se rehace el total y queda en
+         bitácora (`actualizar-pedido-por-revision`). La cantidad de una
+         partida que el cliente aceptó parcial no se toca, y una partida que
+         quedó fuera de esa aceptación no se revive.
+      2. *Pedido confirmado*: no se agregan partidas — mensaje "levanta un
+         pedido nuevo", y el servidor tampoco deja revisar esa cotización.
+      3. *Pedido capturado directo (sin cotización)*: igual que siempre.
+
+Todo lo anterior quedó con pruebas automáticas (`npm test`, casi 280 hoy,
+incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
+`npx tsc --noEmit` limpio.
 
 ## Decisiones de negocio confirmadas por el dueño
 
@@ -215,19 +250,23 @@ natural de trabajo grande.
 
 ## Qué falta
 
-- **Dos decisiones del dueño pendientes (2-sep):**
-  1. *Migración de los márgenes viejos (A6).* La 0017 solo agrega columnas
-     nulas; no se rellenó nada. Mientras tanto el código cae al margen único
-     anterior (`marginOf` → `legacy: true`, la pantalla lo marca como "margen
-     único anterior") o al 12% por omisión. Falta que el dueño diga si las
-     partidas existentes copian el margen viejo a las dos columnas, solo a
-     crédito, o se dejan vacías.
-  2. *"Agregar partida" en un pedido que viene de cotización (C3).* Hoy la
-     partida nueva entra con el precio de lista del producto, sin costo,
-     margen ni financiamiento ligados (no hay `quote_line` de dónde
-     leerlos), y no aparece en la tabla "Heredado de COT-…". No se tocó:
-     esperar la decisión de cómo cerrarlo (bloquear, pedir precio manual con
-     aviso, o mandar a revisión de la COT).
+- **Valores por omisión que siguen escritos en el código** (reportados al
+  dueño el 2-sep junto con la muerte del 12%; **no se han tocado, esperan su
+  decisión**). El criterio: un número que decide dinero sin que nadie lo haya
+  elegido es un error, aunque sea "razonable".
+  - *Tipo de cambio 18 MXN/USD* en cuatro lugares (`orders.ts` cuando no hay
+    tipo de cambio capturado, `sales.nuevo.tsx`, y el arranque de las
+    pantallas de cotización y solicitud). Es el que más pesa: multiplica todo
+    el pedido.
+  - *Plazos*: 90 días al abrir el alta manual de cotización (Ajustes dice
+    150); 30 días en el pedido directo nuevo, al cambiar a "crédito días" y en
+    el vencimiento de la factura de proveedor sin plazo capturado.
+  - *Tasas de respaldo*: TIIE 7.06% / spread 4% / mora 9% / FEGA 3.04% cuando
+    no hay renglón en Ajustes (`DEFAULT_POLICY`), y los mismos números como
+    respaldo en la pantalla de cartera y como estado inicial de Ajustes. La
+    TIIE es la delicada: es una tasa de mercado que cambia cada semana.
+  - *Reportes*: una partida sin costo se etiqueta "catálogo" (no "sin costo")
+    y su utilidad sale del 100% del precio.
 - **Sesión D pendiente**: un barrido de uso real, simplificación de
   pantallas y detección de huecos operativos — no se ha hecho todavía.
 - **INCOMPLETOS de `LOGICA.md` sin tocar**: no hay forma de revertir un pago

@@ -30,18 +30,21 @@ function n(v) {
 }
 function marginOf(row, which) {
   const mode = which === "cash" ? row.margin_cash_mode : row.margin_credit_mode;
-  if (mode === "pct" || mode === "nominal") {
+  const pct = which === "cash" ? row.margin_cash_pct : row.margin_credit_pct;
+  const nominal = which === "cash" ? row.margin_cash_nominal : row.margin_credit_nominal;
+  if ((mode === "pct" || mode === "nominal") && (pct != null || nominal != null)) {
     return {
       mode,
-      pct: n(which === "cash" ? row.margin_cash_pct : row.margin_credit_pct),
-      nominal: n(which === "cash" ? row.margin_cash_nominal : row.margin_credit_nominal),
+      pct: n(pct),
+      nominal: n(nominal),
       legacy: false,
+      source: which === "cash" ? row.margin_cash_source ?? null : row.margin_credit_source ?? null,
     };
   }
-  if (row.margin_mode === "pct" || row.margin_mode === "nominal") {
-    return { mode: row.margin_mode, pct: n(row.margin_pct), nominal: n(row.margin_nominal), legacy: true };
+  if ((row.margin_mode === "pct" || row.margin_mode === "nominal") && (row.margin_pct != null || row.margin_nominal != null)) {
+    return { mode: row.margin_mode, pct: n(row.margin_pct), nominal: n(row.margin_nominal), legacy: true, source: null };
   }
-  return { mode: "pct", pct: row.margin_pct == null ? 12 : n(row.margin_pct), nominal: n(row.margin_nominal), legacy: true };
+  return null;
 }
 function marginUnit(m, landed) {
   return m.mode === "nominal" ? m.nominal : (landed * m.pct) / 100;
@@ -73,7 +76,8 @@ test("las copias de margins.ts siguen iguales al original", () => {
   assert.ok(m.includes("return m.mode === \"nominal\" ? m.nominal : (landed * m.pct) / 100;"), "marginUnit");
   assert.ok(m.includes("Math.round((i.landed + marginUnit(i.margin, i.landed) + Math.max(0, i.finance)) * 10000) / 10000"), "priceFromMargin");
   assert.ok(m.includes("const nominal = Math.round((i.price - i.landed - Math.max(0, i.finance)) * 10000) / 10000;"), "marginFromPrice");
-  assert.ok(m.includes("return { mode: \"pct\", pct: row.margin_pct == null ? 12 : n(row.margin_pct), nominal: n(row.margin_nominal), legacy: true };"), "marginOf legacy 12%");
+  assert.ok(m.includes("if ((mode === \"pct\" || mode === \"nominal\") && (pct != null || nominal != null))"), "marginOf: nulo no es cero");
+  assert.ok(m.trimEnd().includes("  return null;\n}"), "marginOf termina en null, no en un margen inventado");
 });
 
 // ---------------------------------------------------------------------------
@@ -81,9 +85,11 @@ test("las copias de margins.ts siguen iguales al original", () => {
 // ---------------------------------------------------------------------------
 test("contado y crédito tienen cada uno su margen: cambiar uno no mueve el otro", () => {
   const landed = 10000; // costo puesto por unidad
-  const fin = financeUnit({ cost: landed, days: 150, tiie: 0.0706, costSpread: 0.09, commissionRate: 0.01 });
-  // 1% comisión = 100; capa 1 = 10000 × 1.01 × 0.1606 × 150/360 = 675.86
-  assert.ok(Math.abs(fin - 775.8583) < 0.01, `fin ${fin}`);
+  // Parámetros reales de Ajustes: TIIE 7.06% + spread ASR 4% (el 9% es el de
+  // mora, que NO entra en el precio), comisión ASR 1%.
+  const fin = financeUnit({ cost: landed, days: 150, tiie: 0.0706, costSpread: 0.04, commissionRate: 0.01 });
+  // comisión 1% = 100; capa 1 = 10 000 × 1.01 × 0.1106 × 150/360 = 465.44
+  assert.ok(Math.abs(fin - 565.4417) < 0.01, `fin ${fin}`);
 
   const row = { margin_cash_mode: "pct", margin_cash_pct: 10, margin_credit_mode: "nominal", margin_credit_nominal: 1500 };
   const cash = priceFromMargin({ landed, finance: 0, margin: marginOf(row, "cash") });
@@ -97,14 +103,33 @@ test("contado y crédito tienen cada uno su margen: cambiar uno no mueve el otro
   assert.equal(priceFromMargin({ landed, finance: fin, margin: marginOf(row2, "credit") }), credit);
 });
 
-test("sin margen nuevo (dato anterior a 0017) se usa el margen único viejo y se marca legacy; sin nada, 12%", () => {
+test("no hay margen por omisión: sin dato es null, nunca 12% ni 0%", () => {
   const viejo = marginOf({ margin_mode: "nominal", margin_nominal: 800, margin_pct: 8 }, "credit");
-  assert.deepEqual(viejo, { mode: "nominal", pct: 8, nominal: 800, legacy: true });
-  const nada = marginOf({}, "cash");
-  assert.deepEqual(nada, { mode: "pct", pct: 12, nominal: 0, legacy: true });
-  const nuevo = marginOf({ margin_cash_mode: "pct", margin_cash_pct: 15, margin_mode: "nominal", margin_nominal: 800 }, "cash");
+  assert.deepEqual(viejo, { mode: "nominal", pct: 8, nominal: 800, legacy: true, source: null });
+  // Nada capturado: sin margen. Antes esto devolvía 12% inventado.
+  assert.equal(marginOf({}, "cash"), null);
+  // Columna vieja en nulo (una partida nueva después de la 0018): sin margen.
+  assert.equal(marginOf({ margin_mode: "pct", margin_pct: null, margin_nominal: null }, "cash"), null);
+  const nuevo = marginOf({ margin_cash_mode: "pct", margin_cash_pct: 15, margin_cash_source: "captura", margin_mode: "nominal", margin_nominal: 800 }, "cash");
   assert.equal(nuevo.legacy, false);
   assert.equal(nuevo.pct, 15);
+  assert.equal(nuevo.source, "captura");
+  // Un margen de 0% capturado a propósito SÍ es un margen (vender al costo).
+  const cero = marginOf({ margin_credit_mode: "pct", margin_credit_pct: 0, margin_credit_source: "captura" }, "credit");
+  assert.deepEqual(cero, { mode: "pct", pct: 0, nominal: 0, legacy: false, source: "captura" });
+});
+
+test("el origen del margen distingue lo capturado de lo que copió la migración", () => {
+  const copiado = marginOf({ margin_cash_mode: "pct", margin_cash_pct: 12, margin_cash_source: "migracion" }, "cash");
+  assert.equal(copiado.source, "migracion");
+  const m = src("src/lib/erp/margins.ts");
+  assert.ok(m.includes('export type MarginSource = "captura" | "migracion";'), "los dos orígenes posibles");
+  // La pantalla lo dice, no se queda en la base.
+  assert.ok(src("src/routes/solicitudes.$solicitudId.tsx").includes('m.source === "migracion" ? "de la migración"'), "solicitud");
+  assert.ok(src("src/routes/sales.$orderId.tsx").includes('o.margin.source === "migracion"'), "pedido");
+  // Y lo que escribe una persona queda marcado 'captura'.
+  assert.ok(src("src/lib/erp/requests.ts").includes("margin_cash_source = 'captura'"), "saveLineMargin marca captura");
+  assert.ok(src("src/lib/erp/ops.ts").includes("margin_cash_source = 'captura'"), "la revisión marca captura");
 });
 
 // ---------------------------------------------------------------------------
@@ -112,16 +137,16 @@ test("sin margen nuevo (dato anterior a 0017) se usa el margen único viejo y se
 // ---------------------------------------------------------------------------
 test("captura inversa: precio → utilidad y margen %, y de regreso da el mismo precio", () => {
   const landed = 10000;
-  const fin = 775.8583;
+  const fin = 565.4417; // TIIE 7.06% + spread ASR 4%, comisión 1%, 150 d
   // Contado: escribo 11 500 → utilidad 1 500, margen 15%.
   const mc = marginFromPrice({ price: 11500, landed, finance: 0, mode: "pct" });
   assert.equal(mc.nominal, 1500);
   assert.equal(mc.pct, 15);
   assert.equal(priceFromMargin({ landed, finance: 0, margin: mc }), 11500);
-  // Crédito: escribo 12 500 → utilidad = 12 500 − 10 000 − 775.86 = 1 724.14; margen 17.24%.
+  // Crédito: escribo 12 500 → utilidad = 12 500 − 10 000 − 565.44 = 1 934.56; margen 19.35%.
   const mk = marginFromPrice({ price: 12500, landed, finance: fin, mode: "nominal" });
-  assert.equal(mk.nominal, 1724.1417);
-  assert.equal(mk.pct, 17.2414);
+  assert.equal(mk.nominal, 1934.5583);
+  assert.equal(mk.pct, 19.3456);
   assert.equal(priceFromMargin({ landed, finance: fin, margin: mk }), 12500);
 });
 
@@ -157,7 +182,7 @@ test("saveLineMargin guarda por columna (which) y la bitácora dice cuál margen
   assert.ok(!body.includes("update customer_request_lines set margin_mode ="), "ya no pisa el margen único viejo");
 });
 
-test("la migración 0017 solo agrega columnas nulas: no rellena datos existentes (A6 pendiente de respuesta)", () => {
+test("la migración 0017 solo agrega columnas nulas: el relleno es cosa de la 0018", () => {
   const mig = src("migrations/0017_dos_precios.sql");
   for (const col of ["margin_cash_mode", "margin_cash_pct", "margin_cash_nominal", "margin_credit_mode", "margin_credit_pct", "margin_credit_nominal"]) {
     assert.ok(mig.includes(col), `columna ${col}`);
@@ -173,12 +198,54 @@ test("la migración 0017 solo agrega columnas nulas: no rellena datos existentes
   assert.ok(mig.includes("create table if not exists customer_request_lines"), "crea customer_request_lines si no existe");
 });
 
+// ---------------------------------------------------------------------------
+// A6 — los márgenes que ya existían se copian marcados, y muere el 12%.
+// ---------------------------------------------------------------------------
+test("la migración 0018 copia el margen viejo a las dos columnas y lo marca 'migracion'", () => {
+  const mig = src("migrations/0018_margen_migrado.sql");
+  assert.ok(mig.includes("margin_cash_source") && mig.includes("margin_credit_source"), "columna de origen en las dos");
+  assert.ok(/update customer_request_lines\s+set margin_cash_mode = coalesce\(margin_mode, 'pct'\)/.test(mig), "copia a contado");
+  assert.ok(/update customer_request_lines\s+set margin_credit_mode = coalesce\(margin_mode, 'pct'\)/.test(mig), "copia a crédito");
+  assert.equal((mig.match(/margin_cash_source = 'migracion'/g) ?? []).length, 2, "lo copiado queda marcado (solicitud y cotización)");
+  assert.ok(mig.includes("where margin_cash_mode is null"), "no pisa un margen ya capturado");
+  // En cotizaciones la columna vieja es `default 0`: copiar ese 0 sería afirmar
+  // "sin utilidad", que no es lo mismo que "no sabemos". Solo se copia si > 0.
+  assert.ok(mig.includes("where margin_cash_mode is null and coalesce(margin_pct, 0) > 0"), "en quote_lines solo se copia un margen real");
+});
+
+test("muere el 12%: ni en la base, ni en las consultas, ni en el código", () => {
+  const mig = src("migrations/0018_margen_migrado.sql");
+  assert.ok(mig.includes("alter column margin_pct drop default"), "la columna vieja pierde el default 12");
+  assert.ok(mig.includes("alter column margin_pct drop not null"), "y puede quedar nula = sin margen");
+  const req = src("src/lib/erp/requests.ts");
+  assert.ok(!req.includes("default 12"), "ensure() ya no crea la columna con 12");
+  assert.ok(!req.includes("coalesce(l.margin_pct,12)") && !req.includes("coalesce(margin_pct,12)"), "las consultas ya no rellenan 12");
+  assert.ok(!src("src/lib/erp/margins.ts").includes("? 12 :"), "marginOf ya no inventa 12%");
+  for (const f of ["src/lib/erp/margins.ts", "src/lib/erp/requests.ts", "src/lib/erp/ops.ts", "src/lib/erp/orders.ts"]) {
+    assert.ok(!/margin[^\n]*\b12\b/.test(src(f).replace(/^.*(numeric|12,4|8,4).*$/gm, "")), `${f}: sin 12 pegado al margen`);
+  }
+});
+
+test("sin margen la pantalla lo dice y no deja cotizar; nunca propone un número", () => {
+  const ui = src("src/routes/solicitudes.$solicitudId.tsx");
+  assert.ok(ui.includes('export const SIN_MARGEN') === false, "el texto vive en margins.ts, no duplicado");
+  assert.ok(src("src/lib/erp/margins.ts").includes('export const SIN_MARGEN = "Sin margen";'), "un solo texto para 'sin margen'");
+  assert.ok(ui.includes("placeholder={SIN_MARGEN}"), "el campo vacío lo dice");
+  assert.ok(ui.includes("Falta capturar el margen de"), "aviso antes de cotizar");
+  assert.ok(ui.includes("!marginOf(l, \"cash\") || (days > 0 && !marginOf(l, \"credit\"))"), "el botón de cotizar se apaga sin margen");
+  assert.ok(ui.includes('{!m ? <span className="text-warn">{SIN_MARGEN}</span>'), "en modo lectura también");
+  const ped = src("src/routes/sales.$orderId.tsx");
+  assert.ok(ped.includes('<span className="text-warn">{SIN_MARGEN}</span>'), "el pedido heredado también lo dice");
+});
+
 test("quoteFromRequest arma los dos precios: contado sin financiamiento, crédito con financiamiento, y guarda márgenes + finance_unit", () => {
   const req = src("src/lib/erp/requests.ts");
   const body = fnBody(req, "quoteFromRequest");
   assert.ok(body.includes("commissionRate: pol.asrCommission"), "comisión de Ajustes (fórmula intacta)");
   assert.ok(body.includes("days: 0,"), "contado con 0 días");
-  assert.ok(body.includes("margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_credit_mode, margin_credit_pct, margin_credit_nominal, finance_unit"), "inserta márgenes y financiamiento por unidad");
+  assert.ok(body.includes("margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,"), "inserta el margen de contado con su origen");
+  assert.ok(body.includes("margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit)"), "y el de crédito con el financiamiento por unidad");
+  assert.ok(body.includes("throw new Error(`Captura el margen antes de cotizar:"), "sin margen no se cotiza: se dice qué falta");
   assert.ok(!body.includes("resolveCost"), "el costo sigue siendo el del proveedor ganador (RFQ intacto)");
 });
 
@@ -246,7 +313,8 @@ test("changeOrderTerm: solo borrador, rehace precios con el margen de crédito g
   const body = fnBody(orders, "changeOrderTerm");
   assert.ok(body.includes(`if (so[0].state !== "draft") throw new Error("Pedido confirmado: el plazo ya no se cambia.`), "confirmado no cambia");
   assert.ok(body.includes("financeUnit({ cost: landed, days, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: pol.asrCommission })"), "financiamiento con la misma fórmula y TIIE/spread de la COT");
-  assert.ok(body.includes(`priceFromMargin({ landed, finance: fin, margin: marginOf(l, "credit") })`), "precio = costo + margen crédito + financiamiento");
+  assert.ok(body.includes("priceFromMargin({ landed, finance: fin, margin: mCredit })"), "precio = costo + margen crédito + financiamiento");
+  assert.ok(body.includes('cambios.push(`${l.code} ${landed > 0.0001 ? "sin margen" : "sin costo"}: precio sin recalcular`)'), "sin margen no se inventa uno para recalcular");
   assert.ok(body.includes("price = Number(l.cash_price);"), "a 0 días vuelve al precio de contado");
   assert.ok(body.includes("Math.min(pol.invoiceDays || days, days)"), "días factura de Ajustes sin pasar del plazo");
   assert.ok(body.includes(`action: "cambiar-plazo-pedido"`), "bitácora");
@@ -287,7 +355,71 @@ test("panel de la cotización: captura inversa por columna, sin fórmula crédit
   assert.ok(q.includes(`<OfferCells price={rp.cash} landed={landed} fin={0}`), "contado sin financiamiento");
   assert.ok(q.includes(`<OfferCells price={rp.credit} landed={landed} fin={fin}`), "crédito con financiamiento");
   const panel = q.slice(q.indexOf("Documento al cliente"));
-  assert.ok(!panel.includes("creditFromCash("), "en el panel el crédito ya no se deriva del contado (cada columna tiene su margen)");
+  assert.ok(panel.includes("{ ...(prev[l.product_id] ?? rp), [which]: p }"), "en lo ya cotizado cada columna se mueve sola: no se deriva el crédito del contado");
+  // Única excepción: la partida que se está agregando todavía no tiene costo ni
+  // margen guardados, así que su precio a crédito se arma con la base que
+  // manda el servidor (igual que el alta manual). Nunca con el costo en pantalla.
+  assert.equal((panel.match(/creditFromCash\(\{/g) ?? []).length, 1, "solo la partida nueva deriva el crédito");
+  assert.ok(panel.includes("creditFromCash({ cash: p, fin: prod.fin, days: qrow.credit_days })"), "y con la base del servidor");
   assert.ok(q.includes("validateSearch"), "?ver= abre el folio desde la solicitud/pedido");
   assert.ok(q.includes("El cliente aceptó el precio de {OFFER_LABEL[qrow.accepted_offer]}"), "muestra cuál precio aceptó");
+});
+
+// ---------------------------------------------------------------------------
+// C3 — agregar partida: tres comportamientos según de dónde venga el pedido.
+// ---------------------------------------------------------------------------
+test("pedido que vino de cotización: la partida se agrega en la cotización, no en el pedido", () => {
+  const form = src("src/components/order-form.tsx");
+  assert.ok(form.includes("Agregar partida en {inherited.quoteName}"), "el botón manda a la cotización");
+  assert.ok(form.includes("onClick={inherited.onAddLine}"), "y no agrega la línea aquí");
+  assert.ok(form.includes("la partida se agrega ahí, donde pasa por costo, margen y"), "dice por qué");
+  const ped = src("src/routes/sales.$orderId.tsx");
+  assert.ok(ped.includes('onAddLine: editable ? () => void navigate({ to: "/quotes", search: { ver: origin.quote_id } }) : undefined'), "abre la cotización de origen");
+});
+
+test("pedido confirmado: no se agregan partidas, se levanta uno nuevo", () => {
+  const form = src("src/components/order-form.tsx");
+  assert.ok(form.includes("Pedido confirmado: ya no se agregan partidas. Si falta algo, levanta un pedido nuevo."), "mensaje claro");
+  // El mensaje sustituye al botón: el único que agrega una partida local es el
+  // del pedido directo, y va al final de la cadena (confirmado → cotizado → directo).
+  assert.equal((form.match(/onClick=\{addLine\}/g) ?? []).length, 1, "un solo botón que agrega partida local");
+  assert.ok(
+    form.indexOf("Pedido confirmado: ya no se agregan partidas") < form.indexOf("Agregar partida en {inherited.quoteName}") &&
+      form.indexOf("Agregar partida en {inherited.quoteName}") < form.indexOf("onClick={addLine}"),
+    "primero se descarta el confirmado, luego el que vino de cotización, y hasta el final el directo",
+  );
+  const ops = src("src/lib/erp/ops.ts");
+  assert.ok(fnBody(ops, "reviseQuote").includes("ya está confirmado: la cotización ya no se revisa"), "el servidor tampoco deja");
+});
+
+test("pedido capturado directo (sin cotización): agregar partida sigue igual", () => {
+  const form = src("src/components/order-form.tsx");
+  assert.ok(form.includes("onClick={addLine}"), "el botón de siempre para el pedido directo");
+  assert.ok(form.includes("3. Capturado directo (sin cotización) → como siempre."), "y está documentado en el código");
+});
+
+test("la revisión acepta partidas nuevas, les resuelve costo y actualiza el pedido en borrador", () => {
+  const ops = src("src/lib/erp/ops.ts");
+  const body = fnBody(ops, "reviseQuote");
+  assert.ok(body.includes("const nuevasIds = data.lines.filter((l) => !oldLines.some((o) => o.product_id === l.productId))"), "detecta las partidas nuevas");
+  assert.ok(body.includes("resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost"), "costo por el orden único (kardex → referencia)");
+  assert.ok(body.includes("insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price)"), "entra a la cotización");
+  assert.ok(body.includes("partida nueva ×"), "queda en la bitácora de la revisión");
+  assert.ok(body.includes("await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev)"), "a crédito sigue exigiendo costo");
+  // Sincronía con el pedido en borrador.
+  assert.ok(body.includes("const borradores = ordenes.filter((o) => o.state === \"draft\")"), "solo pedidos en borrador");
+  assert.ok(body.includes("insert into sales_lines (so_id, product_id, qty, unit_price, uom)"), "la partida nueva baja al pedido");
+  assert.ok(body.includes(`action: "actualizar-pedido-por-revision"`), "y queda en bitácora del pedido");
+  assert.ok(body.includes("update sales_orders set total = ${totalSo}"), "el total del pedido se rehace");
+  assert.ok(body.includes("// parcial) se queda fuera: el cliente no la pidió."), "una aceptación parcial no se revive");
+});
+
+test("el panel de la cotización deja agregar partida mientras el pedido siga en borrador", () => {
+  const q = src("src/routes/quotes.tsx");
+  assert.ok(q.includes('const borrador = Boolean(qrow.order_id) && qrow.order_state === "draft";'), "sabe si el pedido es borrador");
+  assert.ok(q.includes("const revisable = qrow.state !== \"rejected\" && (!closed || borrador);"), "revisable = abierta, o aceptada con pedido en borrador");
+  assert.ok(q.includes("setAddLines((ls) => [...ls, { productId: data.products[0]?.id ?? 0, qty: 1 }])"), "botón de agregar partida");
+  assert.ok(q.includes("Entra al guardar la revisión: ahí pasa por costo, margen y financiamiento"), "explica cuándo entra");
+  const ops = src("src/lib/erp/ops.ts");
+  assert.ok(fnBody(ops, "listQuotes").includes("as order_state"), "la lista trae el estado del pedido");
 });

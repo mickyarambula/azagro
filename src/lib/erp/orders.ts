@@ -21,6 +21,7 @@ async function ensureQuoteOrigin(sql: Sql) {
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_mode text`);
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_pct numeric(8,4)`);
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_nominal numeric(14,4)`);
+    await sql.query(`alter table quote_lines add column if not exists margin_${col}_source text`);
   }
   await sql`alter table quote_lines add column if not exists finance_unit numeric(14,4)`;
   await sql`alter table quote_lines add column if not exists cost numeric(14,4) not null default 0`;
@@ -263,16 +264,20 @@ export const getOrder = createServerFn({ method: "POST" })
           margin_cash_mode: string | null;
           margin_cash_pct: string | null;
           margin_cash_nominal: string | null;
+          margin_cash_source: string | null;
           margin_credit_mode: string | null;
           margin_credit_pct: string | null;
           margin_credit_nominal: string | null;
+          margin_credit_source: string | null;
         }>`
           select ql.product_id, coalesce(ql.cost,0)::text as cost, coalesce(ql.freight,0)::text as freight,
             coalesce(nullif(ql.cash_price,0), ql.unit_price)::text as cash_price,
             coalesce(nullif(ql.credit_price,0), ql.unit_price)::text as credit_price,
             ql.finance_unit::text as finance_unit,
             ql.margin_cash_mode, ql.margin_cash_pct::text as margin_cash_pct, ql.margin_cash_nominal::text as margin_cash_nominal,
-            ql.margin_credit_mode, ql.margin_credit_pct::text as margin_credit_pct, ql.margin_credit_nominal::text as margin_credit_nominal
+            ql.margin_cash_source,
+            ql.margin_credit_mode, ql.margin_credit_pct::text as margin_credit_pct, ql.margin_credit_nominal::text as margin_credit_nominal,
+            ql.margin_credit_source
           from quote_lines ql where ql.quote_id = ${quote[0].id}
         `
       : [];
@@ -304,7 +309,9 @@ export const getOrder = createServerFn({ method: "POST" })
           landed: showCosts ? landed : null,
           fin_unit: which === "credit" ? Number(ql.finance_unit ?? 0) : 0,
           quoted_price: Number(which === "cash" ? ql.cash_price : ql.credit_price),
-          margin: showMargins && !m.legacy ? { mode: m.mode, pct: m.pct, nominal: m.nominal } : null,
+          // Sin margen guardado va null y la pantalla dice "sin margen": no se
+          // inventa uno. `source` distingue el capturado del que copió la 0018.
+          margin: showMargins && m && !m.legacy ? { mode: m.mode, pct: m.pct, nominal: m.nominal, source: m.source } : null,
         },
       };
     });
@@ -409,17 +416,20 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
     const nuevos: Array<{ id: number; price: number }> = [];
     for (const l of lines) {
       const landed = Number(l.cost) + Number(l.freight);
+      const mCredit = marginOf(l, "credit");
       let price: number;
       if (days <= 0) {
         // De contado: precio de contado de la cotización (costo + margen contado).
         price = Number(l.cash_price);
-      } else if (landed > 0.0001) {
+      } else if (landed > 0.0001 && mCredit) {
         const fin = financeUnit({ cost: landed, days, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: pol.asrCommission });
-        price = priceFromMargin({ landed, finance: fin, margin: marginOf(l, "credit") });
+        price = priceFromMargin({ landed, finance: fin, margin: mCredit });
       } else {
-        // Sin costo en la cotización no hay con qué rehacer el precio: se conserva y se avisa en bitácora.
+        // Sin costo o sin margen guardado no hay con qué rehacer el precio: se
+        // conserva tal cual y se dice por qué en la bitácora. No se inventa un
+        // margen para poder recalcular.
         price = Number(l.unit_price);
-        cambios.push(`${l.code} sin costo: precio sin recalcular`);
+        cambios.push(`${l.code} ${landed > 0.0001 ? "sin margen" : "sin costo"}: precio sin recalcular`);
       }
       price = Math.round(price * 10000) / 10000;
       if (Math.abs(price - Number(l.unit_price)) > 0.009) cambios.push(`${l.code} precio ${Number(l.unit_price)} → ${price}`);

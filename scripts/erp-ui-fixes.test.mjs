@@ -92,9 +92,12 @@ test("cableado: margen, flete y ofertas de RFQ ya no guardan en cada tecla", () 
   // Los dos campos de margen (QtyField % y MoneyField $) deben colgar de
   // onCommit. El <select> de modo margen/nominal es aparte (no es "cada
   // tecla") y se deja como onChange a propósito.
-  const marginCommits = sol.match(/onCommit=\{\(n\) => \{\s*void saveLineMargin\(/g) ?? [];
+  // (Entre el onCommit y la llamada puede ir el candado de "sin margen": salir
+  // del campo sin escribir nada no debe guardar un 0%.)
+  const marginCommits = sol.match(/onCommit=\{\(n\) => \{[^}]*void saveLineMargin\(/g) ?? [];
   assert.equal(marginCommits.length, 2, "las dos capturas de margen (% y $) deben colgar de onCommit");
-  const marginOnChange = sol.match(/onChange=\{\(n\) => \{\s*void saveLineMargin\(/g) ?? [];
+  assert.equal((sol.match(/if \(!m && n === 0\) return;/g) ?? []).length, 2, "pasar por el campo vacío no captura un margen de 0%");
+  const marginOnChange = sol.match(/onChange=\{\(n\) => \{[^}]*void saveLineMargin\(/g) ?? [];
   assert.equal(marginOnChange.length, 0, "el margen ya no debe guardar desde onChange");
 
   const freightCommit = sol.match(/onCommit=\{\(n\) => \{\s*void saveLineFreight\(/g) ?? [];

@@ -11,6 +11,11 @@
  *   * inverso: precio → margen (la cotización captura el precio final y el
  *     margen guardado se recalcula). Una utilidad negativa se guarda tal cual:
  *     se avisa, no se bloquea.
+ *
+ * NO HAY MARGEN POR OMISIÓN. Una partida sin margen capturado devuelve `null`
+ * y toda la pantalla dice "sin margen": inventar un 12% (o un 0%) es decidir
+ * la utilidad por el dueño y hace que los reportes muestren ganancias que
+ * nadie eligió. Mismo criterio que el costo: sin dato, no hay número.
  */
 
 export type MarginMode = "pct" | "nominal";
@@ -19,44 +24,68 @@ export type Offer = "cash" | "credit";
 
 export const OFFER_LABEL: Record<Offer, string> = { cash: "contado", credit: "crédito" };
 
+/** Texto único para la partida sin margen capturado. */
+export const SIN_MARGEN = "Sin margen";
+
+/**
+ * De dónde salió el margen guardado:
+ *   "captura"   — alguien lo escribió (el margen, o el precio del que se despejó).
+ *   "migracion" — lo copió la migración 0018 desde el margen único anterior.
+ * Nulo en filas anteriores a 0018 que nunca se volvieron a guardar.
+ */
+export type MarginSource = "captura" | "migracion";
+
 /** Fila con las columnas nuevas (margin_cash_* / margin_credit_*) y, opcionalmente, el margen único viejo. */
 export type MarginRow = {
   margin_cash_mode?: string | null;
   margin_cash_pct?: string | number | null;
   margin_cash_nominal?: string | number | null;
+  margin_cash_source?: string | null;
   margin_credit_mode?: string | null;
   margin_credit_pct?: string | number | null;
   margin_credit_nominal?: string | number | null;
+  margin_credit_source?: string | null;
   margin_mode?: string | null;
   margin_pct?: string | number | null;
   margin_nominal?: string | number | null;
 };
+
+export type StoredMargin = MarginSpec & { legacy: boolean; source: MarginSource | null };
 
 function n(v: string | number | null | undefined) {
   const x = Number(v);
   return Number.isFinite(x) ? x : 0;
 }
 
+function source(v: string | null | undefined): MarginSource | null {
+  return v === "captura" || v === "migracion" ? v : null;
+}
+
 /**
- * Margen guardado de una columna. Si la partida todavía no tiene el margen
- * nuevo (fila anterior a la migración 0017), cae al margen único viejo; si
- * tampoco hay, 12% (el valor por omisión de siempre en la solicitud).
- * `legacy: true` en la respuesta avisa que el dato viene del margen viejo.
+ * Margen guardado de una columna, o `null` si la partida no tiene margen.
+ * Nulo NO es cero: es "nadie lo ha capturado todavía".
+ *
+ * Orden: 1) columna nueva (margin_cash_* / margin_credit_*); 2) margen único
+ * anterior a la migración 0017, si de verdad trae un número guardado (marcado
+ * `legacy`); 3) sin margen.
  */
-export function marginOf(row: MarginRow, which: Offer): MarginSpec & { legacy: boolean } {
+export function marginOf(row: MarginRow, which: Offer): StoredMargin | null {
   const mode = which === "cash" ? row.margin_cash_mode : row.margin_credit_mode;
-  if (mode === "pct" || mode === "nominal") {
+  const pct = which === "cash" ? row.margin_cash_pct : row.margin_credit_pct;
+  const nominal = which === "cash" ? row.margin_cash_nominal : row.margin_credit_nominal;
+  if ((mode === "pct" || mode === "nominal") && (pct != null || nominal != null)) {
     return {
       mode,
-      pct: n(which === "cash" ? row.margin_cash_pct : row.margin_credit_pct),
-      nominal: n(which === "cash" ? row.margin_cash_nominal : row.margin_credit_nominal),
+      pct: n(pct),
+      nominal: n(nominal),
       legacy: false,
+      source: source(which === "cash" ? row.margin_cash_source : row.margin_credit_source),
     };
   }
-  if (row.margin_mode === "pct" || row.margin_mode === "nominal") {
-    return { mode: row.margin_mode, pct: n(row.margin_pct), nominal: n(row.margin_nominal), legacy: true };
+  if ((row.margin_mode === "pct" || row.margin_mode === "nominal") && (row.margin_pct != null || row.margin_nominal != null)) {
+    return { mode: row.margin_mode, pct: n(row.margin_pct), nominal: n(row.margin_nominal), legacy: true, source: null };
   }
-  return { mode: "pct", pct: row.margin_pct == null ? 12 : n(row.margin_pct), nominal: n(row.margin_nominal), legacy: true };
+  return null;
 }
 
 /** Margen por unidad en pesos según el modo. No recorta negativos: lo que se capturó es lo que vale. */
@@ -82,8 +111,9 @@ export function marginFromPrice(i: { price: number; landed: number; finance: num
   return { mode: i.mode, pct, nominal };
 }
 
-/** Texto de bitácora: "$1500" o "12%". */
-export function marginText(m: MarginSpec) {
+/** Texto de bitácora: "$1500" o "12%". Sin margen capturado, lo dice. */
+export function marginText(m: MarginSpec | null) {
+  if (!m) return SIN_MARGEN.toLowerCase();
   return m.mode === "nominal" ? `$${Number(m.nominal)}` : `${Number(m.pct)}%`;
 }
 

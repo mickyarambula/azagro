@@ -1,7 +1,7 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { OrderFields, stateLabel, type OrderDraft, type OrderLookups } from "@/components/order-form";
-import { OFFER_LABEL, marginText } from "@/lib/erp/margins";
+import { OFFER_LABEL, SIN_MARGEN, marginText } from "@/lib/erp/margins";
 import { BackBar, StatusPill } from "@/components/erp";
 import { Expediente } from "@/components/expediente";
 import { DocFiles } from "@/components/doc-files";
@@ -22,6 +22,7 @@ export const Route = createFileRoute("/sales/$orderId")({
 
 function Ficha() {
   const { orderId } = Route.useParams();
+  const navigate = useNavigate();
   const id = Number(orderId);
   const { can, role } = useAccess();
   const canEdit = can("sales", "edit");
@@ -336,6 +337,8 @@ function Ficha() {
                 days: form.creditDays,
                 offer: origin.accepted_offer === "cash" || origin.accepted_offer === "credit" ? origin.accepted_offer : null,
                 onChange: editable ? () => setChangeTerm((v) => !v) : undefined,
+                // La partida nueva se captura en la cotización (revisión), no aquí.
+                onAddLine: editable ? () => void navigate({ to: "/quotes", search: { ver: origin.quote_id } }) : undefined,
               }
             : null
         }
@@ -413,7 +416,16 @@ function Ficha() {
                     <td className={`px-3 py-2 text-right tabular-nums ${util != null && util < 0 ? "text-danger" : ""}`}>
                       {util != null ? moneyIn(util, form.currency) : "—"}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{o.margin ? marginText(o.margin) : "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {o.margin ? (
+                        <>
+                          {marginText(o.margin)}
+                          {o.margin.source === "migracion" ? <span className="block text-[11px] text-muted">de la migración</span> : null}
+                        </>
+                      ) : (
+                        <span className="text-warn">{SIN_MARGEN}</span>
+                      )}
+                    </td>
                   </tr>
                 );
               })}

@@ -143,6 +143,8 @@ export type InheritedTerm = {
   days: number;
   offer: "cash" | "credit" | null;
   onChange?: () => void;
+  /** Punto C3: una partida nueva se agrega en la cotización, no aquí. Lleva a la revisión. */
+  onAddLine?: () => void;
 };
 
 export function OrderFields({
@@ -467,8 +469,28 @@ export function OrderFields({
         )}
       </div>
 
+      {/* Agregar partida, según de dónde venga el pedido (punto C3):
+          1. Borrador que vino de cotización → no se agrega aquí: se abre una revisión
+             de la cotización, donde el producto pasa por costo, margen y financiamiento.
+          2. Confirmado → no se agregan partidas; se levanta un pedido nuevo.
+          3. Capturado directo (sin cotización) → como siempre. */}
       <div className="flex flex-wrap items-center gap-2">
-        {!locked && (
+        {locked ? (
+          <p className="text-[12px] text-muted">
+            Pedido confirmado: ya no se agregan partidas. Si falta algo, levanta un pedido nuevo.
+          </p>
+        ) : inherited ? (
+          <>
+            <button type="button" className="erp-btn-primary" onClick={inherited.onAddLine} disabled={!inherited.onAddLine}>
+              <Plus className="mr-1 inline size-3.5" />
+              Agregar partida en {inherited.quoteName}
+            </button>
+            <span className="text-[12px] text-muted">
+              Este pedido vino de {inherited.quoteName}: la partida se agrega ahí, donde pasa por costo, margen y
+              financiamiento. Al guardar la revisión, el pedido se actualiza solo.
+            </span>
+          </>
+        ) : (
           <button type="button" className="erp-btn-primary" onClick={addLine}>
             <Plus className="mr-1 inline size-3.5" />
             Agregar partida

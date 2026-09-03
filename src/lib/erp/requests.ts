@@ -55,13 +55,17 @@ async function ensure(sql: Sql) {
       supplier_id integer references partners(id)
     )
   `);
-  await sql.query(`alter table customer_request_lines add column if not exists margin_mode text not null default 'pct'`);
-  await sql.query(`alter table customer_request_lines add column if not exists margin_pct numeric(8,4) not null default 12`);
-  await sql.query(`alter table customer_request_lines add column if not exists margin_nominal numeric(14,4) not null default 0`);
+  // Margen único anterior (previo a 0017). Sin default y sin NOT NULL: una
+  // partida nueva nace SIN margen y la pantalla lo dice. Ya no existe el 12%
+  // por omisión (migración 0018).
+  await sql.query(`alter table customer_request_lines add column if not exists margin_mode text`);
+  await sql.query(`alter table customer_request_lines add column if not exists margin_pct numeric(8,4)`);
+  await sql.query(`alter table customer_request_lines add column if not exists margin_nominal numeric(14,4)`);
   await sql.query(`alter table customer_request_lines add column if not exists pick_reason text not null default ''`);
   // Migración 0017 (dos precios): plazo/moneda/TC de la solicitud y margen
-  // contado / crédito por partida. Nulo = no capturado con el esquema nuevo;
-  // el código cae al margen único viejo (margin_*) y NO rellena nada solo.
+  // contado / crédito por partida. Nulo = nadie lo ha capturado.
+  // 0018: margin_*_source dice si el número lo escribió alguien ('captura') o
+  // lo copió la migración desde el margen viejo ('migracion').
   await sql.query(`alter table customer_requests add column if not exists credit_days integer`);
   await sql.query(`alter table customer_requests add column if not exists currency text`);
   await sql.query(`alter table customer_requests add column if not exists fx_rate numeric(12,4)`);
@@ -69,9 +73,11 @@ async function ensure(sql: Sql) {
     await sql.query(`alter table customer_request_lines add column if not exists margin_${col}_mode text`);
     await sql.query(`alter table customer_request_lines add column if not exists margin_${col}_pct numeric(8,4)`);
     await sql.query(`alter table customer_request_lines add column if not exists margin_${col}_nominal numeric(14,4)`);
+    await sql.query(`alter table customer_request_lines add column if not exists margin_${col}_source text`);
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_mode text`);
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_pct numeric(8,4)`);
     await sql.query(`alter table quote_lines add column if not exists margin_${col}_nominal numeric(14,4)`);
+    await sql.query(`alter table quote_lines add column if not exists margin_${col}_source text`);
   }
   await sql.query(`alter table quote_lines add column if not exists finance_unit numeric(14,4)`);
   await sql.query(`alter table quotes add column if not exists accepted_offer text`);
@@ -236,26 +242,30 @@ export const getRequest = createServerFn({ method: "POST" })
       on_hand: string;
       on_hand_own: string;
       on_hand_supplier: string;
-      margin_mode: string;
-      margin_pct: string;
-      margin_nominal: string;
+      margin_mode: string | null;
+      margin_pct: string | null;
+      margin_nominal: string | null;
       pick_reason: string;
       margin_cash_mode: string | null;
       margin_cash_pct: string | null;
       margin_cash_nominal: string | null;
+      margin_cash_source: string | null;
       margin_credit_mode: string | null;
       margin_credit_pct: string | null;
       margin_credit_nominal: string | null;
+      margin_credit_source: string | null;
     }>`
       select l.id, l.product_id, pr.code, pr.name as product, l.qty::text, l.uom, l.cost::text, l.freight::text,
         l.supplier_id,
         coalesce((select sum(quantity) from stock_quants q where q.product_id = l.product_id),0)::text as on_hand,
         coalesce((select sum(q.quantity) from stock_quants q join locations lo on lo.id = q.location_id where q.product_id = l.product_id and lo.loc_type = 'internal'),0)::text as on_hand_own,
         coalesce((select sum(q.quantity) from stock_quants q join locations lo on lo.id = q.location_id where q.product_id = l.product_id and lo.loc_type = 'supplier'),0)::text as on_hand_supplier,
-        coalesce(l.margin_mode,'pct') as margin_mode, coalesce(l.margin_pct,12)::text as margin_pct,
-        coalesce(l.margin_nominal,0)::text as margin_nominal, coalesce(l.pick_reason,'') as pick_reason,
+        l.margin_mode, l.margin_pct::text as margin_pct,
+        l.margin_nominal::text as margin_nominal, coalesce(l.pick_reason,'') as pick_reason,
         l.margin_cash_mode, l.margin_cash_pct::text as margin_cash_pct, l.margin_cash_nominal::text as margin_cash_nominal,
-        l.margin_credit_mode, l.margin_credit_pct::text as margin_credit_pct, l.margin_credit_nominal::text as margin_credit_nominal
+        l.margin_cash_source,
+        l.margin_credit_mode, l.margin_credit_pct::text as margin_credit_pct, l.margin_credit_nominal::text as margin_credit_nominal,
+        l.margin_credit_source
       from customer_request_lines l
       join products pr on pr.id = l.product_id
       where l.request_id = ${data.id}
@@ -291,8 +301,8 @@ export const getRequest = createServerFn({ method: "POST" })
         ...l,
         cost: "0",
         freight: "0",
-        margin_pct: "0",
-        margin_nominal: "0",
+        margin_pct: null,
+        margin_nominal: null,
         margin_cash_pct: null,
         margin_cash_nominal: null,
         margin_credit_pct: null,
@@ -664,9 +674,9 @@ export const saveLineMargin = createServerFn({ method: "POST" })
     await ensure(sql);
     await assertRequestOpen(sql, companyId, data.requestId);
     const before = await sql<{
-      margin_mode: string;
-      margin_pct: string;
-      margin_nominal: string;
+      margin_mode: string | null;
+      margin_pct: string | null;
+      margin_nominal: string | null;
       margin_cash_mode: string | null;
       margin_cash_pct: string | null;
       margin_cash_nominal: string | null;
@@ -676,8 +686,8 @@ export const saveLineMargin = createServerFn({ method: "POST" })
       name: string;
       code: string;
     }>`
-      select coalesce(l.margin_mode,'pct') as margin_mode, coalesce(l.margin_pct,0)::text as margin_pct,
-        coalesce(l.margin_nominal,0)::text as margin_nominal,
+      select l.margin_mode, l.margin_pct::text as margin_pct,
+        l.margin_nominal::text as margin_nominal,
         l.margin_cash_mode, l.margin_cash_pct::text as margin_cash_pct, l.margin_cash_nominal::text as margin_cash_nominal,
         l.margin_credit_mode, l.margin_credit_pct::text as margin_credit_pct, l.margin_credit_nominal::text as margin_credit_nominal,
         r.name, p.code
@@ -688,16 +698,20 @@ export const saveLineMargin = createServerFn({ method: "POST" })
     `;
     if (!before[0]) throw new Error("Partida no encontrada");
     const nuevoSpec = { mode: data.marginMode, pct: data.marginPct, nominal: data.marginNominal };
+    // Lo capturó una persona: queda marcado 'captura' para distinguirlo del
+    // margen que copió la migración 0018.
     if (data.which === "cash") {
       await sql`
         update customer_request_lines
-        set margin_cash_mode = ${data.marginMode}, margin_cash_pct = ${data.marginPct}, margin_cash_nominal = ${data.marginNominal}
+        set margin_cash_mode = ${data.marginMode}, margin_cash_pct = ${data.marginPct}, margin_cash_nominal = ${data.marginNominal},
+            margin_cash_source = 'captura'
         where request_id = ${data.requestId} and product_id = ${data.productId}
       `;
     } else {
       await sql`
         update customer_request_lines
-        set margin_credit_mode = ${data.marginMode}, margin_credit_pct = ${data.marginPct}, margin_credit_nominal = ${data.marginNominal}
+        set margin_credit_mode = ${data.marginMode}, margin_credit_pct = ${data.marginPct}, margin_credit_nominal = ${data.marginNominal},
+            margin_credit_source = 'captura'
         where request_id = ${data.requestId} and product_id = ${data.productId}
       `;
     }
@@ -805,13 +819,14 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     await ensure(sql);
     const lines = await sql<{
       product_id: number;
+      code: string;
       qty: string;
       uom: string;
       cost: string;
       freight: string;
-      margin_mode: string;
-      margin_pct: string;
-      margin_nominal: string;
+      margin_mode: string | null;
+      margin_pct: string | null;
+      margin_nominal: string | null;
       margin_cash_mode: string | null;
       margin_cash_pct: string | null;
       margin_cash_nominal: string | null;
@@ -819,21 +834,37 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       margin_credit_pct: string | null;
       margin_credit_nominal: string | null;
     }>`
-      select product_id, qty::text, uom, cost::text, freight::text,
-        coalesce(margin_mode,'pct') as margin_mode, coalesce(margin_pct,12)::text as margin_pct,
-        coalesce(margin_nominal,0)::text as margin_nominal,
-        margin_cash_mode, margin_cash_pct::text as margin_cash_pct, margin_cash_nominal::text as margin_cash_nominal,
-        margin_credit_mode, margin_credit_pct::text as margin_credit_pct, margin_credit_nominal::text as margin_credit_nominal
-      from customer_request_lines where request_id = ${data.requestId}
+      select l.product_id, p.code, l.qty::text, l.uom, l.cost::text, l.freight::text,
+        l.margin_mode, l.margin_pct::text as margin_pct,
+        l.margin_nominal::text as margin_nominal,
+        l.margin_cash_mode, l.margin_cash_pct::text as margin_cash_pct, l.margin_cash_nominal::text as margin_cash_nominal,
+        l.margin_credit_mode, l.margin_credit_pct::text as margin_credit_pct, l.margin_credit_nominal::text as margin_credit_nominal
+      from customer_request_lines l join products p on p.id = l.product_id
+      where l.request_id = ${data.requestId}
+      order by l.id
     `;
     if (!lines.length) throw new Error("Sin partidas");
+    // Sin margen no hay precio: el sistema no inventa uno. Se dice qué partida
+    // y qué columna falta, y se cotiza cuando estén capturadas.
+    const sinMargen = lines
+      .flatMap((l) => {
+        const falta: string[] = [];
+        if (!marginOf(l, "cash")) falta.push(OFFER_LABEL.cash);
+        if (data.creditDays > 0 && !marginOf(l, "credit")) falta.push(OFFER_LABEL.credit);
+        return falta.length ? [`${l.code} (${falta.join(" y ")})`] : [];
+      });
+    if (sinMargen.length) {
+      throw new Error(`Captura el margen antes de cotizar: ${sinMargen.join(", ")}.`);
+    }
     // Dos precios, dos márgenes: contado = costo puesto + margen contado (sin
     // financiamiento); crédito = costo puesto + margen crédito + financiamiento
     // DENTRO del precio (comisión + Capa 1 con los días de este pedido, misma
     // fórmula de siempre). La comisión sale de Ajustes.
     const pol = await policy(sql, companyId);
     const priced = lines.map((l) => {
-      const mCash = marginOf(l, "cash");
+      // Ya se validó arriba: contado siempre tiene margen, y crédito lo tiene
+      // siempre que la cotización lleve plazo. A 0 días no hay precio a crédito.
+      const mCash = marginOf(l, "cash")!;
       const mCredit = marginOf(l, "credit");
       const cashCalc = priceSale({
         cost: Number(l.cost),
@@ -848,21 +879,23 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         marginNominal: mCash.nominal,
         qty: Number(l.qty),
       });
-      const creditCalc = priceSale({
-        cost: Number(l.cost),
-        freight: Number(l.freight),
-        other: 0,
-        days: data.creditDays,
-        tiie: Math.max(0, data.tiie),
-        costSpread: Math.max(0, data.spread),
-        commissionRate: pol.asrCommission,
-        marginMode: mCredit.mode,
-        marginPct: mCredit.pct,
-        marginNominal: mCredit.nominal,
-        qty: Number(l.qty),
-      });
+      const creditCalc = mCredit
+        ? priceSale({
+            cost: Number(l.cost),
+            freight: Number(l.freight),
+            other: 0,
+            days: data.creditDays,
+            tiie: Math.max(0, data.tiie),
+            costSpread: Math.max(0, data.spread),
+            commissionRate: pol.asrCommission,
+            marginMode: mCredit.mode,
+            marginPct: mCredit.pct,
+            marginNominal: mCredit.nominal,
+            qty: Number(l.qty),
+          })
+        : null;
       const cash = Number(cashCalc.priceUnit.toFixed(4));
-      const credit = Number(creditCalc.priceUnit.toFixed(4));
+      const credit = creditCalc ? Number(creditCalc.priceUnit.toFixed(4)) : 0;
       const unitPrice = data.creditDays > 0 ? credit : cash;
       const landed = cashCalc.landedUnit;
       return {
@@ -877,8 +910,8 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         // Los dos márgenes quedan escritos en la cotización con % y $ en
         // sincronía, y el financiamiento por unidad que quedó dentro del crédito.
         marginCash: normalizeMargin({ mode: mCash.mode, pct: mCash.pct, nominal: mCash.nominal }, landed),
-        marginCredit: normalizeMargin({ mode: mCredit.mode, pct: mCredit.pct, nominal: mCredit.nominal }, landed),
-        financeUnit: Number(creditCalc.financeUnit.toFixed(4)),
+        marginCredit: mCredit ? normalizeMargin({ mode: mCredit.mode, pct: mCredit.pct, nominal: mCredit.nominal }, landed) : null,
+        financeUnit: creditCalc ? Number(creditCalc.financeUnit.toFixed(4)) : 0,
       };
     });
     const total = priced.reduce((s, l) => s + l.qty * l.unitPrice, 0);
@@ -908,10 +941,12 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     for (const line of priced) {
       await sql`
         insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price,
-          margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_credit_mode, margin_credit_pct, margin_credit_nominal, finance_unit)
+          margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
+          margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit)
         values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.cash}, ${line.credit},
-          ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal},
-          ${line.marginCredit.mode}, ${line.marginCredit.pct}, ${line.marginCredit.nominal}, ${line.financeUnit})
+          ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
+          ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
+          ${line.marginCredit ? "captura" : null}, ${line.financeUnit})
       `;
     }
     // La solicitud queda con el plazo/moneda/TC con que se cotizó y se
