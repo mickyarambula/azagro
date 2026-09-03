@@ -3,7 +3,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Field, PageHead, Panel } from "@/components/erp";
 import { useAccess } from "@/lib/access";
-import { getSettingsForm, POLICY_FIELDS, saveFx, saveSettings, saveTiie, type PolicyField } from "@/lib/erp/ops";
+import { getSettingsForm, POLICY_FIELDS, QUOTE_TERMS_LABEL, saveFx, saveSettings, saveTiie, type PolicyField } from "@/lib/erp/ops";
+import { formatTerms, parseTerms } from "@/lib/erp/ladder";
 import { BUSINESS_RULES, YEAR_DAYS } from "@/lib/erp/rules";
 import { dbStatus, exportBackup } from "@/lib/erp/cutover";
 import { applyTheme, readThemePref, type ThemePref } from "@/lib/theme";
@@ -49,6 +50,9 @@ function SettingsBody() {
     earlyPayDays: null,
   });
   const [missing, setMissing] = useState<string[]>([]);
+  // Escalera de plazos de la cotización interna: texto "0, 30, 60…" tal cual
+  // se captura; vacío = sin capturar (la base la trae sembrada).
+  const [quoteTerms, setQuoteTerms] = useState("");
   const [tiie, setTiie] = useState<Array<{ date: string; rate: string }>>([]);
   const [fx, setFx] = useState<Array<{ date: string; usd_mxn: string }>>([]);
   const [tDate, setTDate] = useState(() => todayMx());
@@ -78,6 +82,7 @@ function SettingsBody() {
     });
     setPolicy(s.values);
     setMissing(s.missing);
+    setQuoteTerms(s.quoteTerms ? formatTerms(s.quoteTerms) : "");
     setTiie(s.tiie);
     setFx(s.fx);
   }
@@ -104,14 +109,15 @@ function SettingsBody() {
     e.preventDefault();
     setError(null);
     setMsg(null);
-    const faltan = POLICY_FIELDS.filter(([k]) => policy[k] == null).map(([, label]) => label);
+    const faltan: string[] = POLICY_FIELDS.filter(([k]) => policy[k] == null).map(([, label]) => label);
+    if (!parseTerms(quoteTerms)?.length) faltan.push(QUOTE_TERMS_LABEL);
     if (faltan.length) {
       setError(`Falta capturar: ${faltan.join(", ")}. Sin esos números el sistema no opera.`);
       return;
     }
     const { mailReady: _ready, ...rest } = form;
     try {
-      await saveSettings({ data: { ...rest, ...(policy as Record<PolicyField, number>) } });
+      await saveSettings({ data: { ...rest, ...(policy as Record<PolicyField, number>), quoteTerms } });
       setMsg("Política guardada");
       await load();
     } catch (err) {
@@ -290,8 +296,19 @@ function SettingsBody() {
         <Field label="Spread mora (factura de intereses, fracción)">{numInput("collectionSpread", "0.0001")}</Field>
         <Field label="Comisión ASR (en precio, una sola vez, fracción)">{numInput("asrCommission", "0.0001")}</Field>
         <Field label="Spread ASR (en precio, TIIE +, fracción)">{numInput("asrSpread", "0.0001")}</Field>
+        <Field label="Escalera de plazos de la cotización (días separados por coma; 0 = contado)">
+          <input
+            className={quoteTerms.trim() && !parseTerms(quoteTerms)?.length ? "erp-input border-danger" : "erp-input"}
+            value={quoteTerms}
+            placeholder="sin capturar"
+            onChange={(e) => setQuoteTerms(e.target.value)}
+          />
+          <p className="mt-1 text-[11px] font-normal normal-case tracking-normal text-muted">
+            Columnas de la escalera interna por partida (precio, financiamiento y utilidad por plazo). Al cliente solo le llegan dos precios: contado y el del plazo acordado.
+          </p>
+        </Field>
         <p className="md:col-span-3 text-sm text-muted">
-          La TIIE no se captura aquí: siempre sale de la tabla de abajo (renglón vigente en la fecha que toque, con su fecha a la vista). Financiamiento dentro del precio de venta (por unidad) = costo × {pct(policy.asrCommission)} + costo × {policy.asrCommission == null ? "—" : (1 + policy.asrCommission).toFixed(2)} × (TIIE + {pct(policy.asrSpread)}) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días, y además genera interés porque la línea adelanta costo + comisión. De contado (0 días) el financiamiento es $0, comisión incluida.
+          Precio de venta por unidad = (costo puesto + financiamiento) ÷ (1 − margen %): el margen es sobre el precio de venta, no sobre el costo; con margen en pesos, precio = costo puesto + financiamiento + monto. La TIIE no se captura aquí: siempre sale de la tabla de abajo (renglón vigente en la fecha que toque, con su fecha a la vista). Financiamiento dentro del precio de venta (por unidad) = costo × {pct(policy.asrCommission)} + costo × {policy.asrCommission == null ? "—" : (1 + policy.asrCommission).toFixed(2)} × (TIIE + {pct(policy.asrSpread)}) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días, y además genera interés porque la línea adelanta costo + comisión. De contado (0 días) el financiamiento es $0, comisión incluida.
           Mora (solo factura FI si ya venció) = Cargo × (TIIE + {pct(policy.collectionSpread, 1)}) × días exactos / {YEAR_DAYS}. En el estado de cuenta, comisión {pct(policy.fegaCommission)} + FEGA {policy.fegaRate == null || policy.fegaCommission == null ? "—" : ((policy.fegaRate - policy.fegaCommission) * 100).toFixed(2) + "%"} = {pct(policy.fegaRate)} sobre el cargo (columna «Comisión + FEGA»); no se mete al precio del producto.
         </p>
         {editable && <button className="erp-btn-primary">Guardar política</button>}

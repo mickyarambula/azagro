@@ -7,8 +7,9 @@ import { SendButton } from "@/components/send-doc";
 import { getSettings } from "@/lib/erp/ops";
 import { missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { saveRfqBid } from "@/lib/erp/rfq";
-import { annualRate, priceSale } from "@/lib/erp/pricing";
-import { marginOf, OFFER_LABEL, SIN_MARGEN, type Offer } from "@/lib/erp/margins";
+import { annualRate, financeUnit, priceSale } from "@/lib/erp/pricing";
+import { marginInvalidMessage, marginOf, marginUnit as marginUnitOf, marginValid, OFFER_LABEL, SIN_MARGEN, type Offer } from "@/lib/erp/margins";
+import { ladderFor, termLabel } from "@/lib/erp/ladder";
 import {
   applyCheapest,
   deleteRequest,
@@ -142,6 +143,8 @@ function Page() {
   const [spreadPct, setSpreadPct] = useState(0);
   const [commissionPct, setCommissionPct] = useState(0);
   const [days, setDays] = useState(0);
+  // Escalera de plazos (Ajustes): columnas de precio de la herramienta interna.
+  const [terms, setTerms] = useState<number[]>([]);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
   const [fxRate, setFxRate] = useState(0);
   const [fxFrom, setFxFrom] = useState<string | null>(null);
@@ -207,6 +210,7 @@ function Page() {
         // El spread del precio es el de ASR (spread de costo), no el de mora.
         setSpreadPct(Number((s.asrSpread * 100).toFixed(2)));
         setCommissionPct(Number((s.asrCommission * 100).toFixed(2)));
+        setTerms(s.quoteTerms);
         // TC propuesto: el más reciente de la tabla, salvo que la solicitud ya
         // traiga uno pactado.
         const fx = nearestRate(s.fx.map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), hoy);
@@ -688,20 +692,25 @@ function Page() {
         {settingsError ? <p className="mb-3 text-[12px] text-danger">Ajustes no disponibles: {settingsError}</p> : null}
         {!tiieFrom && days > 0 && !settingsError ? <p className="mb-3 text-[12px] text-danger">{missingRateMessage(todayMx(), "cotización a crédito")}</p> : null}
         <p className="mb-3 text-[13px] text-muted">
-          Financiamiento por unidad (solo en el precio a crédito): costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × {(1 + commissionPct / 100).toFixed(2)} × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × {days} d / 360.
+          Precio = (costo puesto + financiamiento) ÷ (1 − margen %): el margen es sobre el precio de venta, no sobre el costo. Financiamiento por unidad (solo a plazo): costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × {(1 + commissionPct / 100).toFixed(2)} × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × días / 360.
           {days === 0 ? " Con 0 días solo se ofrece contado." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El spread de mora NO va aquí: es factura de intereses al vencimiento.
+          {" "}Escalera interna: el margen de contado arma la columna de contado y el de crédito todas las columnas a plazo (Ajustes). Al cliente solo le llegan dos precios: contado{days > 0 ? ` y ${days} d` : ""}.
         </p>
         <div className="overflow-x-auto erp-card">
-          <table className="w-full min-w-[1180px] text-left text-[13px]">
+          <table className="w-full min-w-[1400px] text-left text-[13px]">
             <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
               <tr>
                 <th className="px-4 py-2.5 font-medium">Producto</th>
                 <th className="px-3 py-2.5 text-right font-medium">Costo puesto</th>
                 <th className="px-3 py-2.5 font-medium">Margen contado</th>
-                <th className="px-3 py-2.5 text-right font-medium">Precio contado</th>
                 <th className="px-3 py-2.5 font-medium">Margen crédito</th>
-                <th className="px-3 py-2.5 text-right font-medium">Financiero /u</th>
-                <th className="px-3 py-2.5 text-right font-medium">Precio crédito {days > 0 ? `${days} d` : ""}</th>
+                <th className="px-3 py-2.5 text-right font-medium">Financiero /u {days > 0 ? `${days} d` : ""}</th>
+                {ladderFor({ terms, agreed: days, landed: 0, marginCash: null, marginCredit: null, financeAt: () => 0 }).map((st) => (
+                  <th key={st.days} className={`px-3 py-2.5 text-right font-medium ${st.agreed || st.days === 0 ? "text-ink" : ""}`}>
+                    {termLabel(st.days)}
+                    {st.agreed ? <span className="block text-[10px] normal-case tracking-normal text-accent">acordado</span> : null}
+                  </th>
+                ))}
                 <th className="px-3 py-2.5 text-right font-medium">Importe</th>
               </tr>
             </thead>
@@ -709,57 +718,55 @@ function Page() {
               {lines.map((l) => {
                 const mCash = marginOf(l, "cash");
                 const mCredit = marginOf(l, "credit");
-                // Sin margen no hay precio que calcular: se muestra "Sin margen"
-                // y el precio queda en "—" hasta que alguien capture uno.
-                const precio = (m: typeof mCash, plazo: number) =>
-                  priceSale({
-                    cost: num(l.cost),
-                    freight: num(l.freight),
-                    other: 0,
-                    days: plazo,
-                    tiie: tiiePct / 100,
-                    costSpread: spreadPct / 100,
-                    commissionRate: commissionPct / 100,
-                    marginMode: m?.mode ?? "pct",
-                    marginPct: m?.pct ?? 0,
-                    marginNominal: m?.nominal ?? 0,
-                    qty: num(l.qty),
-                  });
-                const cashCalc = precio(mCash, 0);
-                const calc = precio(mCredit, days);
+                const landed = num(l.cost) + num(l.freight);
+                // Financiamiento por unidad de cada columna, con las tasas de hoy
+                // (TIIE de la tabla, spread y comisión ASR de Ajustes).
+                const finAt = (plazo: number) => financeUnit({ cost: landed, days: plazo, tiie: tiiePct / 100, costSpread: spreadPct / 100, commissionRate: commissionPct / 100 });
+                // Desglose comisión + Capa 1 del plazo acordado (solo informativo).
+                const calc = priceSale({
+                  cost: num(l.cost),
+                  freight: num(l.freight),
+                  other: 0,
+                  days,
+                  tiie: tiiePct / 100,
+                  costSpread: spreadPct / 100,
+                  commissionRate: commissionPct / 100,
+                  marginMode: "nominal",
+                  marginPct: 0,
+                  marginNominal: 0,
+                  qty: num(l.qty),
+                });
+                // Escalera completa: contado con el margen de contado, cada plazo
+                // con el margen de crédito. Sin margen (o margen ≥ 100%) la
+                // columna queda en "—": no se inventa un número.
+                const steps = ladderFor({ terms, agreed: days, landed, marginCash: mCash, marginCredit: mCredit, financeAt: finAt });
+                const cash = steps.find((st) => st.days === 0);
+                const agreed = days > 0 ? steps.find((st) => st.days === days) : null;
+                const invalido = [mCash, days > 0 ? mCredit : null].find((m) => m && !marginValid(m));
                 return (
                   <tr key={l.id} className="border-t border-line align-top">
                     <td className="px-4 py-2.5">
                       {l.product}
                       <span className="ml-2 text-[11px] text-muted">{qty(l.qty)} {l.uom}</span>
+                      {invalido ? <span className="block text-[11px] text-danger">{marginInvalidMessage(invalido)}</span> : null}
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
-                      {num(l.cost) > 0 ? money(cashCalc.landedUnit) : <span className="text-warn">Sin costo</span>}
+                      {num(l.cost) > 0 ? money(landed) : <span className="text-warn">Sin costo</span>}
                       {num(l.freight) > 0 ? <span className="block text-[11px] text-muted">{money(num(l.cost))} + flete {money(num(l.freight))}</span> : null}
                     </td>
                     <td className="px-3 py-2">
-                      <MarginCell requestId={id} line={l} which="cash" marginUnit={cashCalc.marginUnit} disabled={locked} onSaved={load} onError={fail} />
-                      {mCash ? (
+                      <MarginCell requestId={id} line={l} which="cash" marginUnit={marginValid(mCash) ? marginUnitOf(mCash, landed, 0) : 0} disabled={locked} onSaved={load} onError={fail} />
+                      {mCash && cash?.price != null ? (
                         <span className="block text-[11px] text-muted tabular-nums">
-                          {mCash.mode === "pct" ? `${money(cashCalc.marginUnit)} / ${l.uom}` : `${cashCalc.marginPct.toFixed(1)}%`} · total {money(cashCalc.margin)}
+                          {mCash.mode === "pct" ? `${money(cash.utility ?? 0)} / ${l.uom}` : `${(cash.pct ?? 0).toFixed(1)}% del precio`} · total {money((cash.utility ?? 0) * num(l.qty))}
                         </span>
                       ) : null}
                     </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">
-                      {mCash ? (
-                        <>
-                          <span className={cashCalc.marginUnit < 0 ? "text-danger" : ""}>{money(cashCalc.priceUnit)}</span>
-                          <span className="block text-[11px] text-muted">costo {money(cashCalc.landedUnit)} + margen {money(cashCalc.marginUnit)}</span>
-                        </>
-                      ) : (
-                        <span className="text-muted">—</span>
-                      )}
-                    </td>
                     <td className="px-3 py-2">
-                      <MarginCell requestId={id} line={l} which="credit" marginUnit={calc.marginUnit} disabled={locked} onSaved={load} onError={fail} />
-                      {mCredit ? (
+                      <MarginCell requestId={id} line={l} which="credit" marginUnit={marginValid(mCredit) ? marginUnitOf(mCredit, landed, days > 0 ? finAt(days) : 0) : 0} disabled={locked} onSaved={load} onError={fail} />
+                      {mCredit && agreed?.price != null ? (
                         <span className="block text-[11px] text-muted tabular-nums">
-                          {mCredit.mode === "pct" ? `${money(calc.marginUnit)} / ${l.uom}` : `${calc.marginPct.toFixed(1)}%`} · total {money(calc.margin)}
+                          {mCredit.mode === "pct" ? `${money(agreed.utility ?? 0)} / ${l.uom}` : `${(agreed.pct ?? 0).toFixed(1)}% del precio`} · total {money((agreed.utility ?? 0) * num(l.qty))}
                         </span>
                       ) : null}
                     </td>
@@ -775,21 +782,23 @@ function Page() {
                         <span className="text-muted">—</span>
                       )}
                     </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums">
-                      {days > 0 && mCredit ? (
-                        <>
-                          <span className={calc.marginUnit < 0 ? "text-danger" : ""}>{money(calc.priceUnit)}</span>
-                          <span className="block text-[11px] text-muted">
-                            costo {money(calc.landedUnit)} + margen {money(calc.marginUnit)}{calc.financeUnit > 0.009 ? ` + fin ${money(calc.financeUnit)}` : ""}
-                          </span>
-                        </>
-                      ) : (
-                        <span className="text-muted">—</span>
-                      )}
-                    </td>
+                    {steps.map((st) => (
+                      <td key={st.days} className={`px-3 py-2.5 text-right tabular-nums ${st.agreed ? "bg-brand-soft/40" : ""}`}>
+                        {st.price != null ? (
+                          <>
+                            <span className={`${st.agreed || st.days === 0 ? "font-semibold" : ""} ${(st.utility ?? 0) < -0.009 ? "text-danger" : ""}`}>{money(st.price)}</span>
+                            <span className="block text-[11px] text-muted">
+                              {st.days > 0 ? `fin ${money(st.finance)} · ` : ""}util {money(st.utility ?? 0)} ({(st.pct ?? 0).toFixed(1)}%)
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
+                      </td>
+                    ))}
                     <td className="px-3 py-2.5 text-right font-medium tabular-nums">
-                      {mCash ? money(cashCalc.price) : <span className="text-muted">—</span>}
-                      {days > 0 && mCredit ? <span className="block text-[11px] text-muted">crédito {money(calc.price)}</span> : null}
+                      {cash?.price != null ? money(cash.price * num(l.qty)) : <span className="text-muted">—</span>}
+                      {agreed?.price != null ? <span className="block text-[11px] text-muted">crédito {money(agreed.price * num(l.qty))}</span> : null}
                     </td>
                   </tr>
                 );
@@ -824,7 +833,8 @@ function Page() {
               Boolean(settingsError) ||
               (days > 0 && !tiieFrom) ||
               (currency === "USD" && !(fxRate > 0)) ||
-              lines.some((l) => num(l.cost) <= 0 || !marginOf(l, "cash") || (days > 0 && !marginOf(l, "credit")))
+              lines.some((l) => num(l.cost) <= 0 || !marginOf(l, "cash") || (days > 0 && !marginOf(l, "credit"))) ||
+              lines.some((l) => [marginOf(l, "cash"), days > 0 ? marginOf(l, "credit") : null].some((m) => m && !marginValid(m)))
             }
             onClick={async () => {
               setBusy(true);

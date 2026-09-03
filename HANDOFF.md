@@ -1,4 +1,4 @@
-# Handoff Azagro — 1 de septiembre de 2026
+# Handoff Azagro — 3 de septiembre de 2026
 
 Documento para quien continúa (Claude Code, Claude.ai, u otro). El ERP se
 construyó primero en Grok Build; desde finales de agosto vive en este repo de
@@ -258,7 +258,64 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       "p. ej. 18.60" de los inputs, y `reports.ts` "× 30 / 360" como unidad
       del reporte mensual.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, casi 290 hoy,
+17. **Margen sobre el precio de venta y escalera de plazos** (3-sep,
+    migración `0020_escalera_plazos.sql`, lógica en `src/lib/erp/margins.ts`,
+    `pricing.ts` y `ladder.ts`, pruebas en `scripts/erp-escalera.test.mjs`).
+    Viene de revisar las hojas de cotización reales de la dirección.
+    - **El orden del cálculo estaba al revés.** Hoja real: COSTO CONTADO
+      14,420 → CONTADO 15,422.46 con margen 6.5%; 14,420 ÷ (1 − 0.065) =
+      15,422.46 exacto (un 6.5% sobre costo daría 15,357.30). El margen es
+      **sobre el precio de venta**, y el financiamiento se suma al costo
+      **antes** del margen:
+      `precio = (costo puesto + financiamiento) ÷ (1 − margen %)`; con margen
+      en $ fijo, `precio = costo puesto + financiamiento + monto` (la utilidad
+      en pesos es la misma por las dos vías). El financiamiento **no cambió**
+      (comisión 1% + costo × 1.01 × (TIIE + spread ASR) × días / 360; 0 al
+      contado). Caso de prueba: costo puesto 10,000, TIIE 6.9%, 150 d, margen
+      crédito 6.5% → financiamiento 558.71, precio 11,292.74, utilidad 734.03
+      (= 6.5% del precio); contado con 5% → 10,526.32.
+    - La captura inversa (precio → margen) despeja con la fórmula nueva:
+      `margen % = (precio − costo puesto − financiamiento) / precio`. El % se
+      guarda a 4 decimales (`numeric(8,4)`), así que ida y vuelta por % queda
+      a centavos; por $ fijo es exacta. Un margen % de 100 o más no da precio:
+      `saveLineMargin` lo rechaza, `quoteFromRequest` y `changeOrderTerm` se
+      detienen diciendo qué partida; negativo sí (aviso, no candado).
+    - **Los márgenes guardados no se migraron**: eran de pruebas y se
+      reinterpretan con la fórmula nueva. Un margen en $ fijo da el mismo
+      precio con las dos fórmulas; uno en % da otro precio implícito. Los
+      precios guardados (`quote_lines.cash_price/credit_price`,
+      `sales_lines.unit_price`) no se tocan solos: cambian solo cuando algo
+      los recalcula del margen (cambiar el plazo acordado en la cotización o
+      en el pedido); la pantalla de la solicitud sí muestra ya el precio nuevo
+      porque lo arma en vivo del margen. `scripts/erp-precios-reinterpretados.mjs`
+      (solo lectura, con `DATABASE_URL`) lista exactamente qué renglones
+      tienen otro precio implícito.
+    - La alta manual de cotización (sin solicitud) arma crédito = contado +
+      financiamiento, es decir, la misma utilidad en pesos: por eso
+      `createQuote` guarda esos márgenes en modo $ fijo.
+    - **Escalera de plazos interna.** La hoja real tiene seis columnas de
+      precio (contado, 30, 60, 90, 120, 150). Los plazos se leen de Ajustes
+      (`company_settings.quote_terms`, texto "0, 30, 60…", editable; la 0020
+      la siembra con 0/30/60/90/120/150 y le pone ese default: es una lista de
+      columnas a mostrar, no un número que decida dinero). Sin escalera,
+      `policy()` truena como con cualquier otro renglón de Ajustes. Siguen
+      siendo dos márgenes: el de contado arma la columna de contado y el de
+      crédito **todas** las columnas a plazo. La solicitud muestra la escalera
+      por partida (precio, financiamiento, utilidad y % por columna, el plazo
+      acordado resaltado); el panel "Ver" de la cotización también (el
+      servidor la calcula con el costo real y la TIIE/spread de la COT, igual
+      para todos los roles; a quien no ve márgenes se le esconden utilidad y
+      %, no el precio; con costo visible la escalera sigue en vivo el precio
+      que se captura).
+    - **Documento al cliente: solo dos precios**, contado y el del plazo
+      acordado. En el panel hay un selector "Plazo acordado" (plazos de la
+      escalera): cambiarlo pasa el precio a crédito de cada partida a la
+      columna de ese plazo y se guarda como revisión (`reviseQuote` con
+      `creditDays` nuevo, mismo margen de crédito); el documento se regenera
+      con esa columna. No cambia cómo se guarda el precio aceptado ni lo que
+      hereda el pedido: sigue siendo un precio con su plazo.
+
+Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 300 hoy,
 incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
 
@@ -281,9 +338,12 @@ incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
   ajusta contra él (documento "por cobrar" o "por devolver"), o se puede
   dejar como utilidad/pérdida del día — se decide pago por pago.
 - **El costo financiero se le cobra al cliente dentro del precio, no lo
-  absorbe Azagro.** Al cotizar: costo de mercancía, más el margen que elige
-  el usuario, más el financiamiento (comisión + Capa 1) encima, calculado
-  con los días de crédito de ESE pedido — no un plazo fijo.
+  absorbe Azagro.** Al cotizar: costo de mercancía, más el financiamiento
+  (comisión + Capa 1) calculado con los días de crédito de ESE pedido — no un
+  plazo fijo — y sobre esa base el margen que elige el usuario, **como % del
+  precio de venta**: precio = (costo puesto + financiamiento) ÷ (1 − margen).
+- **La escalera de plazos es interna; al cliente solo le salen dos precios**
+  (contado y plazo acordado). Los plazos de la escalera se editan en Ajustes.
 - **Después de confirmar un pedido, cliente y moneda quedan fijos.** Precios
   y fechas se siguen pudiendo corregir, siempre con rastro en bitácora.
 - **Todo parametrizable desde Ajustes, nada quemado en el código**: tasa de
@@ -362,10 +422,12 @@ natural de trabajo grande.
   cuenta: negativo = pronto pago.
 - Comisión + FEGA (Ajustes; hoy 1% + 2.04% = **3.04%**) una sola vez sobre
   el cargo, cuando ya venció.
-- Precio al cliente = costo de mercancía + margen elegido + financiamiento
-  por unidad: costo × comisión ASR 1% (una sola vez, no depende de los días)
-  + costo × **1.01** × (TIIE vigente al cotizar + spread ASR 4%) × días de
-  crédito del pedido / 360. El 1.01 es la columna AN del Excel operativo
+- Precio al cliente = (costo puesto + financiamiento) ÷ (1 − margen %), con
+  el margen **sobre el precio de venta** (hojas reales de la dirección,
+  3-sep-2026); con margen en $ fijo: costo puesto + financiamiento + monto.
+  Financiamiento por unidad: costo × comisión ASR 1% (una sola vez, no
+  depende de los días) + costo × **1.01** × (TIIE vigente al cotizar + spread
+  ASR 4%) × días de crédito del pedido / 360. El 1.01 es la columna AN del Excel operativo
   (hoja DIF_TC_SL_AGRICOLA: `AN = AL*(1+0.01)*W/360*150`): la línea adelanta
   costo + comisión, así que la comisión se cobra una vez **y además** genera
   interés; la utilidad resta la comisión aparte (columna AO). **No quitarlo**
@@ -437,7 +499,7 @@ No importar facturas en ceros ni hojas de utilidad.
 - Bitácora `/bitacora`, ahora con filtros por folio/texto, tipo, usuario y
   fecha.
 - Archivos en el folio (CFDI/guía). Respaldo JSON.
-- Migraciones hasta `migrations/0015_folios_unicos.sql`.
+- Migraciones hasta `migrations/0020_escalera_plazos.sql`.
 - Pruebas: `npm test` corre más de 200 casos en varios archivos
   `scripts/erp-*.test.mjs` (fórmulas, permisos, cartera, utilidad,
   trazabilidad, precio). Todas deben pasar en verde, junto con

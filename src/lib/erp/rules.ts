@@ -24,7 +24,17 @@ export const BUSINESS_RULES = [
   {
     id: "finance",
     title: "Financiamiento dentro del precio",
-    body: "Si hay días de crédito, el precio incluye por unidad: costo × comisión ASR (Ajustes, una sola vez) + costo × (1 + comisión ASR) × (TIIE de la tabla vigente al cotizar + spread ASR de Ajustes) × días / 360. La línea adelanta costo + comisión, por eso el (1 + comisión). De contado es $0, comisión incluida. Eso no es mora.",
+    body: "Si hay días de crédito, el precio incluye por unidad: costo × comisión ASR (Ajustes, una sola vez) + costo × (1 + comisión ASR) × (TIIE de la tabla vigente al cotizar + spread ASR de Ajustes) × días / 360. La línea adelanta costo + comisión, por eso el (1 + comisión). De contado es $0, comisión incluida. El financiamiento se suma al costo ANTES de aplicar el margen. Eso no es mora.",
+  },
+  {
+    id: "margin",
+    title: "Margen sobre el precio de venta",
+    body: "El margen es un porcentaje del precio de venta, no un recargo sobre el costo (hojas de cotización de la dirección): precio = (costo puesto + financiamiento) ÷ (1 − margen). Con margen en pesos: precio = costo puesto + financiamiento + monto; la utilidad en pesos es la misma por las dos vías. Cada partida lleva dos márgenes: el de contado aplica a la columna de contado y el de crédito a todas las columnas a plazo. Sin margen capturado no hay precio.",
+  },
+  {
+    id: "ladder",
+    title: "Escalera de plazos",
+    body: "La pantalla interna (solicitud y cotización) muestra por partida una columna por cada plazo de la escalera de Ajustes, con precio, financiamiento y utilidad, para decidir. Al cliente solo le llegan dos precios: contado y el del plazo acordado. Si el plazo acordado cambia, el documento se regenera con la columna que corresponda.",
   },
   {
     id: "mora",

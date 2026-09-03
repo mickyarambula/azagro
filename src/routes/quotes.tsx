@@ -10,7 +10,8 @@ import { SendButton } from "@/components/send-doc";
 import { Expediente } from "@/components/expediente";
 import { addDays, missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { getDealTrail } from "@/lib/erp/deal";
-import { OFFER_LABEL } from "@/lib/erp/margins";
+import { marginFromPrice, OFFER_LABEL, type MarginMode } from "@/lib/erp/margins";
+import { ladderFor, termLabel, type LadderStep } from "@/lib/erp/ladder";
 import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
 import { creditFromCash, type FinanceBase } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
@@ -43,7 +44,8 @@ function round4(n: number) {
  * Una columna de precio (contado o crédito) con captura inversa: se escribe el
  * precio, la utilidad o el margen %, y las otras dos se despejan al momento.
  *   utilidad = precio − costo puesto − financiamiento (0 al contado)
- *   margen % = utilidad / costo puesto
+ *   margen % = utilidad / precio                        (sobre el precio de venta)
+ *   precio   = (costo puesto + financiamiento) ÷ (1 − margen %)
  * Sin costo visible (rol sin costos o partida sin costo) solo se captura el precio.
  * Utilidad negativa: se pinta en rojo y se avisa, no se bloquea.
  */
@@ -64,7 +66,7 @@ function OfferCells({
 }) {
   const hasCost = landed > 0.009;
   const util = price - landed - fin;
-  const pct = hasCost ? (util / landed) * 100 : 0;
+  const pct = hasCost && price > 0 ? (util / price) * 100 : 0;
   const neg = hasCost && util < -0.009;
   const tone = neg ? "text-danger" : "text-ok";
   return (
@@ -85,7 +87,12 @@ function OfferCells({
         {!hasCost ? (
           "—"
         ) : editable ? (
-          <QtyField className={`w-20 ${neg ? "text-danger" : ""}`} value={Math.round(pct * 100) / 100} onChange={(m) => onPrice(round4(landed + fin + (landed * m) / 100))} />
+          <QtyField
+            className={`w-20 ${neg ? "text-danger" : ""}`}
+            value={Math.round(pct * 100) / 100}
+            // Con 100% el precio sería infinito: se ignora hasta que escriban un % válido.
+            onChange={(m) => (m < 100 ? onPrice(round4((landed + fin) / (1 - m / 100))) : undefined)}
+          />
         ) : (
           `${pct.toFixed(1)}%`
         )}
@@ -120,6 +127,8 @@ function Page() {
   const [viewId, setViewId] = useState<number | null>(null);
   const [take, setTake] = useState<Record<number, number>>({});
   const [revPrices, setRevPrices] = useState<Record<number, { cash: number; credit: number; qty: number }>>({});
+  /** Plazo acordado que se está editando en el panel abierto (null = el de la cotización). */
+  const [revDays, setRevDays] = useState<number | null>(null);
   /** Partidas que se están agregando a la cotización abierta (punto C3): entran al guardar la revisión. */
   const [addLines, setAddLines] = useState<Array<{ productId: number; qty: number }>>([]);
   const [locationId, setLocationId] = useState(0);
@@ -129,6 +138,36 @@ function Page() {
   // el precio a crédito es el mismo para cualquier rol, vea o no el costo.
   function syncCredit(ls: Line[], days = creditDays) {
     return ls.map((l) => ({ ...l, creditPrice: creditFromCash({ cash: l.cashPrice, fin: l.fin, days }) }));
+  }
+
+  /**
+   * Escalera de plazos de una partida de la cotización abierta. El
+   * financiamiento por columna lo mandó el servidor (costo real, TIIE/spread
+   * de la COT). Si el costo se ve, la escalera sigue en vivo el margen que se
+   * despeja del precio capturado (contado → columna de contado; crédito →
+   * todas las columnas a plazo). Sin costo visible se muestra la escalera que
+   * calculó el servidor con los márgenes guardados (se pone al día al guardar).
+   */
+  function ladderOfLine(l: NonNullable<typeof data>["lines"][number], rp: { cash: number; credit: number }, agreed: number): LadderStep[] {
+    const landed = num(l.cost) + num(l.freight);
+    const finAt = (d: number) => l.ladder.find((st) => st.days === d)?.finance ?? 0;
+    if (landed > 0.009) {
+      const cashMode: MarginMode = l.margin_cash_mode === "nominal" ? "nominal" : "pct";
+      const creditMode: MarginMode = l.margin_credit_mode === "nominal" ? "nominal" : "pct";
+      return ladderFor({
+        terms: data?.terms ?? [],
+        agreed,
+        landed,
+        marginCash: marginFromPrice({ price: rp.cash, landed, finance: 0, mode: cashMode }),
+        marginCredit: marginFromPrice({ price: rp.credit, landed, finance: finAt(agreed), mode: creditMode }),
+        financeAt: finAt,
+      });
+    }
+    return l.ladder.map((st) => ({
+      ...st,
+      agreed: st.days === agreed,
+      price: st.days === 0 ? rp.cash : st.days === agreed ? rp.credit : st.price,
+    }));
   }
 
   async function load() {
@@ -169,6 +208,7 @@ function Page() {
   function openQuote(id: number | null, qlines: NonNullable<typeof data>["lines"]) {
     setViewId(id);
     setAddLines([]);
+    setRevDays(null);
     if (!id) return;
     const next: Record<number, number> = {};
     const prices: Record<number, { cash: number; credit: number; qty: number }> = {};
@@ -241,6 +281,12 @@ function Page() {
   const cashTotal = lines.reduce((s, l) => s + l.qty * l.cashPrice, 0);
   const creditTotal = lines.reduce((s, l) => s + l.qty * l.creditPrice, 0);
 
+  /**
+   * Papel que sale al cliente: SOLO dos precios, el de contado y el del plazo
+   * acordado (quotes.credit_days). La escalera de plazos es interna y no sale.
+   * Si el plazo acordado cambia (revisión), credit_price ya trae la columna
+   * que corresponde y el documento se regenera con ella.
+   */
   async function printQuote(qrow: NonNullable<typeof data>["quotes"][number], qlines: NonNullable<typeof data>["lines"]) {
     const offer = qrow.price_offer || "both";
     const rev = Number(qrow.revision) > 1 ? ` Rev. ${qrow.revision}` : "";
@@ -601,7 +647,26 @@ function Page() {
                     </div>
                   </td>
                 </tr>
-                {open && (
+                {open && (() => {
+                  // Plazo acordado en edición: manda sobre el de la cotización hasta guardar.
+                  const agreedDays = revDays ?? qrow.credit_days;
+                  const ladderDays = (qlines[0]?.ladder ?? []).map((st) => st.days).filter((d) => d > 0);
+                  const finAt = (l: (typeof qlines)[number], d: number) => l.ladder.find((st) => st.days === d)?.finance ?? 0;
+                  const rpOf = (l: (typeof qlines)[number]) => revPrices[l.product_id] ?? { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
+                  /** Cambiar el plazo acordado: el precio a crédito de cada partida pasa a la columna de la escalera de ese plazo. */
+                  const changeDays = (d: number) => {
+                    setRevPrices((prev) => {
+                      const next = { ...prev };
+                      for (const l of qlines) {
+                        const rp = prev[l.product_id] ?? rpOf(l);
+                        const st = ladderOfLine(l, rp, agreedDays).find((x) => x.days === d);
+                        if (st?.price != null) next[l.product_id] = { ...rp, credit: st.price };
+                      }
+                      return next;
+                    });
+                    setRevDays(d);
+                  };
+                  return (
                   <tr className="border-t border-line bg-paper">
                     <td colSpan={7} className="px-4 py-4">
                       <Expediente kind="quote" id={qrow.id} />
@@ -627,8 +692,8 @@ function Page() {
                         ) : null}
                       </div>
                       <p className="mb-3 text-[12px] text-muted">
-                        {both ? "Van los dos precios: contado y crédito, cada uno con su propio margen." : offerLabel(qrow.price_offer) + "."}{" "}
-                        {cur === "USD" ? `Dólar pactado ${Number(qrow.fx_rate)} MXN.` : "Moneda MXN."} Al cliente solo le llega el precio: no ve proveedor, costo ni margen.
+                        {both ? `Al cliente le van dos precios: contado y crédito a ${agreedDays} d, cada uno con su propio margen (sobre el precio de venta).` : offerLabel(qrow.price_offer) + "."}{" "}
+                        {cur === "USD" ? `Dólar pactado ${Number(qrow.fx_rate)} MXN.` : "Moneda MXN."} Al cliente solo le llega el precio: no ve proveedor, costo, margen ni la escalera.
                         {!closed
                           ? " Escribe el precio, la utilidad o el margen % de cualquiera de las dos columnas y lo demás se despeja solo; al guardar queda como siguiente revisión y el margen guardado de la partida se recalcula."
                           : ""}
@@ -648,7 +713,7 @@ function Page() {
                               ) : null}
                               {both || qrow.price_offer === "credit" ? (
                                 <th className="py-1 text-center font-semibold" colSpan={4}>
-                                  Crédito {qrow.credit_days} d
+                                  Crédito {agreedDays} d
                                 </th>
                               ) : null}
                               <th className="py-1 font-medium" colSpan={2} />
@@ -678,11 +743,12 @@ function Page() {
                           </thead>
                           <tbody>
                             {qlines.map((l) => {
-                              const rp = revPrices[l.product_id] ?? { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
+                              const rp = rpOf(l);
                               const cost = num(l.cost);
                               const freight = num(l.freight);
                               const landed = cost + freight;
-                              const fin = num(l.fin_unit);
+                              // Financiamiento de la columna del plazo acordado (el guardado si es el de la COT).
+                              const fin = agreedDays > 0 ? finAt(l, agreedDays) : 0;
                               const short = Number(l.qty) > Number(l.on_hand_own) + 0.0001;
                               const setPrice = (which: "cash" | "credit", p: number) =>
                                 setRevPrices((prev) => ({ ...prev, [l.product_id]: { ...(prev[l.product_id] ?? rp), [which]: p } }));
@@ -783,6 +849,76 @@ function Page() {
                           </tbody>
                         </table>
                       </div>
+                      {/* Escalera de plazos: herramienta interna para decidir. Una columna por plazo de
+                          Ajustes (más el acordado), con precio, financiamiento y utilidad. NO sale al
+                          cliente: el documento lleva solo contado y el plazo acordado. */}
+                      {qrow.price_offer !== "cash" && qlines.length ? (
+                        <div className="mb-4 rounded-md border border-line bg-cream/60 px-3 py-2">
+                          <div className="mb-2 flex flex-wrap items-center gap-3">
+                            <p className="text-[12px] font-semibold">Escalera de plazos (interna, no sale al cliente)</p>
+                            <label className="flex items-center gap-2 text-[12px] text-muted">
+                              Plazo acordado
+                              {revisable ? (
+                                <select className="erp-input h-8" value={agreedDays} onChange={(e) => changeDays(Number(e.target.value))}>
+                                  {[...new Set([...ladderDays, qrow.credit_days].filter((d) => d > 0))]
+                                    .sort((a, b) => a - b)
+                                    .map((d) => (
+                                      <option key={d} value={d}>
+                                        {termLabel(d)}
+                                      </option>
+                                    ))}
+                                </select>
+                              ) : (
+                                <span className="font-semibold text-ink">{termLabel(agreedDays)}</span>
+                              )}
+                            </label>
+                            {revDays != null && revDays !== qrow.credit_days ? (
+                              <span className="text-[12px] text-warn">
+                                Plazo {qrow.credit_days} d → {revDays} d: el precio a crédito tomó la columna de {revDays} d. Al guardar, el documento sale con ese plazo.
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-left text-[12px]">
+                              <thead className="text-[11px] uppercase tracking-wide text-muted">
+                                <tr>
+                                  <th className="py-1 font-medium">Producto</th>
+                                  {ladderOfLine(qlines[0]!, rpOf(qlines[0]!), agreedDays).map((st) => (
+                                    <th key={st.days} className={`py-1 text-right font-medium ${st.agreed || st.days === 0 ? "text-ink" : ""}`}>
+                                      {termLabel(st.days)}
+                                      {st.agreed ? <span className="block text-[10px] normal-case tracking-normal text-accent">acordado</span> : null}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {qlines.map((l) => (
+                                  <tr key={`ladder-${l.id}`} className="border-t border-line/60">
+                                    <td className="py-1.5">{l.product}</td>
+                                    {ladderOfLine(l, rpOf(l), agreedDays).map((st) => (
+                                      <td key={st.days} className={`py-1.5 text-right tabular-nums ${st.agreed ? "bg-brand-soft/40" : ""}`}>
+                                        {st.price != null ? (
+                                          <>
+                                            <span className={`${st.agreed || st.days === 0 ? "font-semibold" : ""} ${(st.utility ?? 0) < -0.009 ? "text-danger" : ""}`}>
+                                              {moneyIn(st.price, cur)}
+                                            </span>
+                                            <span className="block text-[11px] text-muted">
+                                              {st.days > 0 ? `fin ${moneyIn(st.finance, cur)}` : "sin financiamiento"}
+                                              {st.utility != null && st.pct != null ? ` · util ${moneyIn(st.utility, cur)} (${st.pct.toFixed(1)}%)` : ""}
+                                            </span>
+                                          </>
+                                        ) : (
+                                          <span className="text-muted">—</span>
+                                        )}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ) : null}
                       {revisable ? (
                         <div className="mb-4 flex flex-wrap items-center gap-2">
                           <button
@@ -803,11 +939,11 @@ function Page() {
                         // Aviso, no candado: se puede guardar con utilidad negativa, pero que se vea.
                         const rojas = qlines
                           .map((l) => {
-                            const rp = revPrices[l.product_id] ?? { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
+                            const rp = rpOf(l);
                             const landed = num(l.cost) + num(l.freight);
                             if (landed <= 0.009) return null;
                             const cashNeg = (both || qrow.price_offer === "cash") && rp.cash - landed < -0.009;
-                            const creditNeg = (both || qrow.price_offer === "credit") && rp.credit - landed - num(l.fin_unit) < -0.009;
+                            const creditNeg = (both || qrow.price_offer === "credit") && rp.credit - landed - (agreedDays > 0 ? finAt(l, agreedDays) : 0) < -0.009;
                             if (!cashNeg && !creditNeg) return null;
                             return `${l.product} (${[cashNeg ? "contado" : "", creditNeg ? "crédito" : ""].filter(Boolean).join(" y ")})`;
                           })
@@ -827,13 +963,18 @@ function Page() {
                         });
                         // Una partida nueva cuenta como cambio en cuanto tiene producto y cantidad.
                         const nuevas = addLines.filter((a) => a.productId && a.qty > 0 && !qlines.some((l) => l.product_id === a.productId));
-                        const dirty = priceDirty || nuevas.length > 0;
+                        const daysDirty = revDays != null && revDays !== qrow.credit_days;
+                        const dirty = priceDirty || nuevas.length > 0 || daysDirty;
                         return (
                           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-cream px-3 py-2">
                             <p className="text-[12px]">
                               {dirty ? (
                                 <span className="font-medium text-warn">
-                                  {nuevas.length ? `${nuevas.length} partida(s) nueva(s) y precios sin guardar.` : "Cambiaste precios — todavía no se guardan."}
+                                  {nuevas.length
+                                    ? `${nuevas.length} partida(s) nueva(s) y precios sin guardar.`
+                                    : daysDirty && !priceDirty
+                                      ? `Cambiaste el plazo acordado a ${agreedDays} d — todavía no se guarda.`
+                                      : "Cambiaste precios — todavía no se guardan."}
                                 </span>
                               ) : (
                                 <span className="text-muted">Sin cambios de precio.</span>
@@ -851,7 +992,7 @@ function Page() {
                                   data: {
                                     quoteId: qrow.id,
                                     priceOffer: (qrow.price_offer as Offer) || "both",
-                                    creditDays: qrow.credit_days,
+                                    creditDays: agreedDays,
                                     lines: [
                                       ...qlines.map((l) => {
                                         const rp = revPrices[l.product_id];
@@ -874,6 +1015,7 @@ function Page() {
                                   .then((r) => {
                                     setError(null);
                                     setAddLines([]);
+                                    setRevDays(null);
                                     if (r.orders.length) setMsg(`Revisión ${r.revision} guardada · ${r.orders.join(", ")} actualizado`);
                                     return load();
                                   })
@@ -1034,7 +1176,8 @@ function Page() {
                       )}
                     </td>
                   </tr>
-                )}
+                  );
+                })()}
                 </Fragment>
               );
             })}

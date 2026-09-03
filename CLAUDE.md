@@ -10,7 +10,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 - Postgres: Neon si hay `DATABASE_URL`, si no PGLite embebido (`src/lib/db.ts`)
 - better-auth
 - Server functions: `createServerFn` + `authMiddleware`
-- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud; 0018 = copia marcada del margen viejo y muerte del 12% por omisión; 0019 = sin valores por omisión de negocio: `company_settings` sin defaults ni NOT NULL, `fega_commission`, `early_pay_days`, sin `default_tiie`, `partners.payment_days` sin default, el 12% de migración pasa a "sin margen")
+- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud; 0018 = copia marcada del margen viejo y muerte del 12% por omisión; 0019 = sin valores por omisión de negocio: `company_settings` sin defaults ni NOT NULL, `fega_commission`, `early_pay_days`, sin `default_tiie`, `partners.payment_days` sin default, el 12% de migración pasa a "sin margen"; 0020 = escalera de plazos `company_settings.quote_terms`, sembrada 0/30/60/90/120/150)
 
 ## No romper
 
@@ -21,7 +21,8 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 5. **Pared de privacidad:** el cliente no ve al proveedor. Brokeraje/directo no recibe en bodega Azagro.
 6. Folios existentes (SOL/SC/COT/PV/OC/FV/FP/NC/FI). No series nuevas salvo que lo pidan.
 7. UI y copy en español. Sin emojis salvo que lo pidan.
-8. **Nada de valores por omisión que decidan dinero. REGLA ÚNICA: todo número de negocio se lee de Ajustes o de su tabla; si no está, el sistema se detiene y avisa; nunca inventa un número.** Sin margen capturado la pantalla dice “Sin margen” y no cotiza; igual que sin costo. Sin renglón de TIIE en la tabla no se cotiza a crédito ni se factura interés. Sin renglón completo de Ajustes, `policy()` truena. Sin TC en la tabla no se guarda nada en dólares. No reponer el 12%, el TC 18, el 7.06%, los 90/30 días ni un 0% “para que calcule”. `scripts/erp-sin-numeros.test.mjs` barre `src/` y falla si vuelve un número de negocio al código; la TIIE viene de `nearestRate(tabla, fecha)` (2 argumentos, sin respaldo).
+8. **Precio = (costo puesto + financiamiento) ÷ (1 − margen %).** El margen es **sobre el precio de venta**, no sobre el costo (hojas reales de la dirección, 3-sep-2026); con margen en $ fijo: costo puesto + financiamiento + monto. El financiamiento se suma al costo antes del margen. Dos márgenes: contado → columna de contado; crédito → todas las columnas a plazo. La escalera de plazos (`src/lib/erp/ladder.ts`, plazos de Ajustes) es interna: al cliente solo le salen contado y el plazo acordado.
+9. **Nada de valores por omisión que decidan dinero. REGLA ÚNICA: todo número de negocio se lee de Ajustes o de su tabla; si no está, el sistema se detiene y avisa; nunca inventa un número.** Sin margen capturado la pantalla dice “Sin margen” y no cotiza; igual que sin costo. Sin renglón de TIIE en la tabla no se cotiza a crédito ni se factura interés. Sin renglón completo de Ajustes, `policy()` truena. Sin TC en la tabla no se guarda nada en dólares. No reponer el 12%, el TC 18, el 7.06%, los 90/30 días ni un 0% “para que calcule”. `scripts/erp-sin-numeros.test.mjs` barre `src/` y falla si vuelve un número de negocio al código; la TIIE viene de `nearestRate(tabla, fecha)` (2 argumentos, sin respaldo). La lista inicial de la escalera vive en la migración 0020, no en el código.
 
 ## Mapa
 
@@ -36,11 +37,13 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 | Bitácora | `src/lib/erp/audit.ts`, ruta `/bitacora` |
 | Archivos del folio | `src/lib/erp/files.ts` |
 | RFQ sin pedido de cliente | `src/lib/erp/rfq.ts`, `/rfq/nuevo` |
-| Dos márgenes (contado/crédito), precio↔margen, **sin margen por omisión** | `src/lib/erp/margins.ts` |
+| Dos márgenes (contado/crédito), **margen sobre el precio**, precio↔margen, **sin margen por omisión** | `src/lib/erp/margins.ts` |
+| Escalera de plazos (Ajustes `quote_terms`), documento con dos precios | `src/lib/erp/ladder.ts`, `/quotes` panel "Ver" |
 | Candado de solicitud ya cotizada | `src/lib/erp/request-lock.ts` |
 | Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
 | Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |
 | Barrido: ningún número de negocio en código | `scripts/erp-sin-numeros.test.mjs` |
+| Margen sobre precio + escalera (casos del dueño) | `scripts/erp-escalera.test.mjs` |
 
 Movimientos de stock y cobros: **transacción + `FOR UPDATE`**. Alter table **fuera** de `withTx`.
 

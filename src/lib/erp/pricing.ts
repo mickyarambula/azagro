@@ -1,20 +1,24 @@
 import { financeCost } from "@/lib/erp/credit";
+import { marginUnit as marginUnitOf } from "@/lib/erp/margins";
 import { YEAR_DAYS } from "@/lib/erp/rules";
 
 /**
  * Precio Azagro — el costo financiero NO lo absorbe Azagro: se le pasa al
- * cliente dentro del precio. Orden del cálculo (regla del dueño):
+ * cliente dentro del precio. Orden del cálculo (hojas de cotización reales de
+ * la dirección, 3-sep-2026):
  *
  *   1. Costo de mercancía puesto (costo + flete + otros).
- *   2. Margen elegido por el usuario (sobre ese costo).
- *   3. Financiamiento ENCIMA, por unidad:
+ *   2. Financiamiento, por unidad, SUMADO AL COSTO:
  *        costo × comisión ASR (1%, una sola vez)
  *      + costo × 1.01 × (TIIE vigente al cotizar + spread ASR 4%) × días / 360
  *      con los días de crédito de ESTE pedido (no 150 fijos). El 1.01 es la
  *      columna AN del Excel DIF_TC: la línea adelanta costo + comisión.
+ *   3. Margen elegido por el usuario, SOBRE EL PRECIO DE VENTA:
+ *        precio = (costo puesto + financiamiento) ÷ (1 − margen %)
+ *        precio =  costo puesto + financiamiento + margen $   (monto fijo)
  *
- * Al contado (0 días) no hay circuito de financiamiento: precio = costo +
- * margen y el financiamiento es $0, comisión incluida.
+ * Al contado (0 días) no hay circuito de financiamiento: precio = costo ÷
+ * (1 − margen) y el financiamiento es $0, comisión incluida.
  * El 9% de mora NO va aquí: es factura de intereses al vencimiento.
  */
 
@@ -51,12 +55,6 @@ export type PriceResult = {
 export function priceSale(i: PriceInput): PriceResult {
   const qty = i.qty || 0;
   const landedUnit = Math.max(0, i.cost) + Math.max(0, i.freight) + Math.max(0, i.other);
-  let marginUnit: number;
-  if (i.marginMode === "nominal") {
-    marginUnit = Math.max(0, i.marginNominal);
-  } else {
-    marginUnit = landedUnit * (Math.max(0, i.marginPct) / 100);
-  }
   const fin =
     i.days > 0
       ? financeCost({
@@ -70,7 +68,13 @@ export function priceSale(i: PriceInput): PriceResult {
         })
       : { rate: Math.max(0, i.tiie) + Math.max(0, i.costSpread), commission: 0, layer1: 0, layer2: 0, total: 0 };
   const financeUnit = fin.commission + fin.layer1;
-  const priceUnit = landedUnit + marginUnit + financeUnit;
+  // Margen SOBRE EL PRECIO, aplicado después de sumar el financiamiento al
+  // costo (margins.ts es la fórmula única; aquí solo se arma el desglose).
+  const marginUnit =
+    i.marginMode === "nominal"
+      ? Math.max(0, i.marginNominal)
+      : marginUnitOf({ mode: "pct", pct: Math.max(0, i.marginPct), nominal: 0 }, landedUnit, financeUnit);
+  const priceUnit = landedUnit + financeUnit + marginUnit;
   return {
     landedUnit,
     marginUnit,
@@ -78,7 +82,7 @@ export function priceSale(i: PriceInput): PriceResult {
     layer1Unit: fin.layer1,
     financeUnit,
     priceUnit,
-    marginPct: landedUnit > 0 ? (marginUnit / landedUnit) * 100 : 0,
+    marginPct: priceUnit > 0 ? (marginUnit / priceUnit) * 100 : 0,
     marginNominal: marginUnit,
     landed: landedUnit * qty,
     margin: marginUnit * qty,
@@ -145,7 +149,9 @@ export function financeFor(base: FinanceBase, days: number) {
 /**
  * Precio a crédito a partir del de contado (cotización directa, sin
  * solicitud): contado + financiamiento sobre el COSTO, igual para todos los
- * roles. Un producto sin costo capturado no genera financiamiento (crédito =
+ * roles. Es la vía del margen en monto fijo: la misma utilidad en pesos que
+ * dejó el precio de contado (por eso createQuote guarda esos márgenes como
+ * $ fijo). Un producto sin costo capturado no genera financiamiento (crédito =
  * contado): es un hueco de datos, no de fórmula.
  */
 export function creditFromCash(i: { cash: number; fin: FinanceBase; days: number }) {

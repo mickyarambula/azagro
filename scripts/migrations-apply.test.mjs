@@ -49,6 +49,28 @@ test("todas las migraciones aplican en orden sobre una base vacía", async () =>
   const pd = (await db.query(`select column_default, is_nullable from information_schema.columns where table_name = 'partners' and column_name = 'payment_days'`)).rows[0];
   assert.equal(pd.column_default, null, "partners.payment_days sin default 30");
   assert.equal(pd.is_nullable, "NO", "pero sigue siendo obligatorio: quien da de alta captura el plazo");
+  // 0020 — escalera de plazos de la cotización interna (lista de columnas, editable en Ajustes).
+  assert.ok(cs.includes("quote_terms"), "company_settings.quote_terms");
+  const qt = (await db.query(`select column_default from information_schema.columns where table_name = 'company_settings' and column_name = 'quote_terms'`)).rows[0];
+  assert.ok(String(qt.column_default).includes("0,30,60,90,120,150"), "la lista inicial del dueño: contado, 30, 60, 90, 120 y 150 días");
+  await db.close();
+});
+
+test("0020 siembra la escalera en los Ajustes que ya existían y respeta una escalera ya capturada", async () => {
+  const db = new PGlite();
+  const files = pendingMigrations(readdirSync(dir), []);
+  const hasta19 = files.filter((f) => f.name < "0020");
+  for (const { path } of hasta19) await db.exec(readFileSync(join(dir, path), "utf8"));
+  await db.exec(`
+    insert into companies (id, name, join_code, created_by) values (1, 'AZ', 'AZ1', 'u1'), (2, 'Otra', 'OT1', 'u1');
+    insert into company_settings (company_id) values (1), (2);
+  `);
+  // La empresa 2 ya tenía escalera propia (columna creada en código antes de la migración).
+  await db.exec(`alter table company_settings add column quote_terms text; update company_settings set quote_terms = '0, 45, 90' where company_id = 2;`);
+  await db.exec(readFileSync(join(dir, "0020_escalera_plazos.sql"), "utf8"));
+  const rows = (await db.query(`select company_id, quote_terms from company_settings order by company_id`)).rows;
+  assert.equal(rows[0].quote_terms, "0,30,60,90,120,150", "la que estaba vacía recibe la lista inicial");
+  assert.equal(rows[1].quote_terms, "0, 45, 90", "la capturada no se pisa");
   await db.close();
 });
 

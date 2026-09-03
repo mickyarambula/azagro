@@ -9,6 +9,7 @@ import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { financeBase, financeUnit } from "@/lib/erp/pricing";
+import { formatTerms, ladderFor, parseTerms } from "@/lib/erp/ladder";
 import { marginFromPrice, marginOf, marginText, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
 import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
@@ -62,6 +63,8 @@ export type PolicyNumbers = Record<PolicyField, number>;
 export type PolicyRead = {
   values: Record<PolicyField, number | null>;
   missing: string[];
+  /** Escalera de plazos de la cotización interna (días; 0 = contado). Nulo = sin capturar. */
+  quoteTerms: number[] | null;
   legalName: string;
   rfc: string;
   emailFrom: string;
@@ -73,9 +76,11 @@ export type PolicyRead = {
   mailReady: boolean;
 };
 
-export type Policy = PolicyNumbers & Omit<PolicyRead, "values" | "missing"> & {
+export type Policy = PolicyNumbers & Omit<PolicyRead, "values" | "missing" | "quoteTerms"> & {
   /** Comisión del estado de cuenta (la que va dentro de «comisión + FEGA»). */
   commissionRate: number;
+  /** Escalera de plazos (Ajustes), ya validada: al menos un plazo. */
+  quoteTerms: number[];
 };
 
 async function ensureSettingsColumns(sql: Sql) {
@@ -88,6 +93,8 @@ async function ensureSettingsColumns(sql: Sql) {
   // Parámetros de negocio: sin default, sin NOT NULL (migración 0019). Vacío = sin capturar.
   await sql`alter table company_settings add column if not exists early_pay_days integer`;
   await sql`alter table company_settings add column if not exists fega_commission numeric(8,4)`;
+  // Escalera de plazos de la cotización interna (migración 0020 la siembra).
+  await sql`alter table company_settings add column if not exists quote_terms text`;
   // El "spread de línea" ya no existe: el financiamiento del precio usa
   // comisión ASR + spread ASR. Se quita la columna para que no quede un
   // porcentaje viejo dormido en la base.
@@ -115,13 +122,14 @@ export async function readPolicy(sql: Sql, companyId: number): Promise<PolicyRea
     alert_email_on: boolean;
     resend_key: string;
     early_pay_days: number | null;
+    quote_terms: string | null;
   }>`
     select credit_days, invoice_days, fega_rate::text, fega_commission::text, collection_spread::text,
       legal_name, rfc, asr_commission::text, asr_spread::text, email_from, phone,
       coalesce(alert_days_cxc,7)::int as alert_days_cxc, coalesce(alert_days_cxp,7)::int as alert_days_cxp,
       coalesce(alert_email,'') as alert_email, coalesce(alert_email_on,true) as alert_email_on,
       coalesce(resend_key,'') as resend_key,
-      early_pay_days
+      early_pay_days, quote_terms
     from company_settings where company_id = ${companyId}
   `;
   const r = rows[0];
@@ -136,10 +144,13 @@ export async function readPolicy(sql: Sql, companyId: number): Promise<PolicyRea
     asrSpread: num(r?.asr_spread),
     earlyPayDays: num(r?.early_pay_days),
   };
-  const missing = POLICY_FIELDS.filter(([k]) => values[k] == null).map(([, label]) => label);
+  const missing: string[] = POLICY_FIELDS.filter(([k]) => values[k] == null).map(([, label]) => label);
+  const quoteTerms = parseTerms(r?.quote_terms);
+  if (!quoteTerms?.length) missing.push(QUOTE_TERMS_LABEL);
   return {
     values,
     missing,
+    quoteTerms,
     legalName: r?.legal_name ?? "",
     rfc: r?.rfc ?? "",
     emailFrom: r?.email_from ?? "",
@@ -151,6 +162,9 @@ export async function readPolicy(sql: Sql, companyId: number): Promise<PolicyRea
     mailReady: Boolean(process.env.RESEND_API_KEY) || (r?.resend_key || "").length > 8,
   };
 }
+
+/** Etiqueta de la escalera en "Ajustes incompletos: falta …". */
+export const QUOTE_TERMS_LABEL = "escalera de plazos (días)";
 
 export function missingPolicyMessage(missing: string[]) {
   return `Ajustes incompletos: falta ${missing.join(", ")}. Captúralo en Ajustes → Política de crédito antes de operar.`;
@@ -165,8 +179,8 @@ export async function policy(sql: Sql, companyId: number): Promise<Policy> {
   const p = await readPolicy(sql, companyId);
   if (p.missing.length) throw new Error(missingPolicyMessage(p.missing));
   const v = p.values as PolicyNumbers;
-  const { values: _values, missing: _missing, ...rest } = p;
-  return { ...rest, ...v, commissionRate: v.fegaCommission };
+  const { values: _values, missing: _missing, quoteTerms, ...rest } = p;
+  return { ...rest, ...v, commissionRate: v.fegaCommission, quoteTerms: quoteTerms ?? [] };
 }
 
 /** Tabla TIIE completa, como números (para nearestRate / requireRate). */
@@ -232,6 +246,8 @@ export const saveSettings = createServerFn({ method: "POST" })
       alertEmailOn: z.boolean().optional(),
       resendKey: z.string().optional(),
       earlyPayDays: z.number().int().min(0).max(365),
+      // Escalera de plazos de la cotización: días separados por coma (0 = contado).
+      quoteTerms: z.string(),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -242,19 +258,24 @@ export const saveSettings = createServerFn({ method: "POST" })
     if (data.fegaCommission > data.fegaRate + 1e-9) {
       throw new Error("La comisión dentro de «comisión + FEGA» no puede ser mayor que el total comisión + FEGA.");
     }
+    const terms = parseTerms(data.quoteTerms);
+    if (!terms?.length) {
+      throw new Error("Escalera de plazos: escribe los días separados por coma (0 = contado). Sin escalera no se cotiza.");
+    }
+    const termsText = formatTerms(terms);
     // Lectura tolerante: se puede estar capturando por primera vez.
     const before = await readPolicy(sql, cid);
     await sql`
       insert into company_settings (
         company_id, legal_name, rfc, credit_days, invoice_days, fega_rate, fega_commission,
         collection_spread, asr_commission, asr_spread, email_from, phone,
-        alert_days_cxc, alert_days_cxp, alert_email, alert_email_on, early_pay_days
+        alert_days_cxc, alert_days_cxp, alert_email, alert_email_on, early_pay_days, quote_terms
       )
       values (
         ${cid}, ${data.legalName}, ${data.rfc}, ${data.creditDays}, ${data.invoiceDays}, ${data.fegaRate}, ${data.fegaCommission},
         ${data.collectionSpread}, ${data.asrCommission}, ${data.asrSpread},
         ${data.emailFrom}, ${data.phone}, ${data.alertDaysCxc ?? 7}, ${data.alertDaysCxp ?? 7},
-        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays}
+        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays}, ${termsText}
       )
       on conflict (company_id) do update set
         legal_name = excluded.legal_name,
@@ -272,7 +293,8 @@ export const saveSettings = createServerFn({ method: "POST" })
         alert_days_cxp = excluded.alert_days_cxp,
         alert_email = excluded.alert_email,
         alert_email_on = excluded.alert_email_on,
-        early_pay_days = excluded.early_pay_days
+        early_pay_days = excluded.early_pay_days,
+        quote_terms = excluded.quote_terms
     `;
     const key = (data.resendKey || "").trim();
     if (key.length > 8) {
@@ -291,6 +313,8 @@ export const saveSettings = createServerFn({ method: "POST" })
       ["umbral pronto pago", b.earlyPayDays, data.earlyPayDays],
     ];
     const changes = watch.filter(([, a, c]) => a !== c).map(([n, a, c]) => `${n} ${a ?? "sin capturar"} → ${c}`);
+    const antesTerms = before.quoteTerms ? formatTerms(before.quoteTerms) : null;
+    if (antesTerms !== termsText) changes.push(`escalera de plazos ${antesTerms ?? "sin capturar"} → ${termsText}`);
     if (changes.length) {
       await writeAudit(sql, {
         companyId: cid,
@@ -554,7 +578,27 @@ export const listQuotes = createServerFn({ method: "GET" })
         fin_source: "derivado" as const,
       };
     };
-    const linesWithBase = lines.map((l) => ({ ...l, ...baseOf(l), ...finUnitOf(l) }));
+    // Escalera de plazos por partida (herramienta interna): una columna por
+    // plazo de Ajustes más el acordado. Se calcula AQUÍ con el costo real y
+    // las tasas con que se cotizó (TIIE/spread de la COT, comisión de Ajustes),
+    // a partir del margen guardado: contado → margen contado; a plazo → margen
+    // crédito. El precio de cada columna es igual para cualquier rol.
+    const ladderOf = (l: (typeof lines)[number]) => {
+      const landed = Number(l.cost) + Number(l.freight);
+      const stored = finUnitOf(l).fin_unit;
+      return {
+        ladder: ladderFor({
+          terms: pol.quoteTerms,
+          agreed: l.q_days,
+          landed,
+          marginCash: marginOf(l, "cash"),
+          marginCredit: marginOf(l, "credit"),
+          financeAt: (days) =>
+            days === l.q_days ? stored : financeUnit({ cost: landed, days, tiie: Number(l.q_tiie), costSpread: Number(l.q_spread), commissionRate: pol.asrCommission }),
+        }),
+      };
+    };
+    const linesWithBase = lines.map((l) => ({ ...l, ...baseOf(l), ...finUnitOf(l), ...ladderOf(l) }));
     // Los márgenes solo los ve quien puede ver márgenes (no es el mismo grupo que costos).
     const pricedLines = canSeeMargins(me.role)
       ? linesWithBase
@@ -564,6 +608,8 @@ export const listQuotes = createServerFn({ method: "GET" })
           margin_cash_nominal: null,
           margin_credit_pct: null,
           margin_credit_nominal: null,
+          // La escalera se queda con precio y financiamiento; utilidad y % son margen.
+          ladder: l.ladder.map((s) => ({ ...s, utility: null, pct: null })),
         }));
     // El costo de compra y el flete no son para ventas: solo quien puede ver costos.
     if (!canSeeCosts(me.role)) {
@@ -573,9 +619,10 @@ export const listQuotes = createServerFn({ method: "GET" })
         customers,
         products: pricedProducts.map((p) => ({ ...p, cost: "0", ref_cost: "0" })),
         tiieToday,
+        terms: pol.quoteTerms,
       };
     }
-    return { quotes, lines: pricedLines, customers, products: pricedProducts, tiieToday };
+    return { quotes, lines: pricedLines, customers, products: pricedProducts, tiieToday, terms: pol.quoteTerms };
   });
 
 export const createQuote = createServerFn({ method: "POST" })
@@ -678,8 +725,11 @@ export const createQuote = createServerFn({ method: "POST" })
     // Alta manual: el costo es el del producto (kardex o referencia, mismo orden
     // que la pantalla) y los dos márgenes se despejan de los precios capturados
     // (contado sin financiamiento; crédito restando el financiamiento que va
-    // dentro del precio con las tasas de esta cotización). Sin costo no hay
-    // margen que despejar y la partida queda sin margen guardado.
+    // dentro del precio con las tasas de esta cotización). Se guardan en modo
+    // $ fijo: la pantalla armó el crédito como contado + financiamiento, es
+    // decir, la misma utilidad en pesos en las dos columnas, y así la escalera
+    // de plazos sigue esa misma regla. Sin costo no hay margen que despejar y
+    // la partida queda sin margen guardado.
     const pol = await policy(sql, cid);
     const costs = await productCosts(sql, cid);
     for (const line of priced) {
@@ -688,8 +738,8 @@ export const createQuote = createServerFn({ method: "POST" })
       const landed = cost + (line.freight ?? 0) + (line.other ?? 0);
       const fin = financeUnit({ cost: landed, days: plazo, tiie, costSpread: data.spread ?? 0, commissionRate: pol.asrCommission });
       const conMargen = landed > 0.0001;
-      const mCash = conMargen ? marginFromPrice({ price: line.cash, landed, finance: 0, mode: "pct" }) : null;
-      const mCredit = conMargen ? marginFromPrice({ price: line.credit, landed, finance: fin, mode: "pct" }) : null;
+      const mCash = conMargen ? marginFromPrice({ price: line.cash, landed, finance: 0, mode: "nominal" }) : null;
+      const mCredit = conMargen ? marginFromPrice({ price: line.credit, landed, finance: fin, mode: "nominal" }) : null;
       await sql`
         insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
@@ -835,10 +885,13 @@ export const reviseQuote = createServerFn({ method: "POST" })
     await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev);
     // Captura inversa: el precio que se manda es la verdad y el margen guardado
     // de cada columna se despeja de él (contado sin financiamiento; crédito
-    // restando el financiamiento que va dentro del precio). Si el plazo cambió,
-    // el financiamiento se recalcula con las tasas de esta cotización. Una
-    // utilidad negativa se guarda tal cual: la pantalla avisa, no bloquea.
-    // Sin costo no hay margen que despejar y la partida se deja como estaba.
+    // restando el financiamiento que va dentro del precio; el % es sobre el
+    // precio de venta). Si el plazo acordado cambió, el financiamiento se
+    // recalcula con las tasas de esta cotización: la pantalla ya mandó el
+    // precio de la columna de la escalera que corresponde a ese plazo, y de
+    // ahí sale el mismo margen de crédito. Una utilidad negativa se guarda tal
+    // cual: la pantalla avisa, no bloquea. Sin costo no hay margen que
+    // despejar y la partida se deja como estaba.
     const pol = await policy(sql, cid);
     // Costo de las partidas nuevas: el orden único de siempre (kardex →
     // referencia). Las que ya estaban conservan el costo con que se cotizaron.

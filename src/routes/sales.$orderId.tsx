@@ -391,7 +391,7 @@ function Ficha() {
                 <th className="px-3 py-2 text-right font-medium">Costo puesto</th>
                 <th className="px-3 py-2 text-right font-medium">Financiamiento</th>
                 <th className="px-3 py-2 text-right font-medium">Utilidad u.</th>
-                <th className="px-3 py-2 text-right font-medium">Margen</th>
+                <th className="px-3 py-2 text-right font-medium">Margen (s/ precio)</th>
               </tr>
             </thead>
             <tbody>

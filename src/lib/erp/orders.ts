@@ -426,11 +426,18 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
       const mCredit = marginOf(l, "credit");
       let price: number;
       if (days <= 0) {
-        // De contado: precio de contado de la cotización (costo + margen contado).
+        // De contado: precio de contado de la cotización (costo ÷ (1 − margen contado)).
         price = Number(l.cash_price);
       } else if (landed > 0.0001 && mCredit) {
+        // La columna de la escalera para el plazo nuevo: (costo puesto +
+        // financiamiento a esos días) ÷ (1 − margen crédito). Mismo margen de
+        // crédito para cualquier plazo; solo cambia el financiamiento.
         const fin = financeUnit({ cost: landed, days, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: pol.asrCommission });
-        price = priceFromMargin({ landed, finance: fin, margin: mCredit });
+        try {
+          price = priceFromMargin({ landed, finance: fin, margin: mCredit });
+        } catch (e) {
+          throw new Error(`${l.code}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       } else {
         // Sin costo o sin margen guardado no hay con qué rehacer el precio: se
         // conserva tal cual y se dice por qué en la bitácora. No se inventa un

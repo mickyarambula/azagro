@@ -48,9 +48,13 @@ function financeUnit(i) {
   });
   return fin.commission + fin.layer1;
 }
+function marginUnitOf(m, landed, finance = 0) {
+  if (m.mode === "nominal") return m.nominal;
+  if (!(m.pct < 100)) throw new Error("margen ≥ 100%");
+  return ((landed + Math.max(0, finance)) * m.pct) / (100 - m.pct);
+}
 function priceSale(i) {
   const landedUnit = Math.max(0, i.cost) + Math.max(0, i.freight) + Math.max(0, i.other);
-  const marginUnit = i.marginMode === "nominal" ? Math.max(0, i.marginNominal) : landedUnit * (Math.max(0, i.marginPct) / 100);
   const fin =
     i.days > 0
       ? financeCost({
@@ -64,7 +68,9 @@ function priceSale(i) {
         })
       : { commission: 0, layer1: 0, total: 0 };
   const financeUnit = fin.commission + fin.layer1;
-  return { landedUnit, marginUnit, commissionUnit: fin.commission, layer1Unit: fin.layer1, financeUnit, priceUnit: landedUnit + marginUnit + financeUnit };
+  const marginUnit =
+    i.marginMode === "nominal" ? Math.max(0, i.marginNominal) : marginUnitOf({ mode: "pct", pct: Math.max(0, i.marginPct), nominal: 0 }, landedUnit, financeUnit);
+  return { landedUnit, marginUnit, commissionUnit: fin.commission, layer1Unit: fin.layer1, financeUnit, priceUnit: landedUnit + financeUnit + marginUnit };
 }
 function financeBase(i) {
   const cost = Math.max(0, i.cost);
@@ -134,7 +140,8 @@ test("el financiamiento va sobre el costo puesto (costo + flete), y el margen no
   assert.equal(sinMargen.commissionUnit, 105);
   assert.equal(sinMargen.layer1Unit, round2(10500 * 1.01 * 0.109 * 150 / 360)); // 481.64
   assert.equal(conMargen.financeUnit, sinMargen.financeUnit);
-  assert.equal(conMargen.priceUnit, round2(10500 + 1260 + sinMargen.financeUnit));
+  // Margen 12% del precio: precio = (10 500 + financiamiento) ÷ 0.88.
+  assert.ok(Math.abs(conMargen.priceUnit - (10500 + sinMargen.financeUnit) / 0.88) < 0.0001);
 });
 
 test("la base que manda el servidor da el mismo peso que la fórmula completa", () => {

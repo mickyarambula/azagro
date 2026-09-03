@@ -9,7 +9,7 @@ import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
 import { policy } from "@/lib/erp/ops";
 import { rememberTrade } from "@/lib/erp/links";
-import { marginOf, marginText, normalizeMargin, OFFER_LABEL } from "@/lib/erp/margins";
+import { marginInvalidMessage, marginOf, marginText, marginValid, normalizeMargin, OFFER_LABEL, type StoredMargin } from "@/lib/erp/margins";
 import { assertRequestOpen } from "@/lib/erp/request-lock";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -660,7 +660,8 @@ export const saveLineMargin = createServerFn({ method: "POST" })
       productId: z.number(),
       which: z.enum(["cash", "credit"]),
       marginMode: z.enum(["pct", "nominal"]),
-      marginPct: z.number(),
+      // El % es sobre el precio de venta: con 100 el precio sería infinito.
+      marginPct: z.number().lt(100, "El margen % sobre el precio tiene que ser menor a 100."),
       marginNominal: z.number(),
     }),
   )
@@ -862,8 +863,16 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     if (sinMargen.length) {
       throw new Error(`Captura el margen antes de cotizar: ${sinMargen.join(", ")}.`);
     }
-    // Dos precios, dos márgenes: contado = costo puesto + margen contado (sin
-    // financiamiento); crédito = costo puesto + margen crédito + financiamiento
+    // Un margen % de 100 o más sobre el precio no da un precio: se detiene y
+    // se dice qué partida corregir.
+    const invalidos = lines.flatMap((l) => {
+      const ms = [marginOf(l, "cash"), data.creditDays > 0 ? marginOf(l, "credit") : null];
+      return ms.filter((m): m is StoredMargin => m != null && !marginValid(m)).map((m) => `${l.code}: ${marginInvalidMessage(m)}`);
+    });
+    if (invalidos.length) throw new Error(`Corrige el margen antes de cotizar. ${invalidos.join(" ")}`);
+    // Dos precios, dos márgenes, margen SOBRE EL PRECIO: contado = costo
+    // puesto ÷ (1 − margen contado), sin financiamiento; crédito = (costo
+    // puesto + financiamiento) ÷ (1 − margen crédito), con el financiamiento
     // DENTRO del precio (comisión + Capa 1 con los días de este pedido, misma
     // fórmula de siempre). La comisión sale de Ajustes.
     const pol = await policy(sql, companyId);
@@ -914,9 +923,14 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         credit,
         unitPrice,
         // Los dos márgenes quedan escritos en la cotización con % y $ en
-        // sincronía, y el financiamiento por unidad que quedó dentro del crédito.
-        marginCash: normalizeMargin({ mode: mCash.mode, pct: mCash.pct, nominal: mCash.nominal }, landed),
-        marginCredit: mCredit ? normalizeMargin({ mode: mCredit.mode, pct: mCredit.pct, nominal: mCredit.nominal }, landed) : null,
+        // sincronía (el % es sobre el precio, así que el de crédito se sincroniza
+        // con su financiamiento), y el financiamiento por unidad que quedó
+        // dentro del crédito.
+        marginCash: normalizeMargin({ mode: mCash.mode, pct: mCash.pct, nominal: mCash.nominal }, landed, 0),
+        marginCredit:
+          mCredit && creditCalc
+            ? normalizeMargin({ mode: mCredit.mode, pct: mCredit.pct, nominal: mCredit.nominal }, landed, creditCalc.financeUnit)
+            : null,
         financeUnit: creditCalc ? Number(creditCalc.financeUnit.toFixed(4)) : 0,
       };
     });

@@ -72,6 +72,9 @@ const PROHIBIDOS = [
   { que: "margen 12%", re: /\bmargin(Pct|_pct)?\s*[:=]\s*12\b/i },
   { que: "margen 12%", re: /\bdefault\s+12\b/i },
   { que: "margen 12%", re: /useState\(\s*12\s*\)/ },
+  // Escalera de plazos: la lista inicial vive en la migración 0020 y en Ajustes, no en el código.
+  { que: "escalera de plazos 0/30/60/90/120/150", re: /0\s*[,/]\s*30\s*[,/]\s*60\s*[,/]\s*90\s*[,/]\s*120\s*[,/]\s*150/ },
+  { que: "escalera de plazos en el código", re: /\[\s*0\s*,\s*30\s*,\s*60\s*,\s*90\s*,\s*120\s*,\s*150\s*\]/ },
 ];
 
 test("ningún número de negocio vive en el código (tipo de cambio, TIIE, spread, plazo, umbral, margen, comisión, FEGA)", () => {
@@ -124,10 +127,13 @@ test("la TIIE siempre sale de la tabla: nearestRate no acepta respaldo y require
 test("Ajustes es obligatorio: sin renglón completo el servidor y la pantalla se detienen", () => {
   const ops = sinComentarios(src("src/lib/erp/ops.ts"));
   const lectura = ops.slice(ops.indexOf("export async function readPolicy"), ops.indexOf("export const getSettings"));
-  for (const col of ["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_commission", "asr_spread", "early_pay_days"]) {
+  for (const col of ["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_commission", "asr_spread", "early_pay_days", "quote_terms"]) {
     assert.ok(lectura.includes(col), `readPolicy lee ${col}`);
     assert.ok(!new RegExp(`${col}\\s*\\?\\?\\s*[\\d.]`).test(lectura), `${col} sin respaldo numérico`);
   }
+  // La escalera de plazos también es de Ajustes: sin ella, policy() se detiene.
+  assert.ok(lectura.includes("if (!quoteTerms?.length) missing.push(QUOTE_TERMS_LABEL);"), "sin escalera de plazos, falta en Ajustes");
+  assert.ok(!/parseTerms\([^)]*\)\s*\?\?\s*\[/.test(ops), "la escalera no tiene lista de respaldo en el código");
   assert.ok(lectura.includes("if (p.missing.length) throw new Error(missingPolicyMessage(p.missing));"), "policy() truena si falta un renglón");
   const settings = sinComentarios(src("src/routes/settings.tsx"));
   assert.ok(settings.includes("Ajustes incompletos"), "la pantalla de Ajustes avisa qué falta");

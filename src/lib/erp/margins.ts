@@ -2,8 +2,22 @@
  * Dos márgenes por partida: uno para el precio de contado y otro para el de
  * crédito. Son independientes: cambiar uno no mueve el otro.
  *
- *   precio contado = costo puesto + margen contado          (sin financiamiento)
- *   precio crédito = costo puesto + margen crédito + financiamiento
+ * EL MARGEN ES SOBRE EL PRECIO DE VENTA, no un recargo sobre el costo (hojas
+ * de cotización reales de la dirección, 3-sep-2026: 14,420 ÷ (1 − 0.065) =
+ * 15,422.46 exacto; un 6.5% sobre costo daría 15,357). Y el financiamiento se
+ * suma al costo ANTES de aplicar el margen:
+ *
+ *   precio = (costo puesto + financiamiento) ÷ (1 − margen %)
+ *   precio =  costo puesto + financiamiento + margen $        (monto fijo)
+ *
+ * De contado el financiamiento es 0. La utilidad en pesos es la misma por las
+ * dos vías: utilidad = precio − costo puesto − financiamiento, y ese monto es
+ * exactamente margen % del precio.
+ *
+ * Caso de prueba del dueño: costo puesto 10,000, TIIE 6.9%, 150 días, margen
+ * crédito 6.5% → financiamiento 558.71, precio (10,000 + 558.71) ÷ 0.935 =
+ * 11,292.74, utilidad 734.03 = 6.5% del precio. Contado con 5%: 10,000 ÷
+ * 0.95 = 10,526.32.
  *
  * El financiamiento se calcula en pricing.ts (no cambia). Aquí solo vive lo
  * que hace falta para ir en los dos sentidos:
@@ -57,6 +71,10 @@ function n(v: string | number | null | undefined) {
   return Number.isFinite(x) ? x : 0;
 }
 
+function round4(x: number) {
+  return Math.round(x * 10000) / 10000;
+}
+
 function source(v: string | null | undefined): MarginSource | null {
   return v === "captura" || v === "migracion" ? v : null;
 }
@@ -88,26 +106,53 @@ export function marginOf(row: MarginRow, which: Offer): StoredMargin | null {
   return null;
 }
 
-/** Margen por unidad en pesos según el modo. No recorta negativos: lo que se capturó es lo que vale. */
-export function marginUnit(m: MarginSpec, landed: number) {
-  return m.mode === "nominal" ? m.nominal : (landed * m.pct) / 100;
+/**
+ * Un margen % sobre el precio tiene que ser menor que 100: con 100% el precio
+ * sería infinito (se divide entre 1 − margen). No es un número de negocio, es
+ * el límite de la fórmula. Un margen negativo sí es válido (vender con pérdida
+ * a propósito: se avisa, no se bloquea).
+ */
+export function marginValid(m: MarginSpec | null): m is MarginSpec {
+  return m != null && (m.mode === "nominal" || m.pct < 100);
 }
 
-/** Directo: precio final por unidad = costo puesto + margen + financiamiento (0 al contado). */
+export function marginInvalidMessage(m: MarginSpec) {
+  return `Margen ${Number(m.pct)}% sobre el precio: tiene que ser menor a 100%.`;
+}
+
+/**
+ * Margen por unidad en pesos según el modo. Con margen %, es la utilidad que
+ * deja precio = (costo puesto + financiamiento) ÷ (1 − margen): base ×
+ * margen / (100 − margen). No recorta negativos: lo que se capturó es lo que vale.
+ */
+export function marginUnit(m: MarginSpec, landed: number, finance = 0) {
+  if (m.mode === "nominal") return m.nominal;
+  if (!marginValid(m)) throw new Error(marginInvalidMessage(m));
+  const base = landed + Math.max(0, finance);
+  return (base * m.pct) / (100 - m.pct);
+}
+
+/**
+ * Directo: precio final por unidad.
+ *   %  → (costo puesto + financiamiento) ÷ (1 − margen)
+ *   $  →  costo puesto + financiamiento + monto
+ * Financiamiento 0 al contado.
+ */
 export function priceFromMargin(i: { landed: number; finance: number; margin: MarginSpec }) {
-  return Math.round((i.landed + marginUnit(i.margin, i.landed) + Math.max(0, i.finance)) * 10000) / 10000;
+  const fin = Math.max(0, i.finance);
+  return round4(i.landed + fin + marginUnit(i.margin, i.landed, fin));
 }
 
 /**
  * Inverso: del precio final se despejan utilidad y margen %.
  *   utilidad = precio − costo puesto − financiamiento
- *   margen % = utilidad / costo puesto × 100
+ *   margen % = utilidad / precio × 100          (sobre el precio de venta)
  * Se conserva el modo que ya tenía la partida; los dos valores quedan
- * consistentes entre sí.
+ * consistentes entre sí, y priceFromMargin(marginFromPrice(p)) = p.
  */
 export function marginFromPrice(i: { price: number; landed: number; finance: number; mode: MarginMode }): MarginSpec {
-  const nominal = Math.round((i.price - i.landed - Math.max(0, i.finance)) * 10000) / 10000;
-  const pct = i.landed > 0 ? Math.round(((nominal / i.landed) * 100) * 10000) / 10000 : 0;
+  const nominal = round4(i.price - i.landed - Math.max(0, i.finance));
+  const pct = i.price > 0 ? round4((nominal / i.price) * 100) : 0;
   return { mode: i.mode, pct, nominal };
 }
 
@@ -117,10 +162,16 @@ export function marginText(m: MarginSpec | null) {
   return m.mode === "nominal" ? `$${Number(m.nominal)}` : `${Number(m.pct)}%`;
 }
 
-/** Los dos valores en sincronía para guardar: si el modo es %, el $ se deriva, y al revés. */
-export function normalizeMargin(m: MarginSpec, landed: number): MarginSpec {
+/**
+ * Los dos valores en sincronía para guardar: si el modo es %, el $ se deriva,
+ * y al revés. Como el % es sobre el precio, hace falta el financiamiento de
+ * esa columna (0 al contado) para que el $ y el % describan el mismo precio.
+ */
+export function normalizeMargin(m: MarginSpec, landed: number, finance = 0): MarginSpec {
+  const fin = Math.max(0, finance);
   if (m.mode === "nominal") {
-    return { mode: "nominal", nominal: m.nominal, pct: landed > 0 ? Math.round(((m.nominal / landed) * 100) * 10000) / 10000 : 0 };
+    const price = landed + fin + m.nominal;
+    return { mode: "nominal", nominal: m.nominal, pct: price > 0 ? round4((m.nominal / price) * 100) : 0 };
   }
-  return { mode: "pct", pct: m.pct, nominal: Math.round(((landed * m.pct) / 100) * 10000) / 10000 };
+  return { mode: "pct", pct: m.pct, nominal: round4(marginUnit(m, landed, fin)) };
 }
