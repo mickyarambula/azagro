@@ -8,7 +8,7 @@ import { SendButton } from "@/components/send-doc";
 import { getLiveStatement, saveDocument } from "@/lib/erp/ops";
 import { pctRate } from "@/lib/erp/credit";
 import { statementByProduct, statementOutsideDocs } from "@/lib/erp/statement-products";
-import { CONSOLIDADO_NOTE, PAPER_DASH, PAPER_PENDING, statementNotes, statementSendHeader, statementSendLine } from "@/lib/erp/doc-text";
+import { CONSOLIDADO_NOTE, STATEMENT_PAPER_HEADERS, statementNotes, statementPaperHeaders, statementPaperRow, statementPaperTotals, statementSendHeader, statementSendLine } from "@/lib/erp/doc-text";
 import { logoSrc, printHtml, statementSheet } from "@/lib/print-doc";
 import { listPartners } from "@/lib/azagro";
 import { dateDMY, money, moneyIn, todayMx } from "@/lib/utils";
@@ -38,13 +38,9 @@ const EC_HEADERS = [
 ];
 
 const EC_HEADERS_USD = [...EC_HEADERS, "Ut. cambiaria"];
-
-// El papel que sale de la empresa y el documento guardado NO llevan la
-// columna de pronto pago: la bonificación se ofrece cuando conviene, no se
-// anuncia en cada estado de cuenta, y su importe entre cargo y días despeja
-// la tasa de costo. Solo en pantalla.
-const EC_HEADERS_PAPER = EC_HEADERS.filter((h) => h !== "Pronto pago (est.)");
-const EC_HEADERS_PAPER_USD = [...EC_HEADERS_PAPER, "Ut. cambiaria"];
+// Estas columnas son las de PANTALLA. El papel que sale de la empresa y el
+// documento guardado se arman en src/lib/erp/doc-text.ts (statementPaperRow):
+// sin "Plazo", sin "Pronto pago", con las dos fechas (Vence e Interés desde).
 
 function currencyName(cur: string) {
   return cur === "USD" ? "Dólar americano" : "Peso mexicano";
@@ -64,15 +60,10 @@ function productRows(block: Block, hidePaid: boolean) {
  * existen todavía. En su lugar se muestran los días que faltan y, aparte, la
  * estimación de pronto pago (lo que se le bonificaría si pagara al corte).
  *
- * `paper`: la versión que sale de la empresa. En pantalla la celda dice POR QUÉ
- * no hay número ("sin TIIE", "sin política", "sin mora"). En el papel, lo que
- * falta determinar dice "Pendiente de cálculo" (el cliente entiende que algo
- * viene) y lo que no se cobra sale como guion; el motivo real es nuestro. La
- * columna de pronto pago no va en el papel.
+ * Celdas de PANTALLA: dicen por qué no hay número ("sin TIIE", "sin política",
+ * "sin mora"); eso es para operar. El papel es statementPaperRow (doc-text).
  */
-function rowCells(r: Row, cur: string, withFx: boolean, paper = false) {
-  const pend = (t: string) => (paper ? PAPER_PENDING : t);
-  const nada = (t: string) => (paper ? PAPER_DASH : t);
+function rowCells(r: Row, cur: string, withFx: boolean) {
   const cells = [
     r.serie || "—",
     r.folio || r.name,
@@ -85,16 +76,16 @@ function rowCells(r: Row, cur: string, withFx: boolean, paper = false) {
     moneyIn(r.saldo ?? r.residual, cur),
     r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
     r.vencido ? String(r.daysVencidos ?? r.daysOverdue ?? 0) : "—",
-    r.sinMora ? nada("sin mora") : r.sinTiie ? pend("sin TIIE") : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
-    r.sinMora ? nada("sin mora") : r.sinTiie ? pend("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? pend("sin política") : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
-    r.sinMora ? nada("sin mora") : r.sinTiie ? pend("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? pend("sin política") : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
-    ...(paper ? [] : [r.sinTiieBono ? "sin TIIE" : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—"]),
+    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
+    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
+    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
+    r.sinTiieBono ? "sin TIIE" : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—",
   ];
   if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, cur) : "—");
   return cells;
 }
 
-function totalsCells(rows: Row[], cur: string, withFx: boolean, paper = false) {
+function totalsCells(rows: Row[], cur: string, withFx: boolean) {
   const cargo = rows.reduce((s, r) => s + (r.cargo ?? Number(r.amount)), 0);
   const abono = rows.reduce((s, r) => s + r.abono, 0);
   const saldo = rows.reduce((s, r) => s + (r.saldo ?? Number(r.residual)), 0);
@@ -118,7 +109,7 @@ function totalsCells(rows: Row[], cur: string, withFx: boolean, paper = false) {
     moneyIn(interes, cur),
     moneyIn(com, cur),
     moneyIn(tot, cur),
-    ...(paper ? [] : [moneyIn(bono, cur)]),
+    moneyIn(bono, cur),
   ];
   if (withFx) cells.push(moneyIn(fx, cur));
   return cells;
@@ -133,7 +124,7 @@ function ratesOf(st: Live | null) {
   const p = st.policy;
   return {
     commission: pctRate(p.commissionRate),
-    annual: `TIIE al vencimiento + ${pctRate(p.collectionSpread)}`,
+    annual: `TIIE a la fecha de interés + ${pctRate(p.collectionSpread)}`,
     fega: pctRate(p.fegaOnlyRate),
     total: pctRate(p.fegaBundle),
   };
@@ -148,9 +139,9 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       const withFx = cur === "USD";
       return {
         currency: currencyName(cur),
-        headers: withFx ? EC_HEADERS_PAPER_USD : EC_HEADERS_PAPER,
-        rows: rows.map((r) => rowCells(r, cur, withFx, true)),
-        totals: totalsCells(rows, cur, withFx, true),
+        headers: statementPaperHeaders(withFx),
+        rows: rows.map((r) => statementPaperRow(r, cur, withFx)),
+        totals: statementPaperTotals(rows, cur, withFx),
       };
     })
     .filter((s) => s.rows.length);
@@ -301,8 +292,8 @@ function Page() {
       ``,
       `Saldo: ${money(block.ar)}`,
       ``,
-      EC_HEADERS_PAPER.join(" | "),
-      ...productRows(block, hidePaid).map((r) => rowCells(r, r.currency || "MXN", false, true).join(" | ")),
+      STATEMENT_PAPER_HEADERS.join(" | "),
+      ...productRows(block, hidePaid).map((r) => statementPaperRow(r, r.currency || "MXN", false).join(" | ")),
     ].join("\n");
     void saveDocument({
       data: {

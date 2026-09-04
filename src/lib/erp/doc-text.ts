@@ -76,7 +76,8 @@ export function expedienteFor(line: string | null | undefined, audience: DocAudi
 /** Notas al pie del estado de cuenta: solo lo que el cliente necesita para comprobar la cuenta. */
 export function statementNotes(rates: { annual: string; commission: string; fega: string; total: string }) {
   return [
-    `Interés = cargo × (${rates.annual}) × días vencidos / 360, solo a partir del día que vence.`,
+    "Vence es la fecha de pago convenida. Interés desde es el día a partir del cual corre el interés; los días vencidos se cuentan desde esa fecha.",
+    `Interés = cargo × (${rates.annual}) × días vencidos / 360, solo a partir de la fecha de interés.`,
     `Comisión ${rates.commission} + FEGA ${rates.fega} = ${rates.total} sobre el cargo, una sola vez, cuando el documento ya venció; se factura por separado.`,
     "Lo que aún no vence no lleva interés, ni comisión, ni FEGA: se muestran los días que faltan.",
     "Saldo = cargo − abonos; no incluye intereses. Ut. cambiaria = USD × (TC pactado − TC pagado).",
@@ -88,7 +89,7 @@ export const CONSOLIDADO_NOTE = "Totales por cliente y moneda.";
 
 /** Encabezado del mensaje del estado de cuenta: la regla con la que se puede comprobar cada renglón. */
 export function statementSendHeader(rates: { annual: string; commission: string; fega: string }) {
-  return `Interés = cargo × (${rates.annual}) × días vencidos / 360, a partir del vencimiento · comisión ${rates.commission} + FEGA ${rates.fega} sobre el cargo, una sola vez al vencer.`;
+  return `Interés = cargo × (${rates.annual}) × días vencidos / 360, a partir de la fecha de interés de cada documento · comisión ${rates.commission} + FEGA ${rates.fega} sobre el cargo, una sola vez, desde esa misma fecha.`;
 }
 
 /** Un renglón del estado de cuenta, como va en el mensaje de correo o WhatsApp. */
@@ -103,6 +104,8 @@ export function statementSendLine(r: {
   abono: number;
   saldo: number;
   due_date: string;
+  /** Fecha desde la que corre el interés (plazo financiero). */
+  moraDue: string;
   vencido: boolean;
   sinMora: boolean;
   daysVencidos: number;
@@ -119,11 +122,13 @@ export function statementSendLine(r: {
     `abono ${r.abono ? moneyIn(r.abono, cur) : "—"}`,
     `saldo ${moneyIn(r.saldo, cur)}`,
   ];
-  if (r.sinMora) return [...head, "sin intereses"].join("  ");
+  if (r.sinMora) return [...head, `vence ${dateDMY(r.due_date)}`, "sin intereses"].join("  ");
   if (r.vencido) {
     return [
       ...head,
-      `${r.daysVencidos} días vencidos`,
+      `vence ${dateDMY(r.due_date)}`,
+      `interés desde ${dateDMY(r.moraDue)}`,
+      `${r.daysVencidos} días vencidos desde esa fecha`,
       `interés ${moneyIn(r.interes, cur)}`,
       `comisión + FEGA ${moneyIn(r.comisionFega, cur)}`,
     ].join("  ");
@@ -131,7 +136,111 @@ export function statementSendLine(r: {
   // La bonificación por pronto pago no se anuncia en el estado de cuenta: se
   // ofrece cuando conviene. Y su importe, dividido entre cargo y días,
   // despeja la tasa de costo. Solo en pantalla.
-  return [...head, `vence ${dateDMY(r.due_date)} (faltan ${r.diasPorVencer} días)`, "sin interés ni comisión ni FEGA"].join("  ");
+  return [
+    ...head,
+    `vence ${dateDMY(r.due_date)}`,
+    `interés desde ${dateDMY(r.moraDue)} (faltan ${r.diasPorVencer} días)`,
+    "sin interés ni comisión ni FEGA",
+  ].join("  ");
+}
+
+/**
+ * El papel del estado de cuenta. Dos fechas legítimas, las dos impresas:
+ * "Vence" es la de pago convenida (herramienta de cobranza: ya venció, todavía
+ * no cuesta) e "Interés desde" es cuando arranca el interés. Los días vencidos
+ * van ligados a la segunda, y se nombra en el encabezado. No lleva "Plazo"
+ * (armaba la confusión) ni "Pronto pago" (solo en pantalla).
+ */
+export type StatementPaperRow = {
+  serie?: string | null;
+  folio?: string | null;
+  name: string;
+  date: string;
+  due_date: string;
+  moraDue: string;
+  cargo: number;
+  abono: number;
+  saldo: number;
+  fechaPago?: string | null;
+  fechaAbono?: string | null;
+  vencido: boolean;
+  diasPorVencer: number;
+  daysVencidos: number;
+  sinMora: boolean;
+  sinTiie: boolean;
+  sinPolitica: boolean;
+  interes: number;
+  comisionFega: number;
+  totalFinanciero: number;
+  utCambiaria: number;
+};
+
+export const STATEMENT_PAPER_HEADERS = [
+  "Serie",
+  "Folio",
+  "Fecha",
+  "Vence",
+  "Interés desde",
+  "Cargo",
+  "Abonos",
+  "Saldo",
+  "Fecha pago",
+  "Días vencidos (desde interés)",
+  "Interés s/ días",
+  "Comisión + FEGA",
+  "Total int+FEGA",
+];
+
+export function statementPaperHeaders(withFx: boolean) {
+  return withFx ? [...STATEMENT_PAPER_HEADERS, "Ut. cambiaria"] : STATEMENT_PAPER_HEADERS;
+}
+
+export function statementPaperRow(r: StatementPaperRow, cur: string, withFx: boolean) {
+  const money = (n: number) => moneyIn(n, cur);
+  // Lo que falta determinar (tasa o condición de cobro) se dice; lo que no se
+  // cobra (sin mora, aún no vence) va en guion.
+  const interes = r.sinMora ? PAPER_DASH : !r.vencido ? "—" : r.sinTiie ? PAPER_PENDING : Math.abs(r.interes) > 0.009 ? money(r.interes) : "—";
+  const pend = r.sinTiie || r.sinPolitica;
+  const comision = r.sinMora ? PAPER_DASH : !r.vencido ? "—" : pend ? PAPER_PENDING : r.comisionFega > 0.009 ? money(r.comisionFega) : "—";
+  const total = r.sinMora ? PAPER_DASH : !r.vencido ? "—" : pend ? PAPER_PENDING : Math.abs(r.totalFinanciero) > 0.009 ? money(r.totalFinanciero) : "—";
+  const cells = [
+    r.serie || "—",
+    r.folio || r.name,
+    dateDMY(r.date),
+    dateDMY(r.due_date),
+    r.sinMora ? PAPER_DASH : dateDMY(r.moraDue),
+    money(r.cargo),
+    r.abono ? money(r.abono) : "—",
+    money(r.saldo),
+    r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
+    r.sinMora ? PAPER_DASH : r.vencido ? String(r.daysVencidos) : `faltan ${r.diasPorVencer}`,
+    interes,
+    comision,
+    total,
+  ];
+  if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? money(r.utCambiaria) : "—");
+  return cells;
+}
+
+export function statementPaperTotals(rows: StatementPaperRow[], cur: string, withFx: boolean) {
+  const sum = (f: (r: StatementPaperRow) => number) => moneyIn(rows.reduce((s, r) => s + f(r), 0), cur);
+  const cells = [
+    "",
+    "Total",
+    "",
+    "",
+    "",
+    sum((r) => r.cargo),
+    sum((r) => r.abono),
+    sum((r) => r.saldo),
+    "",
+    "",
+    sum((r) => r.interes),
+    sum((r) => r.comisionFega),
+    sum((r) => r.totalFinanciero),
+  ];
+  if (withFx) cells.push(sum((r) => r.utCambiaria));
+  return cells;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +305,10 @@ export function invoiceLineLabel(i: { name: string; origin?: string | null; invC
 export function interestInvoiceClientCalc(i: {
   currency?: string | null;
   asOf: string;
+  /** La factura sobre la que corre, con sus dos fechas: vence e interés desde. */
+  docName: string;
+  docDue: string;
+  interestFrom: string;
   capital: number;
   annualRate: number;
   days: number;
@@ -209,7 +322,8 @@ export function interestInvoiceClientCalc(i: {
   const cur = i.currency || "MXN";
   const m = (n: number) => moneyIn(n, cur);
   const lines = [
-    `Intereses moratorios al ${dateDMY(i.asOf)}: cargo original ${m(i.capital)} × tasa anual ${pctRate(i.annualRate)} × ${i.days} días vencidos / 360 = ${m(i.interestAccrued)}.`,
+    `Sobre la factura ${i.docName}: vence ${dateDMY(i.docDue)} · interés desde ${dateDMY(i.interestFrom)}.`,
+    `Intereses moratorios al ${dateDMY(i.asOf)}: cargo original ${m(i.capital)} × tasa anual ${pctRate(i.annualRate)} × ${i.days} días vencidos desde el ${dateDMY(i.interestFrom)} / 360 = ${m(i.interestAccrued)}.`,
   ];
   if (i.interestBefore > 0.009) {
     lines.push(`Ya facturado en documentos anteriores: ${m(i.interestBefore)}. En esta factura: ${m(i.interestNew)}.`);

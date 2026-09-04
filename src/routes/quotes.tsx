@@ -37,6 +37,24 @@ function offerLabel(o: string) {
   return o === "cash" ? "Contado" : o === "credit" ? "Crédito" : "Contado y crédito";
 }
 
+/**
+ * Qué precio lleva el papel al cliente: UNO solo, el de la oferta acordada.
+ * Un papel con dos precios invita a pedir el de contado y se queda archivado;
+ * la comparación se hace en la conversación (pantalla), no en el documento.
+ * Si el cliente ya aceptó, ese; si se cotizó una sola oferta, esa; si se
+ * cotizaron las dos y aún no acepta, la del plazo cotizado (crédito).
+ */
+function paperOfferOf(q: { price_offer: string | null; accepted_offer: string | null; credit_days: number | null }): "cash" | "credit" {
+  if (q.accepted_offer === "cash" || q.accepted_offer === "credit") return q.accepted_offer;
+  const quoted = q.price_offer || "both";
+  if (quoted === "cash" || quoted === "credit") return quoted;
+  return q.credit_days ? "credit" : "cash";
+}
+
+function paperOfferLabel(offer: "cash" | "credit", creditDays: number | null) {
+  return offer === "cash" ? "Contado" : `Crédito ${creditDays ?? 0} d`;
+}
+
 function round4(n: number) {
   return Math.round(n * 10000) / 10000;
 }
@@ -289,10 +307,10 @@ function Page() {
    * que corresponde y el documento se regenera con ella.
    */
   async function printQuote(qrow: NonNullable<typeof data>["quotes"][number], qlines: NonNullable<typeof data>["lines"]) {
-    const offer = qrow.price_offer || "both";
+    // Un solo precio en el papel: el de la oferta acordada. Nunca los dos.
+    const offer = paperOfferOf(qrow);
     const rev = Number(qrow.revision) > 1 ? ` Rev. ${qrow.revision}` : "";
     const cur = qrow.currency;
-    const both = offer === "both";
     const trail = await getDealTrail({ data: { kind: "quote", id: qrow.id } })
       .then((d) => d.line)
       .catch(() => "");
@@ -311,30 +329,13 @@ function Page() {
           `Fecha ${qrow.date}`,
           `Vigencia ${qrow.valid_until}`,
           cur === "USD" ? `USD · dólar pactado ${Number(qrow.fx_rate)}` : "MXN",
-          offerLabel(offer),
-          offer !== "cash" && qrow.credit_days ? `Crédito ${qrow.credit_days} d` : "",
+          paperOfferLabel(offer, qrow.credit_days),
           // Al cliente solo SOL/COT/PV/FV: nunca la SC con la que se fue a proveedores.
           expedienteFor(trail, "cliente"),
         ],
-        headers: both
-          ? ["Producto", "Cant.", "P. contado", "Imp. contado", "P. crédito", "Imp. crédito"]
-          : ["Producto", "Cant.", "P. unitario", "Importe"],
+        headers: ["Producto", "Cant.", "P. unitario", "Importe"],
         rows: qlines.map((l) => {
-          const cash = Number(l.cash_price);
-          const credit = Number(l.credit_price);
-          const unit = offer === "cash" ? cash : credit;
-          if (both) {
-            return {
-              cells: [
-                l.product,
-                `${qty(l.qty)} ${l.uom}`,
-                moneyIn(cash, cur),
-                moneyIn(Number(l.qty) * cash, cur),
-                moneyIn(credit, cur),
-                moneyIn(Number(l.qty) * credit, cur),
-              ],
-            };
-          }
+          const unit = offer === "cash" ? Number(l.cash_price) : Number(l.credit_price);
           return {
             left: l.product,
             qty: `${qty(l.qty)} ${l.uom}`,
@@ -342,10 +343,7 @@ function Page() {
             amount: moneyIn(Number(l.qty) * unit, cur),
           };
         }),
-        total: both
-          ? `Contado ${moneyIn(cashTot, cur)}  ·  Crédito ${moneyIn(credTot, cur)}`
-          : moneyIn(offer === "cash" ? cashTot : credTot, cur),
-        compact: both,
+        total: moneyIn(offer === "cash" ? cashTot : credTot, cur),
         notes: quoteNotes({ notes: qrow.notes, deliveryTo: qrow.delivery_to }),
       }),
       {
@@ -584,6 +582,8 @@ function Page() {
               const revisable = qrow.state !== "rejected" && (!closed || borrador);
               const cur = qrow.currency;
               const both = (qrow.price_offer || "both") === "both";
+              const paperOffer = paperOfferOf(qrow);
+              const paperUnit = (l: (typeof qlines)[number]) => (paperOffer === "cash" ? Number(l.cash_price) : Number(l.credit_price));
               const expired = !closed && qrow.valid_until < todayMx();
               return (
                 <Fragment key={qrow.id}>
@@ -613,24 +613,18 @@ function Page() {
                         partnerId={qrow.partner_id}
                         email={cust?.email}
                         phone={cust?.phone}
-                        total={Number(qrow.total)}
+                        total={qlines.reduce((s, l) => s + Number(l.qty) * paperUnit(l), 0)}
                         currency={cur}
                         fxRate={Number(qrow.fx_rate)}
-                        extra={[
-                          qrow.delivery_to ? `Entrega: ${qrow.delivery_to}` : "",
-                          offerLabel(qrow.price_offer),
-                          both
-                            ? `Contado ${moneyIn(qlines.reduce((s, l) => s + Number(l.qty) * Number(l.cash_price), 0), cur)} · Crédito ${moneyIn(qlines.reduce((s, l) => s + Number(l.qty) * Number(l.credit_price), 0), cur)}`
-                            : "",
-                        ]
+                        extra={[qrow.delivery_to ? `Entrega: ${qrow.delivery_to}` : "", paperOfferLabel(paperOffer, qrow.credit_days)]
                           .filter(Boolean)
                           .join(" · ")}
                         lines={qlines.map((l) => ({
                           qty: Number(l.qty),
                           uom: l.uom,
                           name: l.product,
-                          unitPrice: Number(l.unit_price),
-                          amount: Number(l.qty) * Number(l.unit_price),
+                          unitPrice: paperUnit(l),
+                          amount: Number(l.qty) * paperUnit(l),
                         }))}
                       />
                       <button
@@ -688,7 +682,7 @@ function Page() {
                         ) : null}
                       </div>
                       <p className="mb-3 text-[12px] text-muted">
-                        {both ? `Al cliente le van dos precios: contado y crédito a ${agreedDays} d, cada uno con su propio margen (sobre el precio de venta).` : offerLabel(qrow.price_offer) + "."}{" "}
+                        {both ? `Dos precios en pantalla: contado y crédito a ${agreedDays} d, cada uno con su propio margen (sobre el precio de venta). El papel al cliente lleva uno solo, el de la oferta acordada.` : offerLabel(qrow.price_offer) + "."}{" "}
                         {cur === "USD" ? `Dólar pactado ${Number(qrow.fx_rate)} MXN.` : "Moneda MXN."} Al cliente solo le llega el precio: no ve proveedor, costo, margen ni la escalera.
                         {!closed
                           ? " Escribe el precio, la utilidad o el margen % de cualquiera de las dos columnas y lo demás se despeja solo; al guardar queda como siguiente revisión y el margen guardado de la partida se recalcula."

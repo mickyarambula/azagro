@@ -261,11 +261,15 @@ test("pantalla de la cotización: escalera interna en vivo, plazo acordado edita
 test("documento al cliente: SOLO contado y el plazo acordado; la escalera no sale", () => {
   const q = src("src/routes/quotes.tsx");
   const doc = q.slice(q.indexOf("async function printQuote"), q.indexOf("return (\n    <AppShell>"));
-  assert.ok(doc.includes('["Producto", "Cant.", "P. contado", "Imp. contado", "P. crédito", "Imp. crédito"]'), "dos precios cuando la oferta es ambos");
+  // 4-sep-2026: el papel lleva UN solo precio, el de la oferta acordada (un
+  // papel con dos precios invita a pedir el de contado y se queda archivado).
+  // Los dos precios siguen en pantalla.
+  assert.ok(doc.includes("const offer = paperOfferOf(qrow);"), "un solo precio en el papel: el de la oferta acordada");
+  assert.ok(!doc.includes('"Imp. contado", "P. crédito"'), "nunca los dos en el papel");
   assert.ok(doc.includes('["Producto", "Cant.", "P. unitario", "Importe"]'), "uno cuando la oferta es uno");
   assert.ok(!doc.includes("ladder"), "la escalera no entra al documento");
-  assert.ok(doc.includes("`Crédito ${qrow.credit_days} d`"), "el plazo acordado va en el encabezado");
-  assert.ok(doc.includes("const credit = Number(l.credit_price);"), "y el precio a crédito es el guardado para ese plazo");
+  assert.ok(doc.includes("paperOfferLabel(offer, qrow.credit_days)") && q.includes("`Crédito ${creditDays ?? 0} d`"), "el plazo acordado va en el encabezado");
+  assert.ok(doc.includes('offer === "cash" ? Number(l.cash_price) : Number(l.credit_price)'), "y el precio a crédito es el guardado para ese plazo");
 });
 
 test("solicitud: la escalera se ve por partida con precio, financiamiento y utilidad, y el margen de crédito aplica a todos los plazos", () => {

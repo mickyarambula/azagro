@@ -2336,6 +2336,9 @@ export async function issueMoraInvoice(
   const calcClient = interestInvoiceClientCalc({
     currency: "MXN",
     asOf,
+    docName: inv[0].name,
+    docDue: inv[0].due_date,
+    interestFrom: moraDue,
     capital: Number(inv[0].amount),
     annualRate: bill.annualRate,
     days: bill.daysOverdue,

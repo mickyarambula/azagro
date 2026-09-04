@@ -464,6 +464,35 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       dividido entre el cargo y los días que faltan, despeja la tasa de costo
       (TIIE + spread ASR); y la bonificación se ofrece cuando conviene, no se
       anuncia en cada estado de cuenta.
+    - **Revisión de aritmética** (4-sep): se buscó en cada papel si un importe
+      impreso, dividido entre otros datos del mismo papel, revela una tasa, un
+      costo o un margen. Dos hallazgos, los dos resueltos por decisión del
+      dueño:
+      1. *La cotización con dos precios y los días* dejaba despejar la tasa del
+         financiamiento (con márgenes iguales, exactamente TIIE + spread ASR).
+         Ahora **el papel lleva un solo precio**, el de la oferta acordada
+         (`paperOfferOf` en `quotes.tsx`: aceptado → ese; una sola oferta
+         cotizada → esa; dos cotizadas sin aceptar → la del plazo); a crédito
+         con sus días, de contado sin ellos, nunca los dos. El mensaje de
+         "Enviar" lleva el mismo precio único. Las dos columnas siguen en
+         pantalla. Razón comercial además de la de privacidad: un papel con dos
+         precios invita a pedir el de contado y se queda archivado.
+      2. *El estado de cuenta imprimía "Vencimiento" al día 120, "Plazo" 150 y
+         los días vencidos contados desde el 150*: el cliente restaba y
+         descubría que la fecha impresa no era la de verdad. Las dos fechas
+         son legítimas y ahora **las dos se imprimen**: "Vence" (pago
+         convenido, herramienta de cobranza: ya venció, todavía no cuesta) e
+         "Interés desde" (cuando arranca el interés); la columna "Plazo" se fue
+         del papel y "Días vencidos (desde interés)" dice desde cuál fecha se
+         cuenta. La FI imprime las mismas dos fechas de su factura
+         (`interestInvoiceClientCalc`), para que cuadre con el estado de
+         cuenta. La tasa se nombra "TIIE a la fecha de interés + spread".
+      Lo demás está limpio: interés ÷ (cargo × días / 360) y comisión + FEGA ÷
+      cargo dan las tasas que el papel ya declara; la OC solo lleva precio de
+      compra (el margen no se despeja porque ningún papel al proveedor lleva
+      precio de venta); guía, SC y recordatorio no llevan tasas. La OC en
+      brokeraje sí lleva el domicilio del cliente: el proveedor necesita saber
+      dónde entregar (decisión del dueño).
     - **Factura**: la partida ya no imprime el `origin` tal cual ("Corte
       Compaq", "Mora FV-0002"): se traduce ("Saldo de factura A-292",
       "Intereses moratorios de FV-0002", "Mercancía según pedido PV-0003");
