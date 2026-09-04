@@ -118,3 +118,93 @@ test("cableado: el descuento por pronto pago se aplica de verdad al cobrar, con 
   assert.ok(helper.includes("Pronto pago ${inv[0].name}"), "el descuento queda como pago sin banco, ligado a la factura");
   assert.ok(helper.includes("thresholdDays: pol.earlyPayDays"), "el umbral sale de Ajustes");
 });
+
+/**
+ * EL FLETE VA EN LA BASE DEL COSTO FINANCIERO (3-sep-2026, prueba con el dueño).
+ *
+ * Regla confirmada: el flete se prorratea al costo del producto y ese costo
+ * puesto (mercancía + flete + otros) es la base de todo — margen y
+ * financiamiento. El precio ya lo hacía bien (pricing.ts: landedUnit); la
+ * tarjeta "Costo financiero" de la ficha del pedido lo calculaba solo sobre la
+ * mercancía y por eso no cuadraba con lo que el precio le cobró al cliente.
+ *
+ * Copia de src/lib/erp/pricing.ts financeUnit (lo que va DENTRO del precio):
+ * comisión + Capa 1 sobre el costo puesto.
+ */
+function financeUnitPrecio(i) {
+  if (i.days <= 0) return 0;
+  const f = financeCost({
+    supplierCost: i.cost,
+    saleCapital: 0,
+    commissionRate: i.commissionRate,
+    costSpread: i.costSpread,
+    tiieAtIssue: i.tiie,
+    financialDays: i.days,
+    daysExceeded: 0,
+  });
+  return round2(f.commission + f.layer1);
+}
+
+// PV-0003 del dueño: mercancía 137,500 + flete 3,000 = costo puesto 140,500,
+// 150 días, TIIE 6.9% + spread ASR 4%, comisión ASR 1%.
+const PV3 = { cogs: 137500, freight: 3000, days: 150, tiie: 0.069, costSpread: 0.04, commissionRate: 0.01 };
+
+test("el precio y la tarjeta cobran sobre la MISMA base: costo puesto, flete incluido", () => {
+  const landed = PV3.cogs + PV3.freight;
+  assert.equal(landed, 140500);
+  // Lo que el precio le cobró al cliente por financiar esta operación.
+  const enElPrecio = financeUnitPrecio({ cost: landed, days: PV3.days, tiie: PV3.tiie, costSpread: PV3.costSpread, commissionRate: PV3.commissionRate });
+  // Lo que la tarjeta "Costo financiero" calcula (comisión + Capa 1; sin días
+  // excedidos no hay Capa 2).
+  const enLaTarjeta = financeCost({
+    supplierCost: landed,
+    saleCapital: 0,
+    commissionRate: PV3.commissionRate,
+    costSpread: PV3.costSpread,
+    tiieAtIssue: PV3.tiie,
+    financialDays: PV3.days,
+    daysExceeded: 0,
+  });
+  assert.equal(round2(enLaTarjeta.commission + enLaTarjeta.layer1), enElPrecio);
+  assert.equal(enLaTarjeta.total, enElPrecio);
+});
+
+test("con la base vieja (solo mercancía) la tarjeta quedaba corta $167.61 en PV-0003", () => {
+  const conFlete = financeUnitPrecio({ cost: PV3.cogs + PV3.freight, days: PV3.days, tiie: PV3.tiie, costSpread: PV3.costSpread, commissionRate: PV3.commissionRate });
+  const sinFlete = financeUnitPrecio({ cost: PV3.cogs, days: PV3.days, tiie: PV3.tiie, costSpread: PV3.costSpread, commissionRate: PV3.commissionRate });
+  assert.equal(round2(conFlete - sinFlete), 167.61);
+  // El descuadre es exactamente el financiamiento del flete: comisión sobre el
+  // flete + Capa 1 sobre flete × 1.01.
+  const soloFlete = financeUnitPrecio({ cost: PV3.freight, days: PV3.days, tiie: PV3.tiie, costSpread: PV3.costSpread, commissionRate: PV3.commissionRate });
+  assert.equal(soloFlete, 167.61);
+});
+
+test("las dos cifras coinciden con cualquier costo, flete, plazo y tasa", () => {
+  const casos = [
+    { cogs: 0, freight: 5000, days: 30 },
+    { cogs: 10000, freight: 0, days: 150 },
+    { cogs: 137500, freight: 3000, days: 90 },
+    { cogs: 250000, freight: 12345.67, days: 120 },
+    { cogs: 98765.43, freight: 4321, days: 60 },
+    { cogs: 50000, freight: 1000, days: 0 }, // contado: no hay circuito
+  ];
+  for (const c of casos) {
+    const landed = c.cogs + c.freight;
+    const precio = financeUnitPrecio({ cost: landed, days: c.days, tiie: 0.069, costSpread: 0.04, commissionRate: 0.01 });
+    const tarjeta =
+      c.days > 0
+        ? financeCost({ supplierCost: landed, saleCapital: 0, commissionRate: 0.01, costSpread: 0.04, tiieAtIssue: 0.069, financialDays: c.days, daysExceeded: 0 })
+        : { commission: 0, layer1: 0, total: 0 };
+    assert.equal(round2(tarjeta.commission + tarjeta.layer1), precio, `costo puesto ${landed} a ${c.days} d`);
+  }
+});
+
+test("cableado: computeDealPnl financia el COSTO PUESTO, no solo la mercancía", () => {
+  const rep = src("src/lib/erp/reports.ts");
+  assert.ok(rep.includes("const landed = cogs + freight + other;"), "el costo puesto de la partida = mercancía + flete + otros");
+  assert.ok(rep.includes("supplierCost: financialDays > 0 ? landed : 0,"), "la Capa 1 corre sobre el costo puesto, la misma base que el precio");
+  assert.ok(!rep.includes("supplierCost: financialDays > 0 ? cogs : 0,"), "ya no se financia solo la mercancía");
+  assert.ok(rep.includes("const financeBase = included.reduce((s, l) => s + l.landed, 0);"), "el P&L publica la base para que la tarjeta la enseñe");
+  const ficha = src("src/routes/sales.$orderId.tsx");
+  assert.ok(ficha.includes("Sobre el costo puesto ${money(pnl.financeBase)}"), "la tarjeta dice sobre qué base corrió el costo financiero");
+});

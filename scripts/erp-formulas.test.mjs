@@ -28,10 +28,12 @@ function computeStatementLine(input) {
   const paid = input.paidDate ? input.paidDate.slice(0, 10) : "";
   const fechaPago = paid && paid <= input.asOf ? paid : input.asOf;
   const daysVencidos = daysBetween(input.dueDate, fechaPago);
+  // Nada nace antes del vencimiento: ni interés, ni comisión, ni FEGA.
+  const vencido = daysVencidos > 0;
   const annualRate = input.tiieAtDue + input.spread;
-  const interest = (input.cargo * annualRate * daysVencidos) / YEAR_DAYS;
-  const comisionFega = input.cargo * input.fegaRate;
-  return { daysVencidos, interest, comisionFega };
+  const interest = vencido ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;
+  const comisionFega = vencido ? input.cargo * input.fegaRate : 0;
+  return { daysVencidos, vencido, interest, comisionFega };
 }
 function residual(amount, paid) {
   return Math.max(0, amount - paid);
@@ -62,7 +64,7 @@ test("mora: 60 días, TIIE 7.06% + 9%, cargo 100000, FEGA 3.04%", () => {
   assert.ok(Math.abs(m.fega - 3040) < 0.01);
 });
 
-test("estado de cuenta: interés con signo (pronto pago negativo)", () => {
+test("estado de cuenta: antes del vencimiento no hay interés ni comisión ni FEGA", () => {
   const line = computeStatementLine({
     cargo: 100000,
     dueDate: "2026-10-01",
@@ -72,8 +74,28 @@ test("estado de cuenta: interés con signo (pronto pago negativo)", () => {
     spread: 0.09,
     fegaRate: 0.0304,
   });
-  assert.ok(line.daysVencidos < 0);
-  assert.ok(line.interest < 0);
+  assert.ok(line.daysVencidos < 0, "faltan días para el vencimiento");
+  assert.equal(line.vencido, false);
+  // Antes se multiplicaba por días negativos y salía un interés "a favor" a
+  // tasa de cobro, más el 3.04% sobre una factura que no había vencido.
+  assert.equal(line.interest, 0);
+  assert.equal(line.comisionFega, 0);
+});
+
+test("estado de cuenta: ya vencida, el interés y la comisión + FEGA sí corren", () => {
+  const line = computeStatementLine({
+    cargo: 100000,
+    dueDate: "2026-06-01",
+    asOf: "2026-07-31",
+    paidDate: null,
+    tiieAtDue: 0.0706,
+    spread: 0.09,
+    fegaRate: 0.0304,
+  });
+  assert.equal(line.daysVencidos, 60);
+  assert.equal(line.vencido, true);
+  assert.ok(Math.abs(line.interest - (100000 * 0.1606 * 60) / 360) < 0.01);
+  assert.ok(Math.abs(line.comisionFega - 3040) < 0.01);
 });
 
 test("residual de factura no baja de cero", () => {

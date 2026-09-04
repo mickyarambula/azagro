@@ -315,6 +315,59 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       con esa columna. No cambia cómo se guarda el precio aceptado ni lo que
       hereda el pedido: sigue siendo un precio con su plazo.
 
+18. **Tres correcciones de la prueba con el dueño** (3-sep-2026, migración
+    `0021_politica_comision_fega.sql`, pruebas en
+    `scripts/erp-estado-cuenta.test.mjs`, `scripts/erp-politica-cobro.test.mjs`
+    y la parte nueva de `scripts/erp-utilidad.test.mjs`).
+    - **El flete va en la base del costo financiero.** El flete se prorratea al
+      costo del producto y ese costo puesto es la base de todo, margen y
+      financiamiento. El precio ya lo hacía bien (`pricing.ts`, `landedUnit`);
+      la tarjeta "Costo financiero" de la ficha del pedido corría sobre la
+      mercancía sola, así que no cuadraba con lo que el precio le cobró al
+      cliente. En PV-0003 el precio cobraba sobre $140,500 y la tarjeta
+      calculaba sobre $137,500: $167.61 de descuadre, exactamente el
+      financiamiento del flete. `computeDealPnl` ahora financia
+      `cogs + flete + otros` y publica `financeBase` para que la tarjeta diga
+      sobre qué base corrió. Hay prueba de que las dos cifras coinciden con
+      cualquier costo, flete, plazo y tasa.
+    - **El estado de cuenta ya no cobra cosas que no han nacido.** Con corte
+      antes del vencimiento se multiplicaba por días negativos y salía un
+      "interés a favor" a la tasa de COBRO, más la columna comisión + FEGA
+      sobre facturas no vencidas. Ahora `computeStatementLine` no cobra nada
+      con días vencidos ≤ 0: se ven el saldo, el vencimiento y los días que
+      faltan ("faltan 150"), y las tres columnas financieras salen en guion.
+      Aparte va una columna nueva, **"Pronto pago (est.)"**, con lo que se
+      bonificaría si el cliente pagara en la fecha del corte — **a tasa de
+      COSTO** (TIIE de la emisión + spread ASR), no a la de cobro, porque lo
+      que se le regresa es el financiamiento que no consumió. Con $156,849.85 y
+      150 días sin consumir: $7,123.60 a 10.9%, no $10,391.30 a 15.9%
+      ($3,267.71 por factura). Aplica el umbral de pronto pago de Ajustes: en
+      el día del umbral o después, cero. Con corte DESPUÉS del vencimiento no
+      cambió nada: mora normal.
+    - **Comisión y FEGA son opcionales por cliente.** `credit_policies` lleva
+      dos interruptores nuevos, `charge_commission` y `charge_fega`. El
+      porcentaje sigue saliendo de Ajustes (`fega_rate` y la comisión que va
+      dentro, `fega_commission`); la política solo dice cuál de las dos mitades
+      se cobra (`chargeRates` en `credit.ts`). Los obedecen el estado de cuenta
+      y la factura de intereses; el modal de cobro de Cartera enseña la misma
+      cuenta. Se editan en Ajustes → "Políticas de cobro", solo administrador, y
+      cada cambio va a Bitácora (`politica-cobro`, anterior → nuevo).
+      **Nacen sin capturar a propósito** (regla del punto 16: no se inventa un
+      número que decida dinero): la 0021 no toca las políticas que ya existían.
+      Mientras una política no conteste las dos preguntas, sus facturas
+      vencidas salen marcadas "sin política" en el estado de cuenta, no se
+      cobra ninguna de las dos mitades, y la FI se detiene con aviso (en un
+      cobro, la transacción completa se revierte). **Pendiente operativo:** hay
+      tres políticas en la base (`NONE` "Sin mora", `GRUPO_SL`, `ESTANDAR`, las
+      del catálogo; la app no permite crear más) y las tres están sin capturar.
+    - `scripts/erp-facturas-repetidas.mjs` (solo lectura, con `DATABASE_URL`):
+      dice de qué pedido nació cada factura de cliente y separa tres cosas que
+      se confunden — FV duplicada del mismo pedido, dos pedidos gemelos, y
+      factura que no vale lo mismo que su pedido. Existe porque los folios
+      FV-#### se numeran con el COUNT de **todas** las facturas de cliente (FI
+      de mora y ATC de tipo de cambio incluidas), así que FV-0002 no
+      corresponde a PV-0002: los folios saltan.
+
 Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 300 hoy,
 incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
@@ -418,10 +471,17 @@ natural de trabajo grande.
 - Días **calendario exactos**, no meses de 30.
 - Interés de mora = Cargo original × (TIIE al plazo financiero, renglón de
   la tabla + spread de mora de Ajustes; hoy 9%) × días vencidos desde el
-  plazo financiero (Ajustes; hoy 150) / **360**. Con signo en el estado de
-  cuenta: negativo = pronto pago.
+  plazo financiero (Ajustes; hoy 150) / **360**. **Nunca antes del
+  vencimiento**: con días vencidos ≤ 0 el interés es 0, no un número negativo
+  "a favor". Lo que se le regresa al cliente por pagar antes es la
+  bonificación de pronto pago, **a tasa de costo** (TIIE de la emisión +
+  spread ASR), sujeta al umbral de Ajustes; en el estado de cuenta va en su
+  propia columna y, mientras el documento siga abierto, etiquetada como
+  estimación al día del corte.
 - Comisión + FEGA (Ajustes; hoy 1% + 2.04% = **3.04%**) una sola vez sobre
-  el cargo, cuando ya venció.
+  el cargo, cuando ya venció, **y solo la mitad que la política de cobro del
+  documento diga** (dos interruptores por política: cobra comisión sí/no,
+  cobra FEGA sí/no). Sin capturar no se cobra nada y la FI se detiene.
 - Precio al cliente = (costo puesto + financiamiento) ÷ (1 − margen %), con
   el margen **sobre el precio de venta** (hojas reales de la dirección,
   3-sep-2026); con margen en $ fijo: costo puesto + financiamiento + monto.

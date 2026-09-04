@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Field, PageHead, Panel } from "@/components/erp";
 import { useAccess } from "@/lib/access";
-import { getSettingsForm, POLICY_FIELDS, QUOTE_TERMS_LABEL, saveFx, saveSettings, saveTiie, type PolicyField } from "@/lib/erp/ops";
+import { getSettingsForm, listCreditPolicies, POLICY_FIELDS, QUOTE_TERMS_LABEL, saveCreditPolicy, saveFx, saveSettings, saveTiie, type CreditPolicyRow, type PolicyField } from "@/lib/erp/ops";
 import { formatTerms, parseTerms } from "@/lib/erp/ladder";
 import { BUSINESS_RULES, YEAR_DAYS } from "@/lib/erp/rules";
 import { dbStatus, exportBackup } from "@/lib/erp/cutover";
@@ -53,6 +53,10 @@ function SettingsBody() {
   // Escalera de plazos de la cotización interna: texto "0, 30, 60…" tal cual
   // se captura; vacío = sin capturar (la base la trae sembrada).
   const [quoteTerms, setQuoteTerms] = useState("");
+  // Políticas de cobro: cobra comisión sí/no, cobra FEGA sí/no. Nulo = sin
+  // capturar; no se propone un valor.
+  const [policies, setPolicies] = useState<CreditPolicyRow[]>([]);
+  const [polEdit, setPolEdit] = useState<Record<string, { commission: string; fega: string }>>({});
   const [tiie, setTiie] = useState<Array<{ date: string; rate: string }>>([]);
   const [fx, setFx] = useState<Array<{ date: string; usd_mxn: string }>>([]);
   const [tDate, setTDate] = useState(() => todayMx());
@@ -85,6 +89,27 @@ function SettingsBody() {
     setQuoteTerms(s.quoteTerms ? formatTerms(s.quoteTerms) : "");
     setTiie(s.tiie);
     setFx(s.fx);
+    const cps = await listCreditPolicies().catch(() => []);
+    setPolicies(cps);
+    const yn = (v: boolean | null) => (v == null ? "" : v ? "si" : "no");
+    setPolEdit(Object.fromEntries(cps.map((c) => [c.code, { commission: yn(c.commission), fega: yn(c.fega) }])));
+  }
+
+  async function onSavePolicy(code: string) {
+    setError(null);
+    setMsg(null);
+    const e = polEdit[code];
+    if (!e || !e.commission || !e.fega) {
+      setError("Contesta las dos preguntas de la política (comisión y FEGA) antes de guardar.");
+      return;
+    }
+    try {
+      await saveCreditPolicy({ data: { code, commission: e.commission === "si", fega: e.fega === "si" } });
+      setMsg(`Política ${code} guardada`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo guardar la política");
+    }
   }
   const setNum = (k: PolicyField, raw: string) => setPolicy({ ...policy, [k]: raw.trim() === "" ? null : Number(raw) });
   const numInput = (k: PolicyField, step?: string) => (
@@ -313,6 +338,78 @@ function SettingsBody() {
         </p>
         {editable && <button className="erp-btn-primary">Guardar política</button>}
       </form>
+
+      <Panel className="mt-5">
+        <h2 className="text-sm font-semibold">Políticas de cobro (comisión y FEGA por cliente)</h2>
+        <p className="mt-0.5 text-sm text-muted">
+          Cada pedido nace con una política de cobro y su factura la hereda. El porcentaje es siempre el de arriba (comisión {pct(policy.fegaCommission)} + FEGA{" "}
+          {policy.fegaRate == null || policy.fegaCommission == null ? "—" : ((policy.fegaRate - policy.fegaCommission) * 100).toFixed(2) + "%"}); aquí solo se dice
+          cuál de las dos mitades se le cobra a ese cliente, porque se negocia distinto con cada uno. El interés de mora no depende de esto.
+        </p>
+        {policies.some((p) => p.commission == null || p.fega == null) && (
+          <p className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[13px] text-danger">
+            Hay políticas sin capturar. Mientras una política no conteste las dos preguntas, sus facturas vencidas salen marcadas «sin política» en el estado de
+            cuenta y la factura de intereses (FI) se detiene. No se supone un valor por omisión.
+          </p>
+        )}
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full min-w-[620px] text-left text-[13px]">
+            <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+              <tr>
+                <th className="py-2 font-medium">Política</th>
+                <th className="py-2 font-medium">¿Cobra comisión?</th>
+                <th className="py-2 font-medium">¿Cobra FEGA?</th>
+                <th className="py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {policies.map((cp) => {
+                const e = polEdit[cp.code] ?? { commission: "", fega: "" };
+                const sinCapturar = cp.commission == null || cp.fega == null;
+                const sel = (field: "commission" | "fega") => (
+                  <select
+                    className={e[field] ? "erp-input" : "erp-input border-warn"}
+                    value={e[field]}
+                    disabled={role !== "admin"}
+                    onChange={(ev) => setPolEdit({ ...polEdit, [cp.code]: { ...e, [field]: ev.target.value } })}
+                  >
+                    <option value="">sin capturar</option>
+                    <option value="si">Sí</option>
+                    <option value="no">No</option>
+                  </select>
+                );
+                return (
+                  <tr key={cp.code} className="border-t border-line align-top">
+                    <td className="py-2 pr-3">
+                      <span className="font-medium">{cp.name}</span>
+                      <span className="ml-2 font-mono text-[11px] text-muted">{cp.code}</span>
+                      {sinCapturar ? <span className="block text-[11px] text-warn">sin capturar</span> : null}
+                    </td>
+                    <td className="py-2 pr-3">{sel("commission")}</td>
+                    <td className="py-2 pr-3">{sel("fega")}</td>
+                    <td className="py-2 text-right">
+                      {role === "admin" ? (
+                        <button type="button" className="erp-btn h-8 text-[12px]" onClick={() => void onSavePolicy(cp.code)}>
+                          Guardar
+                        </button>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
+              {policies.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="py-6 text-center text-sm text-muted">
+                    Sin políticas de cobro en la base.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {role !== "admin" ? <p className="mt-2 text-xs text-muted">Solo un administrador puede cambiar una política de cobro.</p> : null}
+        <p className="mt-2 text-[12px] text-muted">Cada cambio queda en Bitácora con el valor anterior y el nuevo.</p>
+      </Panel>
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <Panel>

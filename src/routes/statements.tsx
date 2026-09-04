@@ -32,6 +32,7 @@ const EC_HEADERS = [
   "Interés s/ días",
   "Comisión + FEGA",
   "Total int+FEGA",
+  "Pronto pago (est.)",
 ];
 
 const EC_HEADERS_USD = [...EC_HEADERS, "Ut. cambiaria"];
@@ -45,6 +46,11 @@ function productRows(block: Block, hidePaid: boolean) {
   });
 }
 
+/**
+ * Una factura que NO ha vencido no trae interés ni comisión ni FEGA: no
+ * existen todavía. En su lugar se muestran los días que faltan y, aparte, la
+ * estimación de pronto pago (lo que se le bonificaría si pagara al corte).
+ */
 function rowCells(r: Row, cur: string, withFx: boolean) {
   const cells = [
     r.serie || "—",
@@ -52,15 +58,16 @@ function rowCells(r: Row, cur: string, withFx: boolean) {
     dateDMY(r.date),
     r.plazo ? String(r.plazo) : "—",
     dateDMY(r.due_date),
-    String(r.daysVence ?? r.daysOverdue ?? 0),
+    r.vencido || r.diasPorVencer <= 0 ? String(r.daysVence ?? r.daysOverdue ?? 0) : `faltan ${r.diasPorVencer}`,
     moneyIn(r.cargo ?? r.amount, cur),
     r.abono ? moneyIn(r.abono, cur) : "—",
     moneyIn(r.saldo ?? r.residual, cur),
     r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
-    String(r.daysVencidos ?? r.daysOverdue ?? 0),
-    r.sinTiie ? "sin TIIE" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
-    r.sinTiie ? "sin TIIE" : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
-    r.sinTiie ? "sin TIIE" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
+    r.vencido ? String(r.daysVencidos ?? r.daysOverdue ?? 0) : "—",
+    r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
+    r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
+    r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
+    r.sinTiieBono ? "sin TIIE" : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—",
   ];
   if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, cur) : "—");
   return cells;
@@ -73,6 +80,7 @@ function totalsCells(rows: Row[], cur: string, withFx: boolean) {
   const interes = rows.reduce((s, r) => s + r.interes, 0);
   const com = rows.reduce((s, r) => s + r.comisionFega, 0);
   const tot = rows.reduce((s, r) => s + r.totalFinanciero, 0);
+  const bono = rows.reduce((s, r) => s + r.bonificacion, 0);
   const fx = rows.reduce((s, r) => s + r.utCambiaria, 0);
   const cells = [
     "",
@@ -89,6 +97,7 @@ function totalsCells(rows: Row[], cur: string, withFx: boolean) {
     moneyIn(interes, cur),
     moneyIn(com, cur),
     moneyIn(tot, cur),
+    moneyIn(bono, cur),
   ];
   if (withFx) cells.push(moneyIn(fx, cur));
   return cells;
@@ -138,8 +147,10 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       sections,
       notes: [
         "Compaq solo trae cargo, abono y saldo. Este papel le agrega plazo, fecha de pago, días, interés, comisión y FEGA — igual que el Excel de cartera.",
-        `Interés = Cargo × (${ratesOf(st).annual}) × días vencidos / 360. Días negativos = pronto pago. Sin renglón de TIIE en la tabla el interés queda sin calcular y se marca.`,
-        `Comisión ${ratesOf(st).commission} + FEGA ${ratesOf(st).fega} = ${ratesOf(st).total} sobre el cargo, una sola vez, factura FI.`,
+        `Interés = Cargo × (${ratesOf(st).annual}) × días vencidos / 360, solo desde el día que vence. Sin renglón de TIIE en la tabla el interés queda sin calcular y se marca.`,
+        `Comisión ${ratesOf(st).commission} + FEGA ${ratesOf(st).fega} = ${ratesOf(st).total} sobre el cargo, una sola vez, cuando ya venció, factura FI.`,
+        "Lo que aún no vence no lleva interés, ni comisión, ni FEGA: se muestran los días que faltan.",
+        "Pronto pago (est.) es una ESTIMACIÓN, no un cargo: lo que se bonificaría si el documento se pagara en la fecha del corte, a tasa de costo (TIIE de la emisión + spread ASR) y solo si el pago cae antes del umbral de pronto pago.",
         "Saldo = cargo − abonos. No se mezcla con intereses. Ut. cambiaria = USD × (TC pactado − TC pagado).",
       ].join("\n"),
     }),
@@ -535,7 +546,9 @@ function StatementView({
                 total={viewing.ar}
                 extra={rows
                   .map((r) =>
-                    `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  ${r.daysVencidos} d  int ${moneyIn(r.interes, r.currency)}  C+FEGA ${moneyIn(r.comisionFega, r.currency)}`,
+                    r.vencido
+                      ? `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  ${r.daysVencidos} d vencidos  int ${moneyIn(r.interes, r.currency)}  C+FEGA ${moneyIn(r.comisionFega, r.currency)}`
+                      : `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  vence ${dateDMY(r.due_date)} (faltan ${r.diasPorVencer} d)  sin interés ni comisión ni FEGA${r.bonificacion > 0.009 ? `  pronto pago est. ${moneyIn(r.bonificacion, r.currency)}` : ""}`,
                   )
                   .join("\n")}
               />
@@ -543,11 +556,28 @@ function StatementView({
           </div>
         </header>
         <p className="mt-3 text-[12px] text-muted">
-          Compaq no trae plazo, pago, mora ni FEGA. Aquí sí: interés = cargo × ({rates.annual}) × días / 360 (con signo). Toca el interés para ver el desglose.
+          Compaq no trae plazo, pago, mora ni FEGA. Aquí sí: interés = cargo × ({rates.annual}) × días vencidos / 360, y solo desde el día que vence. Toca el interés para ver el desglose.
+        </p>
+        <p className="mt-1 text-[12px] text-muted">
+          Lo que todavía no vence no lleva interés, ni comisión, ni FEGA: sale el saldo, su vencimiento y los días que faltan. «Pronto pago (est.)» es una estimación
+          aparte —lo que se bonificaría si pagara en la fecha del corte— a tasa de costo (TIIE de la emisión + spread ASR), no a la de cobro, y solo si el pago cae
+          antes del umbral de pronto pago de Ajustes ({st?.policy.earlyPayDays ?? "—"} d).
         </p>
         {rows.some((r) => r.sinTiie) ? (
           <p className="mt-2 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
             {rows.filter((r) => r.sinTiie).length} documento(s) sin TIIE en la tabla para su vencimiento: interés y comisión/FEGA sin calcular (no se estiman). Captura la TIIE en Ajustes → Tabla TIIE.
+          </p>
+        ) : null}
+        {rows.some((r) => r.sinPolitica) ? (
+          <p className="mt-2 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+            {rows.filter((r) => r.sinPolitica).length} documento(s) vencido(s) con una política de cobro que todavía no dice si cobra comisión y si cobra FEGA
+            ({[...new Set(rows.filter((r) => r.sinPolitica).map((r) => r.politicaNombre || r.politicaCode || "(sin política)"))].join(", ")}):
+            no se cobra ninguna de las dos y la factura de intereses se detiene. Captúralo en Ajustes → Políticas de cobro.
+          </p>
+        ) : null}
+        {rows.some((r) => r.sinTiieBono) ? (
+          <p className="mt-2 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+            {rows.filter((r) => r.sinTiieBono).length} documento(s) sin TIIE en la tabla para su fecha de emisión: la estimación de pronto pago no se calcula (no se inventa tasa). Captúrala en Ajustes → Tabla TIIE.
           </p>
         ) : null}
         {currencies.map((cur) => {

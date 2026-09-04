@@ -446,7 +446,7 @@ function Ficha() {
               hint={
                 pnl.tiieIssue == null
                   ? `Sin TIIE en la tabla para la emisión (${pnl.tiieDate ?? "sin fecha"}): el costo financiero no se calcula ni se estima.`
-                  : `Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% (tabla${pnl.tiieDate ? `, ${dateDMY(pnl.tiieDate)}` : ""}) + spread. Comisión y Capa 1 van cobradas al cliente dentro del precio.`
+                  : `Sobre el costo puesto ${money(pnl.financeBase)} (mercancía + flete), la misma base que el precio. Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% (tabla${pnl.tiieDate ? `, ${dateDMY(pnl.tiieDate)}` : ""}) + spread. Comisión y Capa 1 van cobradas al cliente dentro del precio.`
               }
             />
             <PnlKpi

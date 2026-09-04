@@ -7,7 +7,7 @@ import { SendButton } from "@/components/send-doc";
 import { getDealTrail } from "@/lib/erp/deal";
 import { listInvoices, registerPayment } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
-import { computeMora, exactClock, explainInterest, missingRateMessage, nearestRate, validateDueDates } from "@/lib/erp/credit";
+import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, missingChargesMessage, missingRateMessage, nearestRate, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 
@@ -328,13 +328,21 @@ function Page() {
                   </div>
                 );
               }
+              // Comisión y FEGA según la política del documento: los
+              // porcentajes son los de Ajustes, la política dice cuál mitad se
+              // cobra. Sin capturar, la FI se detiene: aquí se avisa antes.
+              const cp = settings.policies.find((x) => x.code === inv.policy_code) ?? null;
+              const cobra = chargesCaptured(cp) ? { commission: cp.commission, fega: cp.fega } : null;
+              const tasas = cobra
+                ? chargeRates(settings.fegaRate, settings.commissionRate, cobra)
+                : { fegaRate: 0, commissionRate: 0, fegaOnlyRate: 0 };
               const mora = computeMora({
                 capital: num(inv.residual),
                 dueDate: inv.due_date,
                 asOf: pay.date || todayMx(),
                 tiieAtDue: pick.rate,
                 spread: settings.collectionSpread,
-                fegaRate: settings.fegaRate,
+                fegaRate: tasas.fegaRate,
                 fegaAlreadyCharged: false,
               });
               const exp = explainInterest({
@@ -345,8 +353,8 @@ function Page() {
                 spread: settings.collectionSpread,
                 interest: mora.interest,
                 fega: mora.fega,
-                fegaRate: settings.fegaRate,
-                commissionRate: settings.commissionRate,
+                fegaRate: tasas.fegaRate,
+                commissionRate: tasas.commissionRate,
                 currency: inv.currency,
                 dueDate: inv.due_date,
                 residual: num(inv.residual),
@@ -360,6 +368,13 @@ function Page() {
                       <li key={l}>{l}</li>
                     ))}
                   </ul>
+                  {cobra ? (
+                    <p className="mt-1">
+                      Política {cp!.name}: comisión {cobra.commission ? "sí" : "no"} · FEGA {cobra.fega ? "sí" : "no"}.
+                    </p>
+                  ) : mora.daysOverdue > 0 ? (
+                    <p className="mt-1 text-danger">{missingChargesMessage(inv.policy_code || "(sin política)", cp?.name)}</p>
+                  ) : null}
                 </div>
               );
             })()}

@@ -148,13 +148,20 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     const cogs = excluded ? 0 : qty * costUnit;
     const freight = excluded ? 0 : qty * freightUnit;
     const other = excluded ? 0 : qty * otherUnit;
+    // COSTO PUESTO: el flete se prorratea al costo del producto y ese es el
+    // costo total del que sale todo. Es la MISMA base que usó el precio
+    // (pricing.ts: landedUnit = costo + flete + otros), así que el
+    // financiamiento que se le cobró al cliente y el que se calcula aquí son
+    // el mismo número. Antes esta base era solo la mercancía y la tarjeta
+    // quedaba corta por el financiamiento del flete.
+    const landed = cogs + freight + other;
     // Costo financiero del circuito hermana: comisión + Capa 1 con los días
     // de crédito del pedido (los mismos cobrados al cliente en el precio) +
     // Capa 2 (días excedidos, no previstos). Al contado no hay circuito.
     const fin =
       !excluded && tiieIssue != null && (financialDays > 0 || daysExceeded > 0)
         ? financeCost({
-            supplierCost: financialDays > 0 ? cogs : 0,
+            supplierCost: financialDays > 0 ? landed : 0,
             saleCapital: sale,
             commissionRate,
             costSpread,
@@ -179,6 +186,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       freightUnit,
       freight,
       other,
+      landed,
       finance,
       commission: fin.commission,
       layer1: fin.layer1,
@@ -230,6 +238,9 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const layer1 = included.reduce((s, l) => s + l.layer1, 0);
   const layer2 = included.reduce((s, l) => s + l.layer2, 0);
   const finance = commission + layer1 + layer2;
+  // Base sobre la que corrió el costo financiero: costo puesto (mercancía +
+  // flete + otros), la misma que el precio le cobró al cliente.
+  const financeBase = included.reduce((s, l) => s + l.landed, 0);
   const freight = freightQuote + expPedido;
   // Descuento por pronto pago: si la factura se liquidó antes del umbral,
   // se bonifican los días hasta el plazo financiero a la tasa de costo.
@@ -287,6 +298,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     layer1,
     layer2,
     finance,
+    financeBase,
     discount,
     fxIncome,
     margin,

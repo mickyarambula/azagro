@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
-import { addDays, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingRateMessage, moraBilling, nearestRate, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
+import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, pctRate, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
@@ -183,6 +183,33 @@ export async function policy(sql: Sql, companyId: number): Promise<Policy> {
   return { ...rest, ...v, commissionRate: v.fegaCommission, quoteTerms: quoteTerms ?? [] };
 }
 
+/**
+ * Políticas de cobro de la empresa con sus dos interruptores: cobra comisión
+ * sí/no, cobra FEGA sí/no. Nulo = sin capturar (nacen así, migración 0021):
+ * quien la use se detiene y avisa, nunca decide por su cuenta.
+ */
+export type CreditPolicyRow = { code: string; name: string; commission: boolean | null; fega: boolean | null };
+
+async function ensurePolicySwitches(sql: Sql) {
+  await sql`alter table credit_policies add column if not exists charge_commission boolean`;
+  await sql`alter table credit_policies add column if not exists charge_fega boolean`;
+}
+
+export async function creditPolicies(sql: Sql, companyId: number): Promise<CreditPolicyRow[]> {
+  await ensurePolicySwitches(sql);
+  const rows = await sql<{ code: string; name: string; charge_commission: boolean | null; charge_fega: boolean | null }>`
+    select code, name, charge_commission, charge_fega
+    from credit_policies where company_id = ${companyId} order by code
+  `;
+  return rows.map((r) => ({ code: r.code, name: r.name, commission: r.charge_commission, fega: r.charge_fega }));
+}
+
+/** Mapa código → política, para resolver documento por documento. */
+export async function creditPolicyMap(sql: Sql, companyId: number) {
+  const list = await creditPolicies(sql, companyId);
+  return new Map(list.map((p) => [p.code, p]));
+}
+
 /** Tabla TIIE completa, como números (para nearestRate / requireRate). */
 async function tiieTableOf(sql: Sql, cid: number) {
   const rows = await sql<{ date: string; rate: string }>`
@@ -209,7 +236,11 @@ export const getSettings = createServerFn({ method: "GET" })
     const cid = await companyOf(sql, context.userId);
     const p = await policy(sql, cid);
     const { tiie, fx } = await rateTables(sql, cid);
-    return { ...p, tiie, fx };
+    // Las políticas de cobro van aquí para que la vista previa de la mora (al
+    // registrar un cobro) use los interruptores del documento y no los de la
+    // empresa: comisión y FEGA se negocian por cliente.
+    const policies = await creditPolicies(sql, cid);
+    return { ...p, tiie, fx, policies };
   });
 
 /** Solo para la pantalla de Ajustes: lo que hay (nulo = sin capturar) y lo que falta. */
@@ -322,6 +353,55 @@ export const saveSettings = createServerFn({ method: "POST" })
         action: "parametros",
         entity: "settings",
         detail: changes.join(" · "),
+      });
+    }
+    return { ok: true };
+  });
+
+/** Políticas de cobro con sus interruptores (para Ajustes y para el pedido). */
+export const listCreditPolicies = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const sql = await getSql();
+    const cid = await companyOf(sql, context.userId);
+    return creditPolicies(sql, cid);
+  });
+
+/**
+ * Cobra comisión sí/no y cobra FEGA sí/no de una política. Mueve dinero de
+ * toda la cartera que use esa política: solo administrador, y cada cambio
+ * queda en bitácora con el valor anterior y el nuevo.
+ */
+export const saveCreditPolicy = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ code: z.string().min(1), commission: z.boolean(), fega: z.boolean() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const cid = await companyOf(sql, context.userId);
+    await assertAdmin(sql, context.userId);
+    await ensurePolicySwitches(sql);
+    const before = await sql<{ name: string; charge_commission: boolean | null; charge_fega: boolean | null }>`
+      select name, charge_commission, charge_fega from credit_policies
+      where company_id = ${cid} and code = ${data.code}
+    `;
+    if (!before[0]) throw new Error(`No existe la política de cobro «${data.code}».`);
+    await sql`
+      update credit_policies set charge_commission = ${data.commission}, charge_fega = ${data.fega}
+      where company_id = ${cid} and code = ${data.code}
+    `;
+    const dime = (v: boolean | null) => (v == null ? "sin capturar" : v ? "sí" : "no");
+    const cambios = [
+      before[0].charge_commission !== data.commission ? `comisión ${dime(before[0].charge_commission)} → ${dime(data.commission)}` : null,
+      before[0].charge_fega !== data.fega ? `FEGA ${dime(before[0].charge_fega)} → ${dime(data.fega)}` : null,
+    ].filter(Boolean);
+    if (cambios.length) {
+      await writeAudit(sql, {
+        companyId: cid,
+        userId: context.userId,
+        action: "politica-cobro",
+        entity: "settings",
+        name: data.code,
+        detail: `${before[0].name}: ${cambios.join(" · ")}`,
       });
     }
     return { ok: true };
@@ -1710,6 +1790,10 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       select date::text, rate::text from tiie_rates where company_id = ${cid} order by date
     `;
     const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+    // Comisión y FEGA se negocian por cliente: cada documento trae la política
+    // con la que nació y de ahí salen sus dos interruptores. Sin capturar, la
+    // fila se marca y no se cobra nada — no se decide por el dueño.
+    const polMap = await creditPolicyMap(sql, cid);
 
     const partners = await sql<{
       id: number;
@@ -1756,12 +1840,14 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         paid_date: string | null;
         credit_days: number;
         opening_paid: string;
+        policy_code: string;
       }>`
         select id, name, kind, date::text, due_date::text, credit_due::text, amount::text, residual::text, state, origin,
           currency, amount_fx::text, fx_agreed::text, fx_paid::text, inv_class, fega_charged,
           interest_invoiced::text, fx_invoiced::text, paid_date::text,
           coalesce(credit_days, 0)::int as credit_days,
-          coalesce(opening_paid, 0)::text as opening_paid
+          coalesce(opening_paid, 0)::text as opening_paid,
+          coalesce(policy_code, '') as policy_code
         from invoices
         where company_id = ${cid} and partner_id = ${partner.id}
         order by date, id
@@ -1809,12 +1895,6 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // corre la mora y del que se toma la TIIE. Sin credit_due (corte
         // Compaq), se usa el único vencimiento que hay.
         const moraDue = inv.credit_due || inv.due_date;
-        // TIIE del renglón de la tabla vigente al plazo financiero. Sin renglón
-        // no se calcula interés: la fila sale marcada "sin TIIE" y con el aviso,
-        // nunca con una tasa inventada.
-        const tiiePick = nearestRate(tiieTable, moraDue);
-        const sinTiie = tiiePick == null;
-        const tiie = tiiePick?.rate ?? 0;
         const cargo = Number(inv.amount);
         const productDoc = inv.kind === "customer" && (inv.inv_class || "product") === "product";
         const allocsAll = pays.filter((p) => p.invoice_id === inv.id);
@@ -1829,6 +1909,29 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // El interés corre sobre el CARGO original hasta la liquidación total:
         // un abono parcial no lo congela ni reduce la base (regla del Excel).
         const paidForCalc = saldo <= 0.009 ? (historico ? fechaAbono : (inv.paid_date ?? fechaAbono)) : null;
+        // ¿Ya venció al corte? Antes del plazo financiero NO nace nada: ni
+        // interés ni comisión ni FEGA (regla del dueño, 3-sep-2026). Se decide
+        // aquí, antes de pedirle nada a la tabla de TIIE: una factura que no
+        // ha vencido no necesita tasa porque no hay nada que calcular.
+        const fechaPagoCalc = paidForCalc && paidForCalc <= asOf ? paidForCalc : asOf;
+        const diasVencidos = daysBetween(moraDue, fechaPagoCalc);
+        const vencido = productDoc && diasVencidos > 0;
+        // TIIE del renglón de la tabla vigente al plazo financiero. Sin renglón
+        // no se calcula interés: la fila sale marcada "sin TIIE" y con el aviso,
+        // nunca con una tasa inventada.
+        const tiiePick = nearestRate(tiieTable, moraDue);
+        const sinTiie = vencido && tiiePick == null;
+        const tiie = tiiePick?.rate ?? 0;
+        // COMISIÓN Y FEGA SEGÚN LA POLÍTICA DEL DOCUMENTO. El porcentaje sigue
+        // saliendo de Ajustes; la política solo dice cuál de las dos mitades se
+        // cobra. Sin los dos interruptores capturados no se cobra nada y la
+        // fila queda marcada: la decisión es del dueño, no del sistema.
+        const politica = polMap.get(inv.policy_code) ?? null;
+        const cobra = chargesCaptured(politica) ? { commission: politica.commission, fega: politica.fega } : null;
+        const sinPolitica = vencido && cobra == null;
+        const tasas = cobra
+          ? chargeRates(pol.fegaRate, pol.commissionRate, cobra)
+          : { fegaRate: 0, commissionRate: 0, fegaOnlyRate: 0 };
         // FI emitidas hasta el corte, con su desglose guardado interés/FEGA.
         const misFis = fis.filter((f) => f.origin === "Mora " + inv.name && (!historico || f.date <= asOf));
         const intInvoiced = historico
@@ -1846,7 +1949,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               paidDate: paidForCalc,
               tiieAtDue: tiie,
               spread: pol.collectionSpread,
-              fegaRate: pol.fegaRate,
+              fegaRate: tasas.fegaRate,
               fegaAlreadyCharged: fegaCharged,
             })
           : {
@@ -1871,27 +1974,32 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               paidDate: paidForCalc,
               tiieAtDue: tiie,
               spread: pol.collectionSpread,
-              fegaRate: pol.fegaRate,
-              commissionRate: pol.commissionRate,
+              fegaRate: tasas.fegaRate,
+              commissionRate: tasas.commissionRate,
             })
           : null;
-        // Bonificación por pronto pago (informativa): pagó antes del umbral,
-        // se bonifican los días hasta el plazo financiero a tasa de costo. La
-        // TIIE es la del renglón vigente a la emisión; sin renglón no se
-        // estima y se avisa.
-        const earlyPay = productDoc && paidForCalc != null && daysBetween(inv.date, paidForCalc) < pol.earlyPayDays;
-        const tiieIssuePick = earlyPay ? nearestRate(tiieTable, inv.date) : null;
-        const bono = earlyPay && tiieIssuePick
+        // BONIFICACIÓN POR PRONTO PAGO — VA A TASA DE COSTO, NO DE COBRO.
+        // Lo que se le regresa al cliente es el financiamiento que NO consumió:
+        // TIIE de la emisión + spread ASR (lo que a Azagro le cuesta el dinero),
+        // nunca TIIE + spread de cobro. Solo procede si el pago cae antes del
+        // umbral de pronto pago de Ajustes. Si la factura sigue abierta es una
+        // ESTIMACIÓN: cuánto se bonificaría si pagara en la fecha del corte.
+        const fechaBono = paidForCalc ?? asOf;
+        const bonoEstimado = productDoc && paidForCalc == null;
+        const tiieIssuePick = productDoc ? nearestRate(tiieTable, inv.date) : null;
+        const bono = productDoc && tiieIssuePick
           ? earlyPayBonus({
               cargo,
               issueDate: inv.date,
-              payDate: paidForCalc!,
+              payDate: fechaBono,
               thresholdDays: pol.earlyPayDays,
               financialDays: inv.credit_days || pol.creditDays,
               tiieAtIssue: tiieIssuePick.rate,
               costSpread: pol.asrSpread,
             })
           : { applies: false, lived: 0, days: 0, rate: 0, bonus: 0 };
+        // Sin renglón de TIIE a la emisión no se estima la bonificación: se avisa.
+        const sinTiieBono = productDoc && !vencido && tiieIssuePick == null;
         const formula = sinTiie && productDoc
           ? {
               short: "Sin TIIE en la tabla: interés no calculado.",
@@ -1908,8 +2016,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               spread: mora.spread,
               interest: line?.interest ?? mora.interest,
               fega: line?.comisionFega ?? mora.fega,
-              fegaRate: pol.fegaRate,
-              commissionRate: pol.commissionRate,
+              fegaRate: tasas.fegaRate,
+              commissionRate: tasas.commissionRate,
               currency: inv.currency,
               dueDate: inv.due_date,
               residual: saldo,
@@ -1922,11 +2030,26 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           allowPast: true,
         });
         if (bono.applies) {
+          const tasa = `TIIE de emisión ${rateLabel(tiieIssuePick!)} + spread ASR ${pctRate(pol.asrSpread)} (tasa de costo, no la de cobro) = ${pctRate(bono.rate)}`;
           formula.lines.push(
-            `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays}). Bonificación = cargo × (TIIE emisión ${rateLabel(tiieIssuePick!)} + ${(pol.asrSpread * 100).toFixed(2)}%) × ${bono.days} d no usados / 360 = ${bono.bonus.toFixed(2)}.`,
+            bonoEstimado
+              ? `Estimación de pronto pago: si pagara el ${dateDMY(fechaBono)} —día ${bono.lived} de la factura, antes del umbral de ${pol.earlyPayDays} d— se le bonificarían los ${bono.days} d del plazo financiero que no consumió: cargo × (${tasa}) × ${bono.days} d / 360 = ${bono.bonus.toFixed(2)}. Es una estimación, no un cargo: se aplica el día que pague.`
+              : `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays} d). Bonificación = cargo × (${tasa}) × ${bono.days} d no usados / 360 = ${bono.bonus.toFixed(2)}.`,
           );
-        } else if (earlyPay && !tiieIssuePick) {
-          formula.lines.push(`Pronto pago no calculado: ${missingRateMessage(inv.date, `emisión de ${inv.name}`)}`);
+        } else if (sinTiieBono) {
+          formula.lines.push(`Pronto pago no estimado: ${missingRateMessage(inv.date, `emisión de ${inv.name}`)}`);
+        } else if (productDoc && !vencido && bono.lived >= pol.earlyPayDays) {
+          formula.lines.push(
+            `Sin bonificación por pronto pago: al ${dateDMY(fechaBono)} ya pasaron ${bono.lived} d desde la emisión y el umbral es ${pol.earlyPayDays} d.`,
+          );
+        }
+        if (sinPolitica) {
+          formula.lines.push(missingChargesMessage(inv.policy_code || "(sin política)", politica?.name));
+          formula.lines.push("Mientras tanto no se cobra comisión ni FEGA en esta fila: la decisión se captura, no se supone.");
+        } else if (vencido && cobra) {
+          formula.lines.push(
+            `Política de cobro ${politica!.name}: comisión ${cobra.commission ? `sí (${pctRate(tasas.commissionRate)})` : "no"} · FEGA ${cobra.fega ? `sí (${pctRate(tasas.fegaOnlyRate)})` : "no"}.`,
+          );
         }
         return {
           ...inv,
@@ -1947,8 +2070,22 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           fechaAbono,
           fechaPago: line?.fechaPago ?? fechaAbono ?? asOf,
           moraDue,
-          bonificacion: bono.bonus,
-          bonificacionDias: bono.days,
+          // Antes del vencimiento no hay interés ni comisión ni FEGA: lo único
+          // que se muestra es la bonificación de pronto pago, y con la
+          // factura abierta es una estimación al día del corte.
+          vencido,
+          diasPorVencer: line?.diasPorVencer ?? Math.max(0, -diasVencidos),
+          bonificacion: bono.applies ? bono.bonus : 0,
+          bonificacionDias: bono.applies ? bono.days : 0,
+          bonificacionTasa: bono.applies ? bono.rate : 0,
+          bonificacionEstimada: bonoEstimado,
+          sinTiieBono,
+          // Política de cobro del documento y sus dos interruptores.
+          politicaCode: inv.policy_code,
+          politicaNombre: politica?.name ?? "",
+          cobraComision: cobra?.commission ?? null,
+          cobraFega: cobra?.fega ?? null,
+          sinPolitica,
           plazo,
           interes: line?.interest ?? mora.interest,
           fega: mora.fega,
@@ -2033,9 +2170,11 @@ export async function issueMoraInvoice(
     kind: string;
     inv_class: string;
     order_id: number | null;
+    policy_code: string;
   }>`
     select id, partner_id, residual::text, amount::text, due_date::text, credit_due::text, paid_date::text,
-      fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class, order_id
+      fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class, order_id,
+      coalesce(policy_code, '') as policy_code
     from invoices where id = ${invoiceId} and company_id = ${companyId}
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
@@ -2048,9 +2187,10 @@ export async function issueMoraInvoice(
   // en esa fecha. El capital es SIEMPRE el cargo original (regla del Excel).
   const moraDue = inv[0].credit_due || inv[0].due_date;
   const paidDate = opts?.paidDate === undefined ? inv[0].paid_date : opts.paidDate;
-  // Primero los días: si no ha vencido no hay mora y no hace falta TIIE. Si
-  // sí venció, la TIIE tiene que estar en la tabla para esa fecha; sin
-  // renglón la FI no se genera y se avisa (en un cobro, la transacción
+  // Primero los días: si no ha vencido no hay mora y no hacen falta ni la TIIE
+  // ni la política. Si sí venció, la TIIE tiene que estar en la tabla para esa
+  // fecha y la política tiene que decir si cobra comisión y FEGA; sin una de
+  // las dos la FI no se genera y se avisa (en un cobro, la transacción
   // completa se revierte).
   const endOverdue = paidDate && paidDate < asOf ? paidDate : asOf;
   const daysOverdue = Math.max(0, daysBetween(moraDue, endOverdue));
@@ -2067,6 +2207,16 @@ export async function issueMoraInvoice(
     `plazo financiero de ${inv[0].name}`,
   );
   const tiie = pick.rate;
+  // La política del documento decide si esta FI lleva comisión y si lleva
+  // FEGA (los porcentajes siguen siendo los de Ajustes). Sin los dos
+  // interruptores capturados NO se emite: la FI es dinero y el sistema no
+  // supone. En un cobro, la transacción completa se revierte con este aviso.
+  const politica = (await creditPolicyMap(sql, companyId)).get(inv[0].policy_code) ?? null;
+  if (!chargesCaptured(politica)) {
+    throw new Error(missingChargesMessage(inv[0].policy_code || "(sin política)", politica?.name));
+  }
+  const cobra = { commission: politica.commission, fega: politica.fega };
+  const tasas = chargeRates(pol.fegaRate, pol.commissionRate, cobra);
   const bill = moraBilling({
     cargo: Number(inv[0].amount),
     moraDue,
@@ -2074,7 +2224,7 @@ export async function issueMoraInvoice(
     paidDate,
     tiieAtDue: tiie,
     spread: pol.collectionSpread,
-    fegaRate: pol.fegaRate,
+    fegaRate: tasas.fegaRate,
     interestInvoiced: Number(inv[0].interest_invoiced),
     fegaCharged: inv[0].fega_charged,
   });
@@ -2086,8 +2236,8 @@ export async function issueMoraInvoice(
     spread: bill.spread,
     interest: bill.interest,
     fega: bill.fega,
-    fegaRate: pol.fegaRate,
-    commissionRate: pol.commissionRate,
+    fegaRate: tasas.fegaRate,
+    commissionRate: tasas.commissionRate,
     dueDate: moraDue,
     residual: Number(inv[0].residual),
   }).short;
@@ -2102,7 +2252,8 @@ export async function issueMoraInvoice(
     `${rateLabel(pick)} vigente al ${moraDue} + spread ${(pol.collectionSpread * 100).toFixed(2)}%`,
     `capital (cargo original) ${Number(inv[0].amount).toFixed(2)} · ${bill.daysOverdue} d vencidos`,
     `interés nuevo ${bill.interestNew.toFixed(2)} (ya facturado antes: ${Number(inv[0].interest_invoiced).toFixed(2)})`,
-    `FEGA ${bill.fegaNew.toFixed(2)} (tasa ${(pol.fegaRate * 100).toFixed(2)}%${inv[0].fega_charged ? ", ya cobrado antes" : ""})`,
+    `comisión + FEGA ${bill.fegaNew.toFixed(2)} (tasa ${pctRate(tasas.fegaRate)}${inv[0].fega_charged ? ", ya cobrado antes" : ""})`,
+    `política ${politica.name}: comisión ${cobra.commission ? "sí" : "no"} · FEGA ${cobra.fega ? "sí" : "no"}`,
   ].join(" · ");
   const n = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${companyId}`;
   const name = `FI-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;

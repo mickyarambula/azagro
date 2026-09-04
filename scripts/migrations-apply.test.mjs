@@ -53,6 +53,37 @@ test("todas las migraciones aplican en orden sobre una base vacía", async () =>
   assert.ok(cs.includes("quote_terms"), "company_settings.quote_terms");
   const qt = (await db.query(`select column_default from information_schema.columns where table_name = 'company_settings' and column_name = 'quote_terms'`)).rows[0];
   assert.ok(String(qt.column_default).includes("0,30,60,90,120,150"), "la lista inicial del dueño: contado, 30, 60, 90, 120 y 150 días");
+  // 0021 — comisión y FEGA opcionales por política de cobro, sin valor por omisión.
+  const cp = await cols("credit_policies");
+  for (const c of ["charge_commission", "charge_fega"]) assert.ok(cp.includes(c), `credit_policies.${c}`);
+  const sw = (await db.query(
+    `select column_name, column_default, is_nullable from information_schema.columns where table_name = 'credit_policies' and column_name = any($1)`,
+    [["charge_commission", "charge_fega"]],
+  )).rows;
+  assert.equal(sw.length, 2);
+  for (const d of sw) {
+    assert.equal(d.column_default, null, `${d.column_name} nace sin valor por omisión: la decisión es del dueño`);
+    assert.equal(d.is_nullable, "YES", `${d.column_name} puede estar sin capturar`);
+  }
+  await db.close();
+});
+
+test("0021 no toca las políticas que ya existían: quedan sin capturar", async () => {
+  const db = new PGlite();
+  const files = pendingMigrations(readdirSync(dir), []);
+  for (const { path } of files.filter((f) => f.name < "0021")) await db.exec(readFileSync(join(dir, path), "utf8"));
+  await db.exec(`insert into companies (id, name, join_code, created_by) values (1, 'AZ', 'AZ1', 'u1')`);
+  await db.exec(`
+    insert into credit_policies (company_id, code, name) values
+      (1, 'NONE', 'Sin mora'), (1, 'GRUPO_SL', 'Grupo SL'), (1, 'ESTANDAR', 'Estándar')
+  `);
+  await db.exec(readFileSync(join(dir, "0021_politica_comision_fega.sql"), "utf8"));
+  const rows = (await db.query(`select code, charge_commission, charge_fega from credit_policies order by code`)).rows;
+  assert.equal(rows.length, 3);
+  for (const r of rows) {
+    assert.equal(r.charge_commission, null, `${r.code} sigue sin capturar la comisión`);
+    assert.equal(r.charge_fega, null, `${r.code} sigue sin capturar el FEGA`);
+  }
   await db.close();
 });
 

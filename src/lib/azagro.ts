@@ -1667,6 +1667,7 @@ export const listInvoices = createServerFn({ method: "POST" })
       days_overdue: number;
       days_left: number;
       currency: string;
+      policy_code: string;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1674,7 +1675,8 @@ export const listInvoices = createServerFn({ method: "POST" })
         coalesce(i.credit_days, 0)::int as credit_days,
         greatest(0, (${today}::date - i.due_date))::int as days_overdue,
         (i.due_date - ${today}::date)::int as days_left,
-        coalesce(i.currency,'MXN') as currency
+        coalesce(i.currency,'MXN') as currency,
+        coalesce(i.policy_code, '') as policy_code
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

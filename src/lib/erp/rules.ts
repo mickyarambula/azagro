@@ -39,7 +39,7 @@ export const BUSINESS_RULES = [
   {
     id: "mora",
     title: "Mora aparte",
-    body: "TIIE de la tabla en la fecha del plazo financiero + spread de cobro (Ajustes) sobre el cargo, × días exactos / 360 (puede ser negativo si pagaron antes: pronto pago). Comisión + FEGA (Ajustes) una sola vez sobre el cargo. En el estado de cuenta se ven las tres columnas del Excel. La factura FI solo sale si ya venció y hay TIIE en la tabla para esa fecha; no se suma al precio ni a la factura del producto.",
+    body: "TIIE de la tabla en la fecha del plazo financiero + spread de cobro (Ajustes) sobre el cargo, × días exactos / 360. Nada de eso nace antes del vencimiento: mientras no venza no hay interés, ni comisión, ni FEGA — solo el saldo y los días que faltan. Comisión + FEGA (Ajustes) una sola vez sobre el cargo, ya vencido. Pagar antes del umbral no genera interés a favor: genera bonificación de pronto pago, a tasa de costo (TIIE de la emisión + spread ASR), que en el estado de cuenta se muestra aparte y etiquetada como estimación mientras el documento siga abierto. La factura FI solo sale si ya venció y hay TIIE en la tabla para esa fecha; no se suma al precio ni a la factura del producto.",
   },
   {
     id: "ec",

@@ -78,6 +78,39 @@ export function splitFegaBundle(fegaRate: number, commissionRate: number) {
 }
 
 /**
+ * Interruptores de la política de cobro del documento: cobra comisión sí/no,
+ * cobra FEGA sí/no. Se negocia distinto con cada cliente. Nulo = sin capturar;
+ * el llamador se detiene y avisa, no decide por su cuenta.
+ */
+export type PolicyCharges = { commission: boolean | null; fega: boolean | null };
+
+/** ¿La política ya tiene contestadas las dos preguntas? */
+export function chargesCaptured(on: PolicyCharges | null | undefined): on is { commission: boolean; fega: boolean } {
+  return on != null && typeof on.commission === "boolean" && typeof on.fega === "boolean";
+}
+
+/**
+ * Tasas efectivas de «comisión + FEGA» para ESTE documento: se parte el
+ * porcentaje de Ajustes en sus dos mitades y se deja solo la que la política
+ * cobra. Los porcentajes siguen saliendo de Ajustes; aquí solo se elige qué
+ * mitad aplica.
+ *   las dos → comisión + FEGA completo · solo comisión → la comisión
+ *   solo FEGA → el FEGA · ninguna → 0
+ */
+export function chargeRates(fegaRate: number, commissionRate: number, on: { commission: boolean; fega: boolean }) {
+  const split = splitFegaBundle(fegaRate, commissionRate);
+  const commission = on.commission ? split.commission : 0;
+  const fega = on.fega ? split.fega : 0;
+  return { fegaRate: commission + fega, commissionRate: commission, fegaOnlyRate: fega };
+}
+
+/** Mensaje único de "esta política no dice si cobra comisión y FEGA". */
+export function missingChargesMessage(code: string, name?: string) {
+  const label = name ? `«${name}» (${code})` : `«${code}»`;
+  return `La política de cobro ${label} no dice si cobra comisión y si cobra FEGA. Captúralo en Ajustes → Políticas de cobro antes de continuar.`;
+}
+
+/**
  * Mora a facturar (FI):
  *   Interés = Capital × (TIIE vencimiento + spread de cobro) × días vencidos / 360   (nunca negativo)
  *   FEGA    = Capital × tasa «comisión + FEGA» de Ajustes  (una sola vez, si ya venció y no se ha facturado)
@@ -121,9 +154,16 @@ export function computeMora(input: {
  * Fórmulas (igual que GRUPO SL / SL AGRICOLA):
  *   Días vence     = vencimiento → corte (con signo)
  *   Días vencidos  = vencimiento → fecha de pago, o corte si sigue abierta (con signo)
- *   Interés        = Cargo × (TIIE al vencimiento + spread de cobro) × días vencidos / 360   (con signo: negativo = pronto pago)
- *   Comisión+FEGA  = Cargo × tasa «comisión + FEGA» (Ajustes), siempre, sobre el cargo
+ *   Interés        = Cargo × (TIIE al vencimiento + spread de cobro) × días vencidos / 360
+ *   Comisión+FEGA  = Cargo × tasa «comisión + FEGA» (Ajustes), una sola vez
  *   Total int+FEGA = interés + comisión+FEGA
+ *
+ * NADA DE ESO NACE ANTES DEL VENCIMIENTO (regla del dueño, 3-sep-2026). Con
+ * días vencidos ≤ 0 el interés es 0 y la comisión + FEGA es 0: no existen
+ * todavía. Antes se multiplicaba por días negativos y salía un interés "a
+ * favor" que además usaba la tasa de COBRO; lo que se le regresa al cliente
+ * por pagar antes es la bonificación de pronto pago (earlyPayBonus), que va a
+ * tasa de COSTO y se muestra aparte, como estimación.
  *
  * El capital del Excel es el CARGO (importe original), no el saldo.
  * La tasa anual del encabezado es TIIE + spread (en el Excel a veces la congelaban).
@@ -143,14 +183,19 @@ export function computeStatementLine(input: {
   const fechaPago = paid && paid <= input.asOf ? paid : input.asOf;
   const daysVence = daysBetween(input.dueDate, input.asOf);
   const daysVencidos = daysBetween(input.dueDate, fechaPago);
+  const vencido = daysVencidos > 0;
   const annualRate = input.tiieAtDue + input.spread;
-  const interest = (input.cargo * annualRate * daysVencidos) / YEAR_DAYS;
+  const interest = vencido ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;
   const split = splitFegaBundle(input.fegaRate, input.commissionRate);
-  const comisionFega = input.cargo * split.bundle;
+  const comisionFega = vencido ? input.cargo * split.bundle : 0;
   return {
     fechaPago,
     daysVence,
     daysVencidos,
+    /** Falso mientras no venza: no hay interés ni comisión ni FEGA que mostrar. */
+    vencido,
+    /** Días que faltan para el plazo financiero (0 si ya venció). */
+    diasPorVencer: Math.max(0, -daysVence),
     annualRate,
     tiie: input.tiieAtDue,
     spread: input.spread,
@@ -203,17 +248,31 @@ export function explainInterest(i: {
         ? "cargo original (el documento ya se pagó)"
         : "cargo";
 
+  // Antes del vencimiento no hay nada que cobrar: ni interés ni comisión ni
+  // FEGA. No se multiplica por días negativos (eso daba un "interés a favor"
+  // a tasa de cobro que no existe); el beneficio por pagar antes es la
+  // bonificación de pronto pago, a tasa de costo y aparte.
+  if (i.days <= 0) {
+    const faltan = -i.days;
+    const short = `Sin días vencidos${dueBit}: no corre interés ni comisión ni FEGA.`;
+    return {
+      short,
+      lines: [
+        "Misma fórmula que el Excel de cartera (no el export crudo de Compaq).",
+        `Cargo (${base}): ${cap}.`,
+        faltan > 0 ? `Faltan ${faltan} d exactos${dueBit}.` : `Vence hoy${dueBit}.`,
+        "Interés, comisión y FEGA nacen el día que vence; hoy no existen.",
+      ],
+    };
+  }
   const math = `${cap} × (${pctRate(i.tiie)} TIIE + ${pctRate(i.spread)}) × ${i.days} d / 360 = ${int}`;
   const lines = [
     "Misma fórmula que el Excel de cartera (no el export crudo de Compaq).",
     "Interés = Cargo × Tasa anual × Días vencidos / 360.",
     `Tasa anual = TIIE${dueBit} ${pctRate(i.tiie)}${tiieBit} + ${pctRate(i.spread)} (spread de cobro, Ajustes) = ${pctRate(annual)}.`,
-    `Cargo (${base}): ${cap}. Días vencidos: ${i.days} (con signo; el factor es /360).`,
+    `Cargo (${base}): ${cap}. Días vencidos: ${i.days}; el factor es /360.`,
     math,
   ];
-  if (i.days < 0) {
-    lines.push("Días negativos = pagaron o el corte es antes del vencimiento (pronto pago). El interés sale a favor.");
-  }
   const fg = moneyIn(i.fega ?? 0, cur);
   lines.push(
     `Comisión ${pctRate(split.commission)} + FEGA ${pctRate(split.fega)} = ${pctRate(split.bundle)} × ${cap} = ${fg || moneyIn(i.capital * split.bundle, cur)}. Se factura aparte en FI, no se suma al precio del producto.`,
