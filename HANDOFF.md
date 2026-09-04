@@ -432,7 +432,53 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       código traen sus documentos. Se muestra aunque esté vacío: que esté vacío
       es la buena noticia.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 350 hoy,
+21. **Barrido de los documentos que salen de la empresa** (4-sep-2026,
+    migración `0023_fi_explicacion_cliente.sql`, texto en
+    `src/lib/erp/doc-text.ts`, prueba `scripts/erp-documento-limpio.test.mjs`).
+    Regla del dueño: cada documento tiene dos versiones — la de pantalla puede
+    explicar todo lo que ayude a operar; la que sale hacia un tercero solo
+    lleva lo que ese tercero necesita, y **nunca cuenta cómo funciona el
+    sistema por dentro** (Compaq, migración, spread ASR, tasa de costo,
+    umbrales, nombres de pantallas, fórmulas internas, instrucciones de
+    interacción). Sí explica cómo se calcula lo que se cobra: el cliente tiene
+    derecho a comprobar la cuenta.
+    - **Un solo módulo** con todo el texto que sale: notas del estado de
+      cuenta, del consolidado, de la cotización, de la orden de compra; el
+      mensaje de la solicitud de cotización; el renglón del estado de cuenta
+      en correo/WhatsApp; la partida y el título de la factura; la explicación
+      de la FI. Las pantallas siguen con su texto (el panel del estado de
+      cuenta conserva "Toca el interés…" y la tasa de costo: es para operar).
+    - **Expediente filtrado por quién recibe** (`expedienteFor`): al cliente
+      SOL/COT/PV/FV, al proveedor SC/OC, nunca cruzados. Antes la cotización,
+      el pedido, la factura y la guía enseñaban al cliente la SC con la que se
+      fue a proveedores (pared de privacidad), y la OC enseñaba al proveedor el
+      PV del cliente. La guía de carga ya no lleva la cadena de folios (tiene
+      su folio).
+    - **Celdas con motivo interno** ("sin TIIE", "sin política", "sin mora")
+      salen como "—" en el papel y en el documento guardado; en pantalla siguen
+      diciendo el motivo (`rowCells(…, paper)`).
+    - **Factura**: la partida ya no imprime el `origin` tal cual ("Corte
+      Compaq", "Mora FV-0002"): se traduce ("Saldo de factura A-292",
+      "Intereses moratorios de FV-0002", "Mercancía según pedido PV-0003");
+      el título distingue Factura / Factura de intereses / Ajuste por tipo de
+      cambio; el total dice "Saldo".
+    - **La FI explica su cuenta**: al emitirse guarda en `calc_client` la
+      cuenta verificable con fórmula y cifras (cargo original × tasa anual ×
+      días / 360, lo ya facturado antes, comisión + FEGA una sola vez, total)
+      — sin TIIE, sin spread, sin política. Las FI anteriores imprimen solo los
+      importes guardados (interés y comisión/FEGA). El `calc` interno sigue en
+      pantalla y bitácora.
+    - Decisiones del dueño: fuera "(financiamiento incluido)" de la
+      cotización (el cliente ve dos precios y la diferencia la entiende solo);
+      fuera "para reposición de inventario" de la SC (dice nuestro motivo y en
+      brokeraje es falso): queda "Favor de cotizar estas partidas y responder
+      precio por unidad."
+    - La prueba barre `doc-text.ts`, `print-doc.ts` y el trozo de cada
+      pantalla que arma su papel o su mensaje, y falla ante Compaq, spread,
+      tasa de costo, Ajustes, bitácora, kardex, umbral, migración, tabla,
+      Excel, política, "toca", "haz clic", "pantalla".
+
+Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 360 hoy,
 incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
 
@@ -624,7 +670,7 @@ No importar facturas en ceros ni hojas de utilidad.
 - Bitácora `/bitacora`, ahora con filtros por folio/texto, tipo, usuario y
   fecha.
 - Archivos en el folio (CFDI/guía). Respaldo JSON.
-- Migraciones hasta `migrations/0022_politicas_capturadas.sql`.
+- Migraciones hasta `migrations/0023_fi_explicacion_cliente.sql`.
 - Pruebas: `npm test` corre más de 200 casos en varios archivos
   `scripts/erp-*.test.mjs` (fórmulas, permisos, cartera, utilidad,
   trazabilidad, precio). Todas deben pasar en verde, junto con

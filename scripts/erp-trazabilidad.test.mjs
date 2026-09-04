@@ -40,7 +40,7 @@ test("la FI guarda TIIE, spread, días, capital y FEGA, con autor y desglose", (
   assert.ok(mora.includes("spread ${(pol.collectionSpread * 100).toFixed(2)}%"), "la FI guarda el spread");
   assert.ok(mora.includes("d vencidos"), "la FI guarda los días");
   assert.ok(mora.includes("capital (cargo original)"), "la FI guarda el capital base");
-  assert.ok(mora.includes("created_by, calc, int_part, fega_part"), "la FI guarda autor, fórmula y desglose interés/FEGA");
+  assert.ok(mora.includes("created_by, calc, calc_client, int_part, fega_part"), "la FI guarda autor, fórmula y desglose interés/FEGA");
   assert.ok(mora.includes("writeAudit("), "la emisión de FI (manual o al cobrar) queda en bitácora");
 });
 

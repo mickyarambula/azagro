@@ -14,6 +14,7 @@ import { marginFromPrice, marginOf, marginText, OFFER_LABEL, type Offer } from "
 import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
+import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -2330,17 +2331,32 @@ export async function issueMoraInvoice(
     `comisión + FEGA ${bill.fegaNew.toFixed(2)} (tasa ${pctRate(tasas.fegaRate)}${inv[0].fega_charged ? ", ya cobrado antes" : ""})`,
     `política ${politica.name}: comisión ${cobra.commission ? "sí" : "no"} · FEGA ${cobra.fega ? "sí" : "no"}`,
   ].join(" · ");
+  // Y aparte, lo que se le explica al CLIENTE en el papel: la misma cuenta con
+  // fórmula y cifras, sin decir de dónde sale la tasa ni qué política aplica.
+  const calcClient = interestInvoiceClientCalc({
+    currency: "MXN",
+    asOf,
+    capital: Number(inv[0].amount),
+    annualRate: bill.annualRate,
+    days: bill.daysOverdue,
+    interestAccrued: bill.interest,
+    interestBefore: Number(inv[0].interest_invoiced),
+    interestNew: bill.interestNew,
+    fegaRate: tasas.fegaRate,
+    commissionRate: tasas.commissionRate,
+    fegaNew: bill.fegaNew,
+  });
   const n = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${companyId}`;
   const name = `FI-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
   await sql`
     insert into invoices (
       company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id,
-      created_by, calc, int_part, fega_part
+      created_by, calc, calc_client, int_part, fega_part
     )
     values (
       ${companyId}, 'customer', ${name}, ${inv[0].partner_id}, ${asOf}, ${asOf}, 'open',
       ${bill.charge}, ${bill.charge}, ${"Mora " + inv[0].name}, 'interest', 'MXN', ${inv[0].order_id},
-      ${opts?.userId ?? ""}, ${calc}, ${bill.interestNew}, ${bill.fegaNew}
+      ${opts?.userId ?? ""}, ${calc}, ${calcClient}, ${bill.interestNew}, ${bill.fegaNew}
     )
   `;
   // Acumulados por separado: el interés facturado no debe mezclarse con el

@@ -1644,6 +1644,8 @@ export const listInvoices = createServerFn({ method: "POST" })
   .validator(z.object({ kind: z.enum(["customer", "supplier", "all"]).optional() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
+    // La factura de intereses trae su explicación al cliente (calc_client).
+    await ensureInvoiceExtras(sql);
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "credit", "view");
     const kind = data?.kind && data.kind !== "all" ? data.kind : null;
@@ -1668,6 +1670,11 @@ export const listInvoices = createServerFn({ method: "POST" })
       days_left: number;
       currency: string;
       policy_code: string;
+      inv_class: string;
+      int_part: string;
+      fega_part: string;
+      calc_client: string;
+      calc: string;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1676,7 +1683,12 @@ export const listInvoices = createServerFn({ method: "POST" })
         greatest(0, (${today}::date - i.due_date))::int as days_overdue,
         (i.due_date - ${today}::date)::int as days_left,
         coalesce(i.currency,'MXN') as currency,
-        coalesce(i.policy_code, '') as policy_code
+        coalesce(i.policy_code, '') as policy_code,
+        coalesce(i.inv_class, 'product') as inv_class,
+        coalesce(i.int_part, 0)::text as int_part,
+        coalesce(i.fega_part, 0)::text as fega_part,
+        coalesce(i.calc_client, '') as calc_client,
+        coalesce(i.calc, '') as calc
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

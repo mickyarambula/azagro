@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { RFQ_MESSAGE } from "@/lib/erp/doc-text";
 import { useEffect, useMemo, useState } from "react";
 import { OpsPipeline } from "@/components/pipeline";
 import { BackBar } from "@/components/erp";
@@ -78,11 +79,7 @@ function Page() {
             email={s.email}
             phone={s.phone}
             lines={data.lines.map((l) => ({ qty: Number(l.qty), uom: l.uom, name: `${l.code} ${l.product}` }))}
-            extra={
-              data.rfq.purpose === "stock"
-                ? "Favor de cotizar estas partidas para reposición de inventario y responder precio por unidad."
-                : "Favor de cotizar estas partidas y responder precio por unidad."
-            }
+            extra={RFQ_MESSAGE}
           />
         ))}
       </div>

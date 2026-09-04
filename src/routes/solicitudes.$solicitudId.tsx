@@ -1,4 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { rfqMessage } from "@/lib/erp/doc-text";
 import { useEffect, useMemo, useState } from "react";
 import { BackBar, HeadBox, StatusPill } from "@/components/erp";
 import { MoneyField, QtyField } from "@/components/fields";
@@ -499,7 +500,7 @@ function Page() {
                         partnerId={s.id}
                         email={s.email}
                         phone={s.phone}
-                        extra={`Condiciones de entrega: ${deliveryNote}\nCotizar precio por unidad. Responder a Azagro.`}
+                        extra={rfqMessage(deliveryNote)}
                         lines={his.map((l) => ({ qty: num(l.qty), uom: l.uom, name: `${l.code} ${l.product}` }))}
                       />
                     </div>

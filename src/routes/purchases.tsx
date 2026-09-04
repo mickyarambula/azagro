@@ -7,6 +7,7 @@ import { MoneyField, QtyField, UomSelect } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { SendButton } from "@/components/send-doc";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
+import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
 import { createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { moneyIn, num, todayMx } from "@/lib/utils";
@@ -343,7 +344,8 @@ function Page() {
                                 meta: [
                                   o.currency === "USD" ? "USD" : "MXN",
                                   dest.length > 1 ? "Varias entregas" : destLabel,
-                                  o.so_name || o.rfq_name ? `Expediente ${[o.rfq_name, o.so_name, o.name].filter(Boolean).join(" → ")}` : "",
+                                  // Al proveedor solo SC/OC: nunca el pedido del cliente.
+                                  expedienteFor([o.rfq_name, o.so_name, o.name].filter(Boolean).join(" → "), "proveedor"),
                                 ],
                                 headers: ["Producto", "Cantidad", "P. unitario", "Importe", "Entregar en"],
                                 rows: qlines.map((l) => ({
@@ -356,7 +358,7 @@ function Page() {
                                   ],
                                 })),
                                 total: moneyIn(o.total, o.currency),
-                                notes: "Documento al proveedor. Entregar en las ubicaciones de cada partida.",
+                                notes: PURCHASE_ORDER_NOTE,
                               }),
                               {
                                 title: "Orden de compra",

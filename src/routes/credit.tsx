@@ -9,6 +9,7 @@ import { listInvoices, registerPayment } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
 import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, missingChargesMessage, missingRateMessage, nearestRate, noMoraMessage, policyChargesInterest, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
+import { expedienteFor, fxAdjustmentNote, interestInvoiceFallback, invoiceLineLabel, invoicePaperTitle } from "@/lib/erp/doc-text";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/credit")({
@@ -218,27 +219,49 @@ function Page() {
                             const trail = await getDealTrail({ data: { kind: "invoice", id: r.id } })
                               .then((d) => d.line)
                               .catch(() => "");
+                            // Papel que sale de la empresa: la referencia interna
+                            // (origen, cadena de folios) se traduce o se filtra
+                            // según quién lo recibe (src/lib/erp/doc-text.ts).
+                            const audience = r.kind === "customer" ? "cliente" : "proveedor";
+                            const paperTitle = invoicePaperTitle(r.kind, r.inv_class);
+                            const expediente = expedienteFor(trail, audience);
                             printHtml(
                             r.name,
                             letterhead({
                               logoSrc: logoSrc(),
                               legalName: "AZ INSUMOS AGRICOLAS SA DE CV",
-                              title: r.kind === "customer" ? "Factura" : "Factura de proveedor",
+                              title: paperTitle,
                               number: r.name,
                               partyLabel: r.kind === "customer" ? "Cliente" : "Proveedor",
                               party: r.partner,
-                              meta: [`Emisión ${r.date}`, `Vence ${r.due_date}`, cur, trail ? `Expediente ${trail}` : r.origin].filter(Boolean),
-                              rows: [{ left: r.origin || r.name, qty: "1", unit: moneyIn(r.amount, cur), amount: moneyIn(r.amount, cur) }],
-                              total: moneyIn(r.residual, cur) + " saldo",
+                              meta: [`Emisión ${r.date}`, `Vence ${r.due_date}`, cur, expediente].filter(Boolean),
+                              rows: [
+                                {
+                                  left: invoiceLineLabel({ name: r.name, origin: r.origin, invClass: r.inv_class }),
+                                  qty: "1",
+                                  unit: moneyIn(r.amount, cur),
+                                  amount: moneyIn(r.amount, cur),
+                                },
+                              ],
+                              totalLabel: "Saldo",
+                              total: moneyIn(r.residual, cur),
+                              // La factura de intereses explica su cuenta con la
+                              // fórmula y las cifras que se facturaron ese día.
+                              notes:
+                                r.inv_class === "interest"
+                                  ? r.calc_client || interestInvoiceFallback({ currency: cur, intPart: num(r.int_part), fegaPart: num(r.fega_part) })
+                                  : r.inv_class === "fx"
+                                    ? fxAdjustmentNote(r.calc)
+                                    : undefined,
                             }),
                             {
-                              title: r.kind === "customer" ? "Factura" : "Factura de proveedor",
+                              title: paperTitle,
                               number: r.name,
                               party: r.partner,
                               partnerId: r.partner_id,
                               email: r.partner_email,
                               phone: r.partner_phone,
-                              extra: trail ? `Expediente: ${trail}` : undefined,
+                              extra: expediente || undefined,
                             },
                           );
                           })()
@@ -247,7 +270,7 @@ function Page() {
                         Documento
                       </button>
                       <SendButton
-                        title={r.kind === "customer" ? "Factura" : "Cuenta por pagar"}
+                        title={r.kind === "customer" ? invoicePaperTitle(r.kind, r.inv_class) : "Cuenta por pagar"}
                         number={r.name}
                         party={r.partner}
                         partnerId={r.partner_id}

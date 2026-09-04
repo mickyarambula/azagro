@@ -8,6 +8,7 @@ import { SendButton } from "@/components/send-doc";
 import { getLiveStatement, saveDocument } from "@/lib/erp/ops";
 import { pctRate } from "@/lib/erp/credit";
 import { statementByProduct, statementOutsideDocs } from "@/lib/erp/statement-products";
+import { CONSOLIDADO_NOTE, PAPER_DASH, statementNotes, statementSendHeader, statementSendLine } from "@/lib/erp/doc-text";
 import { logoSrc, printHtml, statementSheet } from "@/lib/print-doc";
 import { listPartners } from "@/lib/azagro";
 import { dateDMY, money, moneyIn, todayMx } from "@/lib/utils";
@@ -55,8 +56,13 @@ function productRows(block: Block, hidePaid: boolean) {
  * Una factura que NO ha vencido no trae interés ni comisión ni FEGA: no
  * existen todavía. En su lugar se muestran los días que faltan y, aparte, la
  * estimación de pronto pago (lo que se le bonificaría si pagara al corte).
+ *
+ * `paper`: la versión que sale de la empresa. En pantalla la celda dice POR QUÉ
+ * no hay número ("sin TIIE", "sin política", "sin mora"); en el papel al
+ * cliente eso es un motivo interno y sale como guion.
  */
-function rowCells(r: Row, cur: string, withFx: boolean) {
+function rowCells(r: Row, cur: string, withFx: boolean, paper = false) {
+  const why = (t: string) => (paper ? PAPER_DASH : t);
   const cells = [
     r.serie || "—",
     r.folio || r.name,
@@ -69,10 +75,10 @@ function rowCells(r: Row, cur: string, withFx: boolean) {
     moneyIn(r.saldo ?? r.residual, cur),
     r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
     r.vencido ? String(r.daysVencidos ?? r.daysOverdue ?? 0) : "—",
-    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
-    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
-    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
-    r.sinTiieBono ? "sin TIIE" : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—",
+    r.sinMora ? why("sin mora") : r.sinTiie ? why("sin TIIE") : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
+    r.sinMora ? why("sin mora") : r.sinTiie ? why("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? why("sin política") : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
+    r.sinMora ? why("sin mora") : r.sinTiie ? why("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? why("sin política") : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
+    r.sinTiieBono ? why("sin TIIE") : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—",
   ];
   if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, cur) : "—");
   return cells;
@@ -133,7 +139,7 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       return {
         currency: currencyName(cur),
         headers: withFx ? EC_HEADERS_USD : EC_HEADERS,
-        rows: rows.map((r) => rowCells(r, cur, withFx)),
+        rows: rows.map((r) => rowCells(r, cur, withFx, true)),
         totals: totalsCells(rows, cur, withFx),
       };
     })
@@ -150,14 +156,9 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       periodFrom: from,
       rates: ratesOf(st),
       sections,
-      notes: [
-        "Compaq solo trae cargo, abono y saldo. Este papel le agrega plazo, fecha de pago, días, interés, comisión y FEGA — igual que el Excel de cartera.",
-        `Interés = Cargo × (${ratesOf(st).annual}) × días vencidos / 360, solo desde el día que vence. Sin renglón de TIIE en la tabla el interés queda sin calcular y se marca.`,
-        `Comisión ${ratesOf(st).commission} + FEGA ${ratesOf(st).fega} = ${ratesOf(st).total} sobre el cargo, una sola vez, cuando ya venció, factura FI.`,
-        "Lo que aún no vence no lleva interés, ni comisión, ni FEGA: se muestran los días que faltan.",
-        "Pronto pago (est.) es una ESTIMACIÓN, no un cargo: lo que se bonificaría si el documento se pagara en la fecha del corte, a tasa de costo (TIIE de la emisión + spread ASR) y solo si el pago cae antes del umbral de pronto pago.",
-        "Saldo = cargo − abonos. No se mezcla con intereses. Ut. cambiaria = USD × (TC pactado − TC pagado).",
-      ].join("\n"),
+      // Texto que sale de la empresa: solo lo que el cliente necesita para
+      // comprobar la cuenta (src/lib/erp/doc-text.ts).
+      notes: statementNotes(ratesOf(st)),
     }),
     {
       title: "Estado de cuenta",
@@ -226,7 +227,7 @@ function printConsolidado(list: Block[], asOf: string, legal: string, st: Live |
       asOf: dateDMY(asOf),
       rates: ratesOf(st),
       sections,
-      notes: "Totales por cliente y moneda, mismo papel que la hoja Consolidado del Excel de cartera.",
+      notes: CONSOLIDADO_NOTE,
     }),
     undefined,
     { landscape: true },
@@ -291,7 +292,7 @@ function Page() {
       `Saldo: ${money(block.ar)}`,
       ``,
       EC_HEADERS.join(" | "),
-      ...productRows(block, hidePaid).map((r) => rowCells(r, r.currency || "MXN", false).join(" | ")),
+      ...productRows(block, hidePaid).map((r) => rowCells(r, r.currency || "MXN", false, true).join(" | ")),
     ].join("\n");
     void saveDocument({
       data: {
@@ -553,15 +554,7 @@ function StatementView({
                 email={viewing.partner.email}
                 phone={viewing.partner.phone}
                 total={viewing.ar}
-                extra={rows
-                  .map((r) =>
-                    r.sinMora
-                      ? `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  sin mora (política ${r.politicaNombre || r.politicaCode})`
-                      : r.vencido
-                      ? `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  ${r.daysVencidos} d vencidos  int ${moneyIn(r.interes, r.currency)}  C+FEGA ${moneyIn(r.comisionFega, r.currency)}`
-                      : `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  vence ${dateDMY(r.due_date)} (faltan ${r.diasPorVencer} d)  sin interés ni comisión ni FEGA${r.bonificacion > 0.009 ? `  pronto pago est. ${moneyIn(r.bonificacion, r.currency)}` : ""}`,
-                  )
-                  .join("\n")}
+                extra={[statementSendHeader(rates), ...rows.map((r) => statementSendLine(r))].join("\n")}
               />
             </div>
           </div>

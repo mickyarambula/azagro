@@ -15,6 +15,7 @@ import { ladderFor, termLabel, type LadderStep } from "@/lib/erp/ladder";
 import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
 import { creditFromCash, type FinanceBase } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
+import { expedienteFor, quoteNotes } from "@/lib/erp/doc-text";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
@@ -312,7 +313,8 @@ function Page() {
           cur === "USD" ? `USD · dólar pactado ${Number(qrow.fx_rate)}` : "MXN",
           offerLabel(offer),
           offer !== "cash" && qrow.credit_days ? `Crédito ${qrow.credit_days} d` : "",
-          trail ? `Expediente ${trail}` : "",
+          // Al cliente solo SOL/COT/PV/FV: nunca la SC con la que se fue a proveedores.
+          expedienteFor(trail, "cliente"),
         ],
         headers: both
           ? ["Producto", "Cant.", "P. contado", "Imp. contado", "P. crédito", "Imp. crédito"]
@@ -344,13 +346,7 @@ function Page() {
           ? `Contado ${moneyIn(cashTot, cur)}  ·  Crédito ${moneyIn(credTot, cur)}`
           : moneyIn(offer === "cash" ? cashTot : credTot, cur),
         compact: both,
-        notes: [
-          qrow.notes,
-          qrow.delivery_to ? `Entrega: ${qrow.delivery_to}` : "",
-          both ? `Precio de contado y a crédito ${qrow.credit_days} d (financiamiento incluido). Mora no entra aquí.` : "",
-        ]
-          .filter(Boolean)
-          .join(" · "),
+        notes: quoteNotes({ notes: qrow.notes, deliveryTo: qrow.delivery_to }),
       }),
       {
         title: "Cotización",

@@ -34,6 +34,8 @@ export async function ensureInvoiceExtras(sql: Sql) {
   await sql`alter table invoices add column if not exists params_snap text not null default ''`;
   await sql`alter table invoices add column if not exists int_part numeric(14,2) not null default 0`;
   await sql`alter table invoices add column if not exists fega_part numeric(14,2) not null default 0`;
+  // Explicación de la factura de intereses para el cliente (doc-text.ts).
+  await sql`alter table invoices add column if not exists calc_client text not null default ''`;
 }
 
 export async function ensureStock(sql: Sql) {

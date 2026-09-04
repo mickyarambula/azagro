@@ -14,6 +14,7 @@ import { QtyField } from "@/components/fields";
 import { validateDueDates } from "@/lib/erp/credit";
 import { SignPad } from "@/components/sign-pad";
 import { letterhead, logoSrc, printHtml, guiaSheet } from "@/lib/print-doc";
+import { expedienteFor } from "@/lib/erp/doc-text";
 import { dateDMY, fmtDate, money, moneyIn, num, qty } from "@/lib/utils";
 
 export const Route = createFileRoute("/sales/$orderId")({
@@ -304,7 +305,7 @@ function Ficha() {
             total={form.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0)}
             currency={form.currency}
             fxRate={form.fxRate}
-            extra={[form.deliveryTo ? `Entrega: ${form.deliveryTo}` : "", trail ? `Expediente: ${trail}` : ""].filter(Boolean).join("\n")}
+            extra={[form.deliveryTo ? `Entrega: ${form.deliveryTo}` : "", expedienteFor(trail, "cliente")].filter(Boolean).join("\n")}
             lines={form.lines.map((ln) => {
               const prod = lookups.products.find((p) => p.id === ln.productId);
               return { qty: ln.qty, uom: ln.uom, name: prod ? `${prod.code} ${prod.name}` : String(ln.productId), unitPrice: ln.unitPrice };
@@ -803,7 +804,7 @@ function Ficha() {
                       placas: guia.placas,
                       origen,
                       destino: form.deliveryTo,
-                      expediente: trail,
+                      // La guía ya lleva su folio; el fletero no ve la cadena de folios.
                       rows: form.lines.map((ln) => {
                         const prod = lookups?.products.find((p) => p.id === ln.productId);
                         return {
