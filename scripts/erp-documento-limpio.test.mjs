@@ -208,7 +208,19 @@ test("cableado: estado de cuenta", () => {
   const ec = src("src/routes/statements.tsx");
   assert.ok(ec.includes("rows: rows.map((r) => rowCells(r, cur, withFx, true)),"), "el papel usa las celdas en modo papel");
   assert.ok(ec.includes('rowCells(r, r.currency || "MXN", false, true).join(" | ")'), "y el documento guardado también");
-  assert.ok(ec.includes("const why = (t: string) => (paper ? PAPER_DASH : t);"), "en pantalla el motivo, en papel el guion");
+  assert.ok(ec.includes("const pend = (t: string) => (paper ? PAPER_PENDING : t);"), "lo que falta determinar: «Pendiente de cálculo» en papel");
+  assert.ok(ec.includes("const nada = (t: string) => (paper ? PAPER_DASH : t);"), "lo que no se cobra: guion en papel");
+  assert.ok(ec.includes('r.sinTiie ? pend("sin TIIE")') && ec.includes('r.sinPolitica ? pend("sin política")'), "sin TIIE y sin política son «pendiente»");
+  assert.ok(ec.includes('r.sinMora ? nada("sin mora")'), "sin mora es guion: no hay nada pendiente");
+  // Pronto pago: solo en pantalla. Ni papel, ni documento guardado, ni mensaje.
+  assert.ok(ec.includes('const EC_HEADERS_PAPER = EC_HEADERS.filter((h) => h !== "Pronto pago (est.)");'), "el papel no lleva la columna");
+  assert.ok(ec.includes("headers: withFx ? EC_HEADERS_PAPER_USD : EC_HEADERS_PAPER,"), "ni sus encabezados");
+  assert.ok(ec.includes("totals: totalsCells(rows, cur, withFx, true),"), "ni su total");
+  assert.ok(ec.includes('EC_HEADERS_PAPER.join(" | ")'), "el documento guardado tampoco");
+  assert.ok(ec.includes('...(paper ? [] : [r.sinTiieBono ? "sin TIIE"'), "la celda solo existe en pantalla");
+  const dt = src("src/lib/erp/doc-text.ts");
+  assert.ok(!/pronto pago/i.test(sinComentarios(dt)), "ningún texto que sale menciona el pronto pago");
+  assert.ok(dt.includes('export const PAPER_PENDING = "Pendiente de cálculo";'));
   assert.ok(ec.includes("notes: statementNotes(ratesOf(st)),"), "las notas salen de doc-text");
   assert.ok(ec.includes("notes: CONSOLIDADO_NOTE,"), "el consolidado también");
   assert.ok(ec.includes('extra={[statementSendHeader(rates), ...rows.map((r) => statementSendLine(r))].join("\\n")}'), "el mensaje también, con la regla para comprobar cada renglón");

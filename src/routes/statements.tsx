@@ -8,7 +8,7 @@ import { SendButton } from "@/components/send-doc";
 import { getLiveStatement, saveDocument } from "@/lib/erp/ops";
 import { pctRate } from "@/lib/erp/credit";
 import { statementByProduct, statementOutsideDocs } from "@/lib/erp/statement-products";
-import { CONSOLIDADO_NOTE, PAPER_DASH, statementNotes, statementSendHeader, statementSendLine } from "@/lib/erp/doc-text";
+import { CONSOLIDADO_NOTE, PAPER_DASH, PAPER_PENDING, statementNotes, statementSendHeader, statementSendLine } from "@/lib/erp/doc-text";
 import { logoSrc, printHtml, statementSheet } from "@/lib/print-doc";
 import { listPartners } from "@/lib/azagro";
 import { dateDMY, money, moneyIn, todayMx } from "@/lib/utils";
@@ -39,6 +39,13 @@ const EC_HEADERS = [
 
 const EC_HEADERS_USD = [...EC_HEADERS, "Ut. cambiaria"];
 
+// El papel que sale de la empresa y el documento guardado NO llevan la
+// columna de pronto pago: la bonificación se ofrece cuando conviene, no se
+// anuncia en cada estado de cuenta, y su importe entre cargo y días despeja
+// la tasa de costo. Solo en pantalla.
+const EC_HEADERS_PAPER = EC_HEADERS.filter((h) => h !== "Pronto pago (est.)");
+const EC_HEADERS_PAPER_USD = [...EC_HEADERS_PAPER, "Ut. cambiaria"];
+
 function currencyName(cur: string) {
   return cur === "USD" ? "Dólar americano" : "Peso mexicano";
 }
@@ -58,11 +65,14 @@ function productRows(block: Block, hidePaid: boolean) {
  * estimación de pronto pago (lo que se le bonificaría si pagara al corte).
  *
  * `paper`: la versión que sale de la empresa. En pantalla la celda dice POR QUÉ
- * no hay número ("sin TIIE", "sin política", "sin mora"); en el papel al
- * cliente eso es un motivo interno y sale como guion.
+ * no hay número ("sin TIIE", "sin política", "sin mora"). En el papel, lo que
+ * falta determinar dice "Pendiente de cálculo" (el cliente entiende que algo
+ * viene) y lo que no se cobra sale como guion; el motivo real es nuestro. La
+ * columna de pronto pago no va en el papel.
  */
 function rowCells(r: Row, cur: string, withFx: boolean, paper = false) {
-  const why = (t: string) => (paper ? PAPER_DASH : t);
+  const pend = (t: string) => (paper ? PAPER_PENDING : t);
+  const nada = (t: string) => (paper ? PAPER_DASH : t);
   const cells = [
     r.serie || "—",
     r.folio || r.name,
@@ -75,16 +85,16 @@ function rowCells(r: Row, cur: string, withFx: boolean, paper = false) {
     moneyIn(r.saldo ?? r.residual, cur),
     r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
     r.vencido ? String(r.daysVencidos ?? r.daysOverdue ?? 0) : "—",
-    r.sinMora ? why("sin mora") : r.sinTiie ? why("sin TIIE") : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
-    r.sinMora ? why("sin mora") : r.sinTiie ? why("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? why("sin política") : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
-    r.sinMora ? why("sin mora") : r.sinTiie ? why("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? why("sin política") : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
-    r.sinTiieBono ? why("sin TIIE") : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—",
+    r.sinMora ? nada("sin mora") : r.sinTiie ? pend("sin TIIE") : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
+    r.sinMora ? nada("sin mora") : r.sinTiie ? pend("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? pend("sin política") : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
+    r.sinMora ? nada("sin mora") : r.sinTiie ? pend("sin TIIE") : !r.vencido ? "—" : r.sinPolitica ? pend("sin política") : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
+    ...(paper ? [] : [r.sinTiieBono ? "sin TIIE" : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—"]),
   ];
   if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, cur) : "—");
   return cells;
 }
 
-function totalsCells(rows: Row[], cur: string, withFx: boolean) {
+function totalsCells(rows: Row[], cur: string, withFx: boolean, paper = false) {
   const cargo = rows.reduce((s, r) => s + (r.cargo ?? Number(r.amount)), 0);
   const abono = rows.reduce((s, r) => s + r.abono, 0);
   const saldo = rows.reduce((s, r) => s + (r.saldo ?? Number(r.residual)), 0);
@@ -108,7 +118,7 @@ function totalsCells(rows: Row[], cur: string, withFx: boolean) {
     moneyIn(interes, cur),
     moneyIn(com, cur),
     moneyIn(tot, cur),
-    moneyIn(bono, cur),
+    ...(paper ? [] : [moneyIn(bono, cur)]),
   ];
   if (withFx) cells.push(moneyIn(fx, cur));
   return cells;
@@ -138,9 +148,9 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       const withFx = cur === "USD";
       return {
         currency: currencyName(cur),
-        headers: withFx ? EC_HEADERS_USD : EC_HEADERS,
+        headers: withFx ? EC_HEADERS_PAPER_USD : EC_HEADERS_PAPER,
         rows: rows.map((r) => rowCells(r, cur, withFx, true)),
-        totals: totalsCells(rows, cur, withFx),
+        totals: totalsCells(rows, cur, withFx, true),
       };
     })
     .filter((s) => s.rows.length);
@@ -291,7 +301,7 @@ function Page() {
       ``,
       `Saldo: ${money(block.ar)}`,
       ``,
-      EC_HEADERS.join(" | "),
+      EC_HEADERS_PAPER.join(" | "),
       ...productRows(block, hidePaid).map((r) => rowCells(r, r.currency || "MXN", false, true).join(" | ")),
     ].join("\n");
     void saveDocument({

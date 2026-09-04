@@ -454,9 +454,16 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       fue a proveedores (pared de privacidad), y la OC enseñaba al proveedor el
       PV del cliente. La guía de carga ya no lleva la cadena de folios (tiene
       su folio).
-    - **Celdas con motivo interno** ("sin TIIE", "sin política", "sin mora")
-      salen como "—" en el papel y en el documento guardado; en pantalla siguen
-      diciendo el motivo (`rowCells(…, paper)`).
+    - **Celdas con motivo interno**: en el papel y en el documento guardado,
+      lo que falta determinar ("sin TIIE", "sin política") dice **"Pendiente
+      de cálculo"** — el cliente entiende que algo viene y no se sorprende con
+      la FI — y lo que no se cobra ("sin mora") va en "—"; en pantalla siguen
+      diciendo el motivo real (`rowCells(…, paper)`).
+    - **"Pronto pago (est.)" es solo de pantalla.** Fuera del papel, del
+      documento guardado y del mensaje. Dos razones del dueño: su importe,
+      dividido entre el cargo y los días que faltan, despeja la tasa de costo
+      (TIIE + spread ASR); y la bonificación se ofrece cuando conviene, no se
+      anuncia en cada estado de cuenta.
     - **Factura**: la partida ya no imprime el `origin` tal cual ("Corte
       Compaq", "Mora FV-0002"): se traduce ("Saldo de factura A-292",
       "Intereses moratorios de FV-0002", "Mercancía según pedido PV-0003");

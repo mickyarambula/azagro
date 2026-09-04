@@ -101,7 +101,7 @@ test("cableado: el estado de cuenta obedece los interruptores del documento", ()
   assert.ok(live.includes("fegaRate: tasas.fegaRate,"), "computeMora / computeStatementLine reciben la tasa efectiva");
   assert.ok(!live.includes("fegaRate: pol.fegaRate,"), "ya nadie cobra el paquete completo a ciegas");
   const ec = src("src/routes/statements.tsx");
-  assert.ok(ec.includes('r.sinPolitica ? why("sin política")'), "la columna dice «sin política» en vez de un número inventado (en pantalla; el papel pone guion)");
+  assert.ok(ec.includes('r.sinPolitica ? pend("sin política")'), "la columna dice «sin política» en vez de un número inventado (en pantalla; el papel dice «Pendiente de cálculo»)");
 });
 
 test("cableado: la factura de intereses se detiene si la política no está capturada", () => {
@@ -199,7 +199,7 @@ test("cableado: «Sin mora» apaga interés, comisión, FEGA, TIIE y pronto pago
   const fi = ops.slice(ops.indexOf("export async function issueMoraInvoice"), ops.indexOf("export const invoiceLiveMora"));
   assert.ok(fi.includes("if (!policyChargesInterest(inv[0].policy_code)) {"), "la FI no se emite para un documento sin mora");
   const ec = src("src/routes/statements.tsx");
-  assert.ok(ec.includes('r.sinMora ? why("sin mora")'), "la columna lo dice en pantalla, no imprime un cero mudo");
+  assert.ok(ec.includes('r.sinMora ? nada("sin mora")'), "la columna lo dice en pantalla, no imprime un cero mudo (el papel pone guion: no hay nada que cobrar)");
   const car = src("src/routes/credit.tsx");
   assert.ok(car.includes("const cobraInteres = policyChargesInterest(inv.policy_code);"), "la vista previa del cobro enseña la misma cuenta");
 });

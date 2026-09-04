@@ -21,8 +21,15 @@ import { dateDMY, moneyIn } from "@/lib/utils";
  * con su texto; los papeles y los envíos solo leen de aquí.
  */
 
-/** Lo que se imprime en una celda cuando el motivo es interno (la pantalla sí lo dice). */
+/** Lo que se imprime en una celda cuando no hay nada que cobrar (la pantalla dice por qué). */
 export const PAPER_DASH = "—";
+/**
+ * Lo que se imprime cuando el interés existe pero todavía no se determina
+ * (falta la tasa del vencimiento o la condición de cobro del documento). El
+ * cliente entiende que falta determinar algo y no se sorprende cuando llegue
+ * la factura de intereses; el motivo real se queda en pantalla.
+ */
+export const PAPER_PENDING = "Pendiente de cálculo";
 
 export type DocAudience = "cliente" | "proveedor";
 
@@ -72,7 +79,6 @@ export function statementNotes(rates: { annual: string; commission: string; fega
     `Interés = cargo × (${rates.annual}) × días vencidos / 360, solo a partir del día que vence.`,
     `Comisión ${rates.commission} + FEGA ${rates.fega} = ${rates.total} sobre el cargo, una sola vez, cuando el documento ya venció; se factura por separado.`,
     "Lo que aún no vence no lleva interés, ni comisión, ni FEGA: se muestran los días que faltan.",
-    "Pronto pago (est.) es una estimación, no un cargo: lo que se bonificaría si el documento se pagara en la fecha del corte, siempre que el pago sea anticipado.",
     "Saldo = cargo − abonos; no incluye intereses. Ut. cambiaria = USD × (TC pactado − TC pagado).",
   ].join("\n");
 }
@@ -103,7 +109,6 @@ export function statementSendLine(r: {
   diasPorVencer: number;
   interes: number;
   comisionFega: number;
-  bonificacion: number;
 }) {
   const cur = r.currency || "MXN";
   const head = [
@@ -123,9 +128,10 @@ export function statementSendLine(r: {
       `comisión + FEGA ${moneyIn(r.comisionFega, cur)}`,
     ].join("  ");
   }
-  const tail = [`vence ${dateDMY(r.due_date)} (faltan ${r.diasPorVencer} días)`, "sin interés ni comisión ni FEGA"];
-  if (r.bonificacion > 0.009) tail.push(`pronto pago estimado ${moneyIn(r.bonificacion, cur)}`);
-  return [...head, ...tail].join("  ");
+  // La bonificación por pronto pago no se anuncia en el estado de cuenta: se
+  // ofrece cuando conviene. Y su importe, dividido entre cargo y días,
+  // despeja la tasa de costo. Solo en pantalla.
+  return [...head, `vence ${dateDMY(r.due_date)} (faltan ${r.diasPorVencer} días)`, "sin interés ni comisión ni FEGA"].join("  ");
 }
 
 // ---------------------------------------------------------------------------
