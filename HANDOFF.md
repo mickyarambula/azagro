@@ -411,7 +411,28 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       FV-0002 y FV-0003 de SL AGRICOLA son una factura duplicada, dos pedidos
       gemelos o dos documentos legítimos con el mismo importe.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 340 hoy,
+20. **Panel "Quién está en cada política"** (3-sep-2026, `/settings`, lógica en
+    `src/lib/erp/policy-usage.ts`, servidor `creditPolicyUsage` en `ops.ts`).
+    Nace de una necesidad concreta del dueño: al negociar condiciones con un
+    cliente hay que saber a quién le pega cambiar una política, y correr SQL a
+    mano en Neon no es viable. Junto a las tres políticas de cobro, un bloque de
+    **solo lectura y solo administrador** con, por política: cuántos clientes,
+    cuántas facturas abiertas y el saldo **por moneda** (MXN y USD nunca
+    sumados). Cada renglón se abre y lista los clientes (código, nombre, grupo,
+    facturas y saldo por moneda), ordenados por saldo — con quien más se
+    negocia, primero.
+    - La política vive en el **documento**, no en el cliente: se cuenta sobre
+      las facturas de mercancía con saldo abierto (la misma población del estado
+      de cuenta; la mora y el ajuste de TC no se negocian). Un cliente con
+      documentos de dos políticas aparece en las dos, y el texto lo dice.
+    - **Renglón aparte para "Sin política capturada"**, el que importa: son los
+      documentos que hoy se detienen al cobrar. Los renglones **no se
+      traslapan** — una factura cuya política todavía no contesta las dos
+      preguntas no cuenta para esa política, cuenta ahí; el detalle dice qué
+      código traen sus documentos. Se muestra aunque esté vacío: que esté vacío
+      es la buena noticia.
+
+Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 350 hoy,
 incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
 

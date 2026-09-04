@@ -42,6 +42,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 | Candado de solicitud ya cotizada | `src/lib/erp/request-lock.ts` |
 | Interruptores de comisión / FEGA por política de cobro | `credit_policies`, `chargeRates` en `credit.ts`, panel en `/settings` |
 | «Sin mora» apaga el interés | `NO_MORA_POLICY` / `policyChargesInterest` en `credit.ts` |
+| Quién está en cada política (panel de Ajustes, solo lectura, solo admin) | `src/lib/erp/policy-usage.ts`, `creditPolicyUsage` en `ops.ts` |
 | Bloque "Por producto" del estado de cuenta (saldo, no venta) | `src/lib/erp/statement-products.ts`, `/statements` |
 | Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
 | Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |

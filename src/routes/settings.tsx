@@ -1,14 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useState, type FormEvent } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Field, PageHead, Panel } from "@/components/erp";
 import { useAccess } from "@/lib/access";
-import { getSettingsForm, listCreditPolicies, POLICY_FIELDS, QUOTE_TERMS_LABEL, saveCreditPolicy, saveFx, saveSettings, saveTiie, type CreditPolicyRow, type PolicyField } from "@/lib/erp/ops";
+import { creditPolicyUsage, getSettingsForm, listCreditPolicies, POLICY_FIELDS, QUOTE_TERMS_LABEL, saveCreditPolicy, saveFx, saveSettings, saveTiie, type CreditPolicyRow, type PolicyField } from "@/lib/erp/ops";
 import { formatTerms, parseTerms } from "@/lib/erp/ladder";
 import { BUSINESS_RULES, YEAR_DAYS } from "@/lib/erp/rules";
 import { dbStatus, exportBackup } from "@/lib/erp/cutover";
 import { applyTheme, readThemePref, type ThemePref } from "@/lib/theme";
-import { todayMx } from "@/lib/utils";
+import { moneyIn, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/settings")({ component: Page });
 
@@ -57,6 +57,11 @@ function SettingsBody() {
   // capturar; no se propone un valor.
   const [policies, setPolicies] = useState<CreditPolicyRow[]>([]);
   const [polEdit, setPolEdit] = useState<Record<string, { commission: string; fega: string }>>({});
+  // Quién está en cada política: solo lectura y solo administrador (dice cuánto
+  // debe cada cliente). Se lee aparte de los Ajustes porque el servidor lo
+  // rechaza para cualquier otro rol.
+  const [usage, setUsage] = useState<Awaited<ReturnType<typeof creditPolicyUsage>> | null>(null);
+  const [openPolicy, setOpenPolicy] = useState<string | null>(null);
   const [tiie, setTiie] = useState<Array<{ date: string; rate: string }>>([]);
   const [fx, setFx] = useState<Array<{ date: string; usd_mxn: string }>>([]);
   const [tDate, setTDate] = useState(() => todayMx());
@@ -95,6 +100,11 @@ function SettingsBody() {
     setPolEdit(Object.fromEntries(cps.map((c) => [c.code, { commission: yn(c.commission), fega: yn(c.fega) }])));
   }
 
+  async function loadUsage() {
+    if (role !== "admin") return;
+    setUsage(await creditPolicyUsage().catch(() => null));
+  }
+
   async function onSavePolicy(code: string) {
     setError(null);
     setMsg(null);
@@ -107,6 +117,8 @@ function SettingsBody() {
       await saveCreditPolicy({ data: { code, commission: e.commission === "si", fega: e.fega === "si" } });
       setMsg(`Política ${code} guardada`);
       await load();
+      // Capturarla mueve documentos del renglón "sin política" al suyo.
+      await loadUsage();
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar la política");
     }
@@ -129,6 +141,12 @@ function SettingsBody() {
       .then((d) => setDbLabel(d.label))
       .catch(() => undefined);
   }, []);
+
+  // El rol llega del contexto, no siempre en el primer render.
+  useEffect(() => {
+    void loadUsage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role]);
 
   async function onSave(e: FormEvent) {
     e.preventDefault();
@@ -409,6 +427,122 @@ function SettingsBody() {
         </div>
         {role !== "admin" ? <p className="mt-2 text-xs text-muted">Solo un administrador puede cambiar una política de cobro.</p> : null}
         <p className="mt-2 text-[12px] text-muted">Cada cambio queda en Bitácora con el valor anterior y el nuevo.</p>
+
+        {role === "admin" && (
+          <div className="mt-6 border-t border-line pt-4">
+            <h3 className="text-sm font-semibold">Quién está en cada política</h3>
+            <p className="mt-0.5 text-[12px] text-muted">
+              Solo lectura. La política vive en el documento, no en el cliente: aquí se cuentan las facturas de mercancía con
+              saldo abierto, la misma población del estado de cuenta. Un cliente con documentos de dos políticas aparece en las
+              dos. Toca un renglón para ver quiénes son.
+            </p>
+            {usage == null ? (
+              <p className="mt-3 text-[12px] text-muted">Leyendo…</p>
+            ) : (
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full min-w-[720px] text-left text-[13px]">
+                  <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+                    <tr>
+                      <th className="py-2 font-medium">Política</th>
+                      <th className="py-2 text-right font-medium">Clientes</th>
+                      <th className="py-2 text-right font-medium">Facturas abiertas</th>
+                      <th className="py-2 text-right font-medium">Saldo</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usage.map((u) => {
+                      const key = u.code || "(sin política)";
+                      const abierto = openPolicy === key;
+                      const peligro = !u.captured && u.invoices > 0;
+                      return (
+                        <Fragment key={key}>
+                          <tr className={`border-t border-line align-top ${peligro ? "text-danger" : ""}`}>
+                            <td className="py-2 pr-3">
+                              <button
+                                type="button"
+                                className="text-left underline decoration-dotted"
+                                onClick={() => setOpenPolicy(abierto ? null : key)}
+                              >
+                                {abierto ? "▾" : "▸"} {u.name}
+                              </button>
+                              {u.code ? <span className="ml-2 font-mono text-[11px] text-muted">{u.code}</span> : null}
+                              <span className="block text-[11px] text-muted">
+                                {u.captured
+                                  ? `comisión ${u.commission ? "sí" : "no"} · FEGA ${u.fega ? "sí" : "no"}${u.chargesInterest ? "" : " · no genera mora"}`
+                                  : "No se cobra comisión ni FEGA y la factura de intereses se detiene."}
+                              </span>
+                            </td>
+                            <td className="py-2 text-right tabular-nums">{u.clients || "—"}</td>
+                            <td className="py-2 text-right tabular-nums">{u.invoices || "—"}</td>
+                            <td className="py-2 text-right tabular-nums">
+                              {u.byCurrency.length === 0
+                                ? "—"
+                                : u.byCurrency.map((m) => (
+                                    <span key={m.currency} className="block">
+                                      {moneyIn(m.saldo, m.currency)} <span className="text-[11px] text-muted">{m.currency}</span>
+                                    </span>
+                                  ))}
+                            </td>
+                          </tr>
+                          {abierto && (
+                            <tr className="bg-paper">
+                              <td colSpan={4} className="px-3 py-3">
+                                {u.clientsList.length === 0 ? (
+                                  <p className="text-[12px] text-muted">
+                                    {u.code
+                                      ? "Ningún cliente con saldo abierto en esta política."
+                                      : "Ningún documento sin política capturada: nada se detiene al cobrar."}
+                                  </p>
+                                ) : (
+                                  <table className="w-full text-left text-[12px]">
+                                    <thead className="text-[10px] uppercase tracking-wide text-muted">
+                                      <tr>
+                                        <th className="py-1 font-medium">Cliente</th>
+                                        <th className="py-1 text-right font-medium">Facturas</th>
+                                        <th className="py-1 text-right font-medium">Saldo</th>
+                                        {!u.code && <th className="py-1 font-medium">Trae la política</th>}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {u.clientsList.map((c) => (
+                                        <tr key={c.id} className="border-t border-line align-top">
+                                          <td className="py-1.5 pr-3">
+                                            <span className="font-mono text-[11px] text-muted">{c.code}</span> {c.name}
+                                            {c.group ? <span className="block text-[11px] text-muted">{c.group}</span> : null}
+                                          </td>
+                                          <td className="py-1.5 text-right tabular-nums">{c.invoices}</td>
+                                          <td className="py-1.5 text-right tabular-nums">
+                                            {c.byCurrency.map((m) => (
+                                              <span key={m.currency} className="block">
+                                                {moneyIn(m.saldo, m.currency)}{" "}
+                                                <span className="text-[10px] text-muted">{m.currency}</span>
+                                              </span>
+                                            ))}
+                                          </td>
+                                          {!u.code && (
+                                            <td className="py-1.5 font-mono text-[11px] text-muted">{c.policyCodes.join(", ")}</td>
+                                          )}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <p className="mt-2 text-[12px] text-muted">
+                  Los renglones no se traslapan: una factura cuya política todavía no contesta las dos preguntas no cuenta para
+                  esa política, cuenta en «Sin política capturada». El saldo va por moneda, nunca sumado.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </Panel>
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">

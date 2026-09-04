@@ -13,6 +13,7 @@ import { formatTerms, ladderFor, parseTerms } from "@/lib/erp/ladder";
 import { marginFromPrice, marginOf, marginText, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
 import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
+import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -365,6 +366,61 @@ export const listCreditPolicies = createServerFn({ method: "GET" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     return creditPolicies(sql, cid);
+  });
+
+/**
+ * Quién está hoy en cada política de cobro. SOLO LECTURA y solo administrador
+ * (dice cuánto debe cada cliente). Se usa al negociar condiciones: sin saber
+ * QUIÉNES son, saber que hay 14 en Estándar no sirve para decidir uno por uno.
+ *
+ * La política vive en el documento, no en el cliente: se cuenta sobre las
+ * facturas de mercancía con saldo abierto, la misma población del estado de
+ * cuenta. Un cliente con documentos de dos políticas sale en las dos.
+ */
+export const creditPolicyUsage = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const sql = await getSql();
+    const cid = await companyOf(sql, context.userId);
+    await assertAdmin(sql, context.userId);
+    const policies = await creditPolicies(sql, cid);
+    const rows = await sql<{
+      policy_code: string;
+      partner_id: number;
+      partner_code: string;
+      partner_name: string;
+      group_name: string;
+      currency: string;
+      facturas: number;
+      saldo: string;
+    }>`
+      select coalesce(i.policy_code, '') as policy_code,
+        p.id as partner_id, coalesce(p.code, '') as partner_code, p.name as partner_name,
+        coalesce(p.group_name, '') as group_name,
+        coalesce(i.currency, 'MXN') as currency,
+        count(*)::int as facturas,
+        sum(i.residual)::text as saldo
+      from invoices i
+      join partners p on p.id = i.partner_id
+      where i.company_id = ${cid}
+        and i.kind = 'customer'
+        and coalesce(i.inv_class, 'product') = 'product'
+        and i.residual > 0.009
+      group by 1, 2, 3, 4, 5, 6
+    `;
+    return groupPolicyUsage(
+      rows.map((r) => ({
+        policyCode: r.policy_code,
+        partnerId: r.partner_id,
+        partnerCode: r.partner_code,
+        partnerName: r.partner_name,
+        groupName: r.group_name,
+        currency: r.currency,
+        invoices: r.facturas,
+        saldo: Number(r.saldo),
+      })),
+      policies,
+    );
   });
 
 /**

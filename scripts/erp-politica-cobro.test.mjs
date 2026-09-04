@@ -227,3 +227,200 @@ test("cableado: el importador pide la política y no acepta una que no existe", 
   assert.ok(page.includes('<option value="">Elige la política…</option>'), "nace vacía, sin proponer una");
   assert.ok(page.includes("disabled={busy || !csvInv.trim() || !policyCode}"), "sin elegirla no se pega nada");
 });
+
+// ---------------------------------------------------------------------------
+// QUIÉN ESTÁ EN CADA POLÍTICA (panel de Ajustes, 3-sep-2026).
+//
+// Saber que hay 14 clientes en Estándar no sirve para negociar: hay que saber
+// QUIÉNES son, para decidir uno por uno si les toca el 3.04%. La política vive
+// en el documento, no en el cliente, así que se cuenta sobre las facturas de
+// mercancía con saldo abierto — la misma población del estado de cuenta.
+//
+// Copia de src/lib/erp/policy-usage.ts.
+// ---------------------------------------------------------------------------
+const round2 = (n) => Math.round(n * 100) / 100;
+const CURRENCY_ORDER = ["MXN", "USD"];
+const SIN_POLITICA = "";
+function currencyRank(cur) {
+  const i = CURRENCY_ORDER.indexOf(cur);
+  return i < 0 ? CURRENCY_ORDER.length : i;
+}
+function sortCurrencies(list) {
+  return list.sort((a, b) => currencyRank(a.currency) - currencyRank(b.currency) || a.currency.localeCompare(b.currency));
+}
+function addMoney(list, currency, invoices, saldo) {
+  const prev = list.find((m) => m.currency === currency);
+  if (prev) {
+    prev.invoices += invoices;
+    prev.saldo += saldo;
+  } else {
+    list.push({ currency, invoices, saldo });
+  }
+}
+function saldoTotalOrden(c) {
+  return c.byCurrency.reduce((s, m) => s + m.saldo, 0);
+}
+function groupPolicyUsage(rows, policies) {
+  const byCode = new Map(policies.map((p) => [p.code, p]));
+  const buckets = new Map();
+  const clients = new Map();
+  const bucket = (code) => {
+    let b = buckets.get(code);
+    if (!b) {
+      const pol = byCode.get(code);
+      b = {
+        code,
+        name: code === SIN_POLITICA ? "Sin política capturada" : (pol?.name ?? code),
+        captured: code !== SIN_POLITICA,
+        commission: pol?.commission ?? null,
+        fega: pol?.fega ?? null,
+        chargesInterest: code === SIN_POLITICA ? true : policyChargesInterest(code),
+        clients: 0,
+        invoices: 0,
+        byCurrency: [],
+        clientsList: [],
+      };
+      buckets.set(code, b);
+      clients.set(code, new Map());
+    }
+    return b;
+  };
+  for (const p of policies) bucket(p.code);
+  bucket(SIN_POLITICA);
+  for (const r of rows) {
+    const pol = byCode.get(r.policyCode);
+    const key = pol && chargesCaptured(pol) ? r.policyCode : SIN_POLITICA;
+    const b = bucket(key);
+    b.invoices += r.invoices;
+    addMoney(b.byCurrency, r.currency || "MXN", r.invoices, r.saldo);
+    const map = clients.get(key);
+    let c = map.get(r.partnerId);
+    if (!c) {
+      c = { id: r.partnerId, code: r.partnerCode, name: r.partnerName, group: r.groupName, invoices: 0, byCurrency: [], policyCodes: [] };
+      map.set(r.partnerId, c);
+    }
+    c.invoices += r.invoices;
+    addMoney(c.byCurrency, r.currency || "MXN", r.invoices, r.saldo);
+    const etiqueta = r.policyCode || "(sin política)";
+    if (!c.policyCodes.includes(etiqueta)) c.policyCodes.push(etiqueta);
+  }
+  const out = [...buckets.values()];
+  for (const b of out) {
+    const list = [...clients.get(b.code).values()];
+    for (const c of list) {
+      sortCurrencies(c.byCurrency);
+      for (const m of c.byCurrency) m.saldo = round2(m.saldo);
+      c.policyCodes.sort();
+    }
+    list.sort((a, b2) => saldoTotalOrden(b2) - saldoTotalOrden(a) || a.name.localeCompare(b2.name, "es"));
+    b.clientsList = list;
+    b.clients = list.length;
+    sortCurrencies(b.byCurrency);
+    for (const m of b.byCurrency) m.saldo = round2(m.saldo);
+  }
+  const orden = new Map(policies.map((p, i) => [p.code, i]));
+  return out.sort(
+    (a, b) => (a.code === SIN_POLITICA ? 1 : 0) - (b.code === SIN_POLITICA ? 1 : 0) ||
+      (orden.get(a.code) ?? 0) - (orden.get(b.code) ?? 0),
+  );
+}
+
+// Las tres políticas tal como las deja la migración 0022.
+const CAPTURADAS = [
+  { code: "ESTANDAR", name: "Estándar", commission: false, fega: false },
+  { code: "GRUPO_SL", name: "Grupo SL", commission: true, fega: true },
+  { code: "NONE", name: "Sin mora", commission: false, fega: false },
+];
+const fila = (o) => ({ groupName: "", currency: "MXN", invoices: 1, ...o });
+const USO = [
+  fila({ policyCode: "GRUPO_SL", partnerId: 1, partnerCode: "CL0001", partnerName: "SL AGRICOLA", groupName: "Grupo SL", invoices: 3, saldo: 470549.55 }),
+  fila({ policyCode: "GRUPO_SL", partnerId: 2, partnerCode: "CL0002", partnerName: "AGRICOLA PREMIER", groupName: "Grupo SL", invoices: 1, saldo: 130000 }),
+  fila({ policyCode: "ESTANDAR", partnerId: 3, partnerCode: "CL0010", partnerName: "PRODUCTOR DEL VALLE", invoices: 2, saldo: 88000 }),
+  // El mismo cliente, en dos monedas y en dos políticas.
+  fila({ policyCode: "ESTANDAR", partnerId: 1, partnerCode: "CL0001", partnerName: "SL AGRICOLA", groupName: "Grupo SL", currency: "USD", invoices: 1, saldo: 12000 }),
+  fila({ policyCode: "NONE", partnerId: 4, partnerCode: "CL0020", partnerName: "CONTADO MOSTRADOR", invoices: 1, saldo: 5000 }),
+];
+
+test("cada política cuenta sus clientes, sus facturas y su saldo por moneda", () => {
+  const uso = groupPolicyUsage(USO, CAPTURADAS);
+  const de = (code) => uso.find((u) => u.code === code);
+  assert.deepEqual(uso.map((u) => u.code), ["ESTANDAR", "GRUPO_SL", "NONE", ""], "el renglón sin capturar va al final");
+  assert.equal(de("GRUPO_SL").clients, 2);
+  assert.equal(de("GRUPO_SL").invoices, 4);
+  assert.deepEqual(de("GRUPO_SL").byCurrency, [{ currency: "MXN", invoices: 4, saldo: 600549.55 }]);
+  // Estándar: dos clientes, y su saldo NO mezcla monedas.
+  assert.equal(de("ESTANDAR").clients, 2);
+  assert.deepEqual(de("ESTANDAR").byCurrency, [
+    { currency: "MXN", invoices: 2, saldo: 88000 },
+    { currency: "USD", invoices: 1, saldo: 12000 },
+  ]);
+  // «Sin mora» se ve como lo que es.
+  assert.equal(de("NONE").chargesInterest, false);
+  assert.equal(de("GRUPO_SL").chargesInterest, true);
+});
+
+test("un cliente con documentos de dos políticas aparece en las dos", () => {
+  const uso = groupPolicyUsage(USO, CAPTURADAS);
+  const sl = (code) => uso.find((u) => u.code === code).clientsList.find((c) => c.code === "CL0001");
+  assert.ok(sl("GRUPO_SL"), "sale en Grupo SL");
+  assert.ok(sl("ESTANDAR"), "y también en Estándar");
+  assert.deepEqual(sl("ESTANDAR").byCurrency, [{ currency: "USD", invoices: 1, saldo: 12000 }]);
+  // El que más debe, primero: es con quien se negocia.
+  assert.deepEqual(
+    uso.find((u) => u.code === "GRUPO_SL").clientsList.map((c) => c.code),
+    ["CL0001", "CL0002"],
+  );
+});
+
+test("una política sin capturar no cuenta para ella: sus documentos se detienen y salen aparte", () => {
+  const aMedias = [
+    { code: "ESTANDAR", name: "Estándar", commission: null, fega: null },
+    { code: "GRUPO_SL", name: "Grupo SL", commission: true, fega: true },
+    { code: "NONE", name: "Sin mora", commission: false, fega: false },
+  ];
+  const uso = groupPolicyUsage(USO, aMedias);
+  const est = uso.find((u) => u.code === "ESTANDAR");
+  const sin = uso.find((u) => u.code === "");
+  assert.equal(est.clients, 0, "no se le cuentan clientes a una política que no contesta las dos preguntas");
+  assert.equal(est.invoices, 0);
+  assert.equal(sin.clients, 2, "esos clientes se ven donde importa: los que se detienen al cobrar");
+  assert.equal(sin.invoices, 3);
+  assert.deepEqual(sin.byCurrency, [
+    { currency: "MXN", invoices: 2, saldo: 88000 },
+    { currency: "USD", invoices: 1, saldo: 12000 },
+  ]);
+  // Y el detalle dice qué código traen, para saber a quién capturarle qué.
+  assert.deepEqual(sin.clientsList.find((c) => c.code === "CL0001").policyCodes, ["ESTANDAR"]);
+  // Los renglones no se traslapan: nada se cuenta dos veces.
+  const facturas = uso.reduce((s, u) => s + u.invoices, 0);
+  assert.equal(facturas, USO.reduce((s, r) => s + r.invoices, 0));
+});
+
+test("con todo capturado el renglón que importa queda vacío, y se muestra igual", () => {
+  const uso = groupPolicyUsage(USO, CAPTURADAS);
+  const sin = uso.find((u) => u.code === "");
+  assert.equal(sin.clients, 0);
+  assert.equal(sin.invoices, 0);
+  assert.deepEqual(sin.byCurrency, []);
+  assert.equal(sin.name, "Sin política capturada");
+  // Y una política sin nadie también sale, con su cero.
+  const vacia = groupPolicyUsage([], CAPTURADAS);
+  assert.deepEqual(vacia.map((u) => u.code), ["ESTANDAR", "GRUPO_SL", "NONE", ""]);
+  assert.deepEqual(vacia.map((u) => u.clients), [0, 0, 0, 0]);
+});
+
+test("cableado: el panel es solo lectura, solo administrador, y sobre saldo abierto de mercancía", () => {
+  const ops = src("src/lib/erp/ops.ts");
+  const fn = ops.slice(ops.indexOf("export const creditPolicyUsage"), ops.indexOf("export const saveCreditPolicy"));
+  assert.ok(fn.includes('createServerFn({ method: "GET" })'), "solo lectura");
+  assert.ok(fn.includes("await assertAdmin(sql, context.userId);"), "solo administrador");
+  assert.ok(!fn.includes("update ") && !fn.includes("insert "), "no escribe nada");
+  assert.ok(fn.includes("and i.kind = 'customer'"), "solo cartera de clientes");
+  assert.ok(fn.includes("and coalesce(i.inv_class, 'product') = 'product'"), "mercancía: la mora y el ajuste de TC no se negocian");
+  assert.ok(fn.includes("and i.residual > 0.009"), "solo lo que sigue debiendo");
+  const st = src("src/routes/settings.tsx");
+  assert.ok(st.includes("Quién está en cada política"), "el panel vive junto a las tres políticas de cobro");
+  assert.ok(st.includes('{role === "admin" && ('), "no se pinta para otro rol");
+  assert.ok(st.includes("setOpenPolicy(abierto ? null : key)"), "cada renglón se abre para ver quiénes son");
+  assert.ok(st.includes("moneyIn(m.saldo, m.currency)"), "cada saldo en su moneda, nunca sumadas");
+});
