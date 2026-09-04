@@ -45,7 +45,8 @@ function computeStatementLine(input) {
   const daysVencidos = daysBetween(input.dueDate, fechaPago);
   const vencido = daysVencidos > 0;
   const annualRate = input.tiieAtDue + input.spread;
-  const interest = vencido ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;
+  const cobraInteres = input.chargesInterest !== false;
+  const interest = vencido && cobraInteres ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;
   const split = splitFegaBundle(input.fegaRate, input.commissionRate);
   const comisionFega = vencido ? input.cargo * split.bundle : 0;
   return {
@@ -195,7 +196,7 @@ test("cableado: el motor no cobra nada antes del vencimiento", () => {
   const credit = src("src/lib/erp/credit.ts");
   assert.ok(credit.includes("const vencido = daysVencidos > 0;"), "computeStatementLine decide si ya venció");
   assert.ok(
-    credit.includes("const interest = vencido ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;"),
+    credit.includes("const interest = vencido && cobraInteres ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;"),
     "sin vencimiento no hay interés (no se multiplica por días negativos)",
   );
   assert.ok(credit.includes("const comisionFega = vencido ? input.cargo * split.bundle : 0;"), "sin vencimiento no hay comisión + FEGA");
@@ -206,7 +207,10 @@ test("cableado: el estado de cuenta estima el pronto pago al corte, a tasa ASR",
   const ops = src("src/lib/erp/ops.ts");
   const live = ops.slice(ops.indexOf("export const getLiveStatement"), ops.indexOf("export async function issueMoraInvoice"));
   assert.ok(live.includes("const vencido = productDoc && diasVencidos > 0;"), "cada renglón sabe si ya venció");
-  assert.ok(live.includes("const sinTiie = vencido && tiiePick == null;"), "una factura por vencer no necesita TIIE: no hay nada que calcular");
+  assert.ok(
+    live.includes("const sinTiie = vencido && cobraInteres && tiiePick == null;"),
+    "una factura por vencer (o sin mora) no necesita TIIE: no hay nada que calcular",
+  );
   assert.ok(live.includes("const fechaBono = paidForCalc ?? asOf;"), "sin pago, la bonificación se estima a la fecha del corte");
   assert.ok(live.includes("const bonoEstimado = productDoc && paidForCalc == null;"), "y queda marcada como estimación");
   assert.ok(live.includes("costSpread: pol.asrSpread,"), "la bonificación va a tasa de COSTO (spread ASR), no a la de cobro");

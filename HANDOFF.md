@@ -368,7 +368,50 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       de mora y ATC de tipo de cambio incluidas), así que FV-0002 no
       corresponde a PV-0002: los folios saltan.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 300 hoy,
+19. **El bloque "Por producto" y los tres pendientes que dejó la prueba con el
+    dueño** (3-sep-2026, migración `0022_politicas_capturadas.sql`, lógica en
+    `src/lib/erp/statement-products.ts`, pruebas en
+    `scripts/erp-por-producto.test.mjs` y la parte nueva de
+    `scripts/erp-politica-cobro.test.mjs`).
+    - **"Por producto" muestra SALDO, no venta.** El estado de cuenta contesta
+      una sola pregunta —cuánto debe el cliente y de qué—, así que las dos
+      cifras del documento tienen que ser la misma. El bloque se arma ahora en
+      la pantalla con **los mismos renglones que la tabla de arriba** (antes lo
+      armaba el servidor sobre todas las facturas del cliente): respeta
+      "Ocultar pagadas", **separa monedas** (nunca un número que sume MXN con
+      USD) y **cuadra al centavo** con el total de la tabla — el centavo del
+      prorrateo lo absorbe el producto más grande, no se pierde. Layout de dos
+      columnas de verdad (tabla nombre/importe, no una rejilla donde el importe
+      de la izquierda quedaba pegado al nombre de la derecha), un renglón por
+      producto con su nombre. Los cargos que **no son mercancía** salen de la
+      lista: el corte Compaq (saldo abierto sin partidas) va en **"Otros
+      cargos"** con su desglose, dentro del total; la mora facturada (FI) y el
+      ajuste de TC (ATC) van en una lista aparte, marcada como fuera del total,
+      porque tampoco están en la tabla de arriba. `getLiveStatement` ya no
+      devuelve `byProduct`.
+    - **Comisión y FEGA capturados** (0022, decisión del dueño): GRUPO_SL sí/sí,
+      ESTANDAR no/no, NONE no/no. Solo toca las que seguían sin capturar: una
+      respuesta escrita a mano en Ajustes manda y no se pisa.
+    - **«Sin mora» (NONE) ahora sí apaga el interés.** Era la política de
+      contado y no la leía nadie: la mora corría igual con cualquier política.
+      Un documento con NONE no genera interés, ni comisión, ni FEGA, ni
+      bonificación de pronto pago (no hay financiamiento que devolver), no pide
+      TIIE, y su FI no se emite. El estado de cuenta lo dice en la columna
+      ("sin mora") y en el desglose. Ojo: un documento **sin política
+      capturada** no es "sin mora" — ese sigue marcándose "sin política" y
+      deteniéndose. `NO_MORA_POLICY` / `policyChargesInterest` en `credit.ts`.
+    - **El corte Compaq entra con la política que se elija.** Las facturas
+      importadas nacían con el `default 'NONE'` de la columna, es decir «Sin
+      mora»: un valor por omisión que decide dinero. Ahora `/importar` pide la
+      política en un selector que nace vacío, el servidor la exige y valida que
+      exista, la guarda en cada factura y la deja en bitácora. Sin elegirla no
+      se pega nada.
+    - Sigue pendiente, y necesita la base: correr
+      `scripts/erp-facturas-repetidas.mjs` con `DATABASE_URL` para contestar si
+      FV-0002 y FV-0003 de SL AGRICOLA son una factura duplicada, dos pedidos
+      gemelos o dos documentos legítimos con el mismo importe.
+
+Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 340 hoy,
 incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
 
@@ -425,12 +468,13 @@ natural de trabajo grande.
 
 ## Qué falta
 
-- **Valores por omisión**: cerrados el 3-sep (punto 16 de la bitácora de
+- **Valores por omisión**: cerrados el 3-sep (puntos 16 y 19 de la bitácora de
   arriba). No volver a escribir un número de negocio en el código: lo vigila
   `scripts/erp-sin-numeros.test.mjs`. Pendiente operativo, no de código: en
   una base que ya existía hay que capturar `fega_commission` y
   `early_pay_days` en Ajustes (la pantalla lo pide y todo se detiene hasta
-  entonces).
+  entonces). Los dos interruptores de las tres políticas de cobro ya los
+  captura la migración 0022.
 - Columnas sin uso que quedaron por no romper nada: `credit_policies.spread`
   y `fega_rate` (nadie las lee; la mora sale de Ajustes) y
   `customer_pos.fx_rate default 1` (nadie la lee; la OC convertida toma el TC
@@ -559,7 +603,7 @@ No importar facturas en ceros ni hojas de utilidad.
 - Bitácora `/bitacora`, ahora con filtros por folio/texto, tipo, usuario y
   fecha.
 - Archivos en el folio (CFDI/guía). Respaldo JSON.
-- Migraciones hasta `migrations/0020_escalera_plazos.sql`.
+- Migraciones hasta `migrations/0022_politicas_capturadas.sql`.
 - Pruebas: `npm test` corre más de 200 casos en varios archivos
   `scripts/erp-*.test.mjs` (fórmulas, permisos, cartera, utilidad,
   trazabilidad, precio). Todas deben pasar en verde, junto con

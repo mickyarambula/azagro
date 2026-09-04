@@ -111,6 +111,26 @@ export function missingChargesMessage(code: string, name?: string) {
 }
 
 /**
+ * La política «Sin mora» (NONE) es la de contado y la de quien no genera
+ * intereses. Hasta el 3-sep-2026 no la leía nadie para el interés: la mora
+ * corría igual con cualquier política. Ahora sí apaga el interés del documento
+ * — es su nombre y su única función. Las otras políticas lo cobran; los dos
+ * interruptores (comisión y FEGA) siguen siendo pregunta aparte.
+ *
+ * Un documento sin política capturada NO entra aquí: ese caso se marca «sin
+ * política» y se detiene, no se convierte en "sin mora" por su cuenta.
+ */
+export const NO_MORA_POLICY = "NONE";
+
+export function policyChargesInterest(code: string | null | undefined) {
+  return (code || "") !== NO_MORA_POLICY;
+}
+
+export function noMoraMessage(name?: string) {
+  return `Política de cobro ${name ? `«${name}»` : "«Sin mora»"}: este documento no genera interés de mora.`;
+}
+
+/**
  * Mora a facturar (FI):
  *   Interés = Capital × (TIIE vencimiento + spread de cobro) × días vencidos / 360   (nunca negativo)
  *   FEGA    = Capital × tasa «comisión + FEGA» de Ajustes  (una sola vez, si ya venció y no se ha facturado)
@@ -126,11 +146,14 @@ export function computeMora(input: {
   spread: number;
   fegaRate: number;
   fegaAlreadyCharged: boolean;
+  /** Falso solo con la política «Sin mora»: el documento no genera interés. */
+  chargesInterest?: boolean;
 }) {
   const end = input.paidDate && input.paidDate < input.asOf ? input.paidDate : input.asOf;
   const daysOverdue = Math.max(0, daysBetween(input.dueDate, end));
   const annualRate = input.tiieAtDue + input.spread;
-  const interest = daysOverdue > 0 ? (input.capital * annualRate * daysOverdue) / YEAR_DAYS : 0;
+  const cobraInteres = input.chargesInterest !== false;
+  const interest = daysOverdue > 0 && cobraInteres ? (input.capital * annualRate * daysOverdue) / YEAR_DAYS : 0;
   const fega = daysOverdue > 0 && !input.fegaAlreadyCharged ? input.capital * input.fegaRate : 0;
   return {
     daysOverdue,
@@ -178,6 +201,8 @@ export function computeStatementLine(input: {
   spread: number;
   fegaRate: number;
   commissionRate: number;
+  /** Falso solo con la política «Sin mora»: el documento no genera interés. */
+  chargesInterest?: boolean;
 }) {
   const paid = input.paidDate ? input.paidDate.slice(0, 10) : "";
   const fechaPago = paid && paid <= input.asOf ? paid : input.asOf;
@@ -185,7 +210,8 @@ export function computeStatementLine(input: {
   const daysVencidos = daysBetween(input.dueDate, fechaPago);
   const vencido = daysVencidos > 0;
   const annualRate = input.tiieAtDue + input.spread;
-  const interest = vencido ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;
+  const cobraInteres = input.chargesInterest !== false;
+  const interest = vencido && cobraInteres ? (input.cargo * annualRate * daysVencidos) / YEAR_DAYS : 0;
   const split = splitFegaBundle(input.fegaRate, input.commissionRate);
   const comisionFega = vencido ? input.cargo * split.bundle : 0;
   return {
@@ -390,6 +416,7 @@ export function moraBilling(input: {
   fegaRate: number;
   interestInvoiced: number;
   fegaCharged: boolean;
+  chargesInterest?: boolean;
 }) {
   const cargo = Math.max(0, input.cargo);
   const base = computeMora({
@@ -401,6 +428,7 @@ export function moraBilling(input: {
     spread: input.spread,
     fegaRate: input.fegaRate,
     fegaAlreadyCharged: input.fegaCharged,
+    chargesInterest: input.chargesInterest,
   });
   const round2 = (n: number) => Math.round(n * 100) / 100;
   const interestNew = round2(Math.max(0, base.interest - Math.max(0, input.interestInvoiced)));

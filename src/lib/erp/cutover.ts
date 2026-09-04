@@ -139,9 +139,17 @@ export const previewOpenInvoices = createServerFn({ method: "POST" })
     return { rows, open: rows.filter((r) => !r.skip).length, skipped: rows.filter((r) => r.skip).length };
   });
 
+/**
+ * Saldos abiertos del corte Compaq.
+ *
+ * La política de cobro se PIDE: hasta el 3-sep-2026 estas facturas nacían con
+ * el `default 'NONE'` de la columna, es decir «Sin mora», y eso es un valor por
+ * omisión que decide dinero (regla 9: el sistema no lo supone). Sin política
+ * elegida no se pega nada.
+ */
 export const applyOpenInvoices = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ csv: z.string().min(3) }))
+  .validator(z.object({ csv: z.string().min(3), policyCode: z.string().min(1) }))
   .handler(async ({ context, data }) => {
     const boot = await getSql();
     await boot`alter table invoices add column if not exists cutover_key text`;
@@ -154,6 +162,15 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
     return await withTx(async (sql) => {
       await assertCan(sql, context.userId, "settings", "edit");
       const companyId = await cid(sql, context.userId);
+      // La política tiene que existir: no se acepta un código escrito a mano.
+      const pol = await sql<{ code: string; name: string }>`
+        select code, name from credit_policies where company_id = ${companyId} and code = ${data.policyCode} limit 1
+      `;
+      if (!pol[0]) {
+        throw new Error(
+          `Elige la política de cobro con la que entran estos saldos: «${data.policyCode}» no existe en Ajustes → Políticas de cobro.`,
+        );
+      }
       const parsed = parseOpenInvoices(data.csv);
       let inserted = 0;
       let skipped = 0;
@@ -181,10 +198,10 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         // en adelante es cargo − abono de corte − pagos capturados en el sistema.
         const openingPaid = Math.max(0, cargo - r.saldo);
         await sql`
-          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, created_by)
+          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by)
           values (
             ${companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}, ${r.date}, ${r.due}, 'open',
-            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${context.userId}
+            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${data.policyCode}, ${context.userId}
           )
         `;
         inserted += 1;
@@ -195,7 +212,7 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         action: "corte",
         entity: "invoice",
         name: "Saldos abiertos Compaq",
-        detail: `entraron ${inserted}, ya estaban ${skipped}`,
+        detail: `entraron ${inserted}, ya estaban ${skipped} · política de cobro ${pol[0].name} (${pol[0].code})`,
       });
       return { inserted, skipped };
     });

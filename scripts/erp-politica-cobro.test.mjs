@@ -97,7 +97,7 @@ test("cableado: el estado de cuenta obedece los interruptores del documento", ()
   assert.ok(live.includes("const polMap = await creditPolicyMap(sql, cid);"), "se leen las políticas de la empresa");
   assert.ok(live.includes("const politica = polMap.get(inv.policy_code) ?? null;"), "cada factura usa la política con la que nació");
   assert.ok(live.includes("chargeRates(pol.fegaRate, pol.commissionRate, cobra)"), "los porcentajes siguen siendo los de Ajustes");
-  assert.ok(live.includes("const sinPolitica = vencido && cobra == null;"), "sin capturar se marca la fila");
+  assert.ok(live.includes("const sinPolitica = vencido && cobraInteres && cobra == null;"), "sin capturar se marca la fila");
   assert.ok(live.includes("fegaRate: tasas.fegaRate,"), "computeMora / computeStatementLine reciben la tasa efectiva");
   assert.ok(!live.includes("fegaRate: pol.fegaRate,"), "ya nadie cobra el paquete completo a ciegas");
   const ec = src("src/routes/statements.tsx");
@@ -124,4 +124,106 @@ test("cableado: cambiar una política es de administrador y queda en bitácora",
   assert.ok(st.includes("Políticas de cobro (comisión y FEGA por cliente)"), "Ajustes tiene el panel");
   assert.ok(st.includes('<option value="">sin capturar</option>'), "una política sin capturar se ve vacía, no en «no»");
   assert.ok(st.includes("saveCreditPolicy({ data: { code, commission: e.commission === \"si\", fega: e.fega === \"si\" } })"), "se guardan las dos respuestas juntas");
+});
+
+// ---------------------------------------------------------------------------
+// «SIN MORA» APAGA EL INTERÉS (3-sep-2026, decisión del dueño).
+//
+// Hasta hoy la política NONE «Sin mora» no la leía nadie para el interés: la
+// mora corría igual con cualquier política, y solo los dos interruptores nuevos
+// la consultaban. Ahora sí apaga el interés del documento — es su nombre y su
+// única función. Un documento SIN política capturada no entra aquí: ese caso se
+// marca «sin política» y se detiene, no se convierte en "sin mora" solo.
+// ---------------------------------------------------------------------------
+
+/** Copias de src/lib/erp/credit.ts. */
+const NO_MORA_POLICY = "NONE";
+function policyChargesInterest(code) {
+  return (code || "") !== NO_MORA_POLICY;
+}
+const YEAR_DAYS = 360;
+function daysBetween(from, to) {
+  return Math.round((Date.parse(to.slice(0, 10) + "T00:00:00") - Date.parse(from.slice(0, 10) + "T00:00:00")) / 86400000);
+}
+function computeMora(input) {
+  const end = input.paidDate && input.paidDate < input.asOf ? input.paidDate : input.asOf;
+  const daysOverdue = Math.max(0, daysBetween(input.dueDate, end));
+  const annualRate = input.tiieAtDue + input.spread;
+  const cobraInteres = input.chargesInterest !== false;
+  const interest = daysOverdue > 0 && cobraInteres ? (input.capital * annualRate * daysOverdue) / YEAR_DAYS : 0;
+  const fega = daysOverdue > 0 && !input.fegaAlreadyCharged ? input.capital * input.fegaRate : 0;
+  return { daysOverdue, annualRate, interest, fega, mora: interest + fega };
+}
+
+const VENCIDA = {
+  capital: 156849.85,
+  dueDate: "2027-01-31",
+  asOf: "2027-03-02", // 30 días vencida
+  tiieAtDue: 0.069,
+  spread: 0.09,
+  fegaAlreadyCharged: false,
+};
+
+test("«Sin mora» (NONE) no genera interés; cualquier otra política sí", () => {
+  assert.equal(policyChargesInterest("NONE"), false);
+  assert.equal(policyChargesInterest("GRUPO_SL"), true);
+  assert.equal(policyChargesInterest("ESTANDAR"), true);
+  // Sin política capturada NO es "sin mora": se marca y se detiene aparte.
+  assert.equal(policyChargesInterest(""), true);
+  assert.equal(policyChargesInterest(null), true);
+});
+
+test("el documento con «Sin mora» sale en cero, aunque lleve 30 días vencido", () => {
+  const conMora = computeMora({ ...VENCIDA, fegaRate: 0.0304, chargesInterest: true });
+  assert.equal(conMora.daysOverdue, 30);
+  assert.equal(Math.round(conMora.interest * 100) / 100, Math.round(((156849.85 * 0.159 * 30) / 360) * 100) / 100);
+  // Con NONE: la 0022 la deja en comisión no · FEGA no, así que la tasa efectiva
+  // es 0 y el interés se apaga por la política.
+  const sinMora = computeMora({ ...VENCIDA, fegaRate: 0, chargesInterest: false });
+  assert.equal(sinMora.daysOverdue, 30, "los días vencidos se siguen viendo");
+  assert.equal(sinMora.interest, 0);
+  assert.equal(sinMora.fega, 0);
+  assert.equal(sinMora.mora, 0);
+});
+
+test("cableado: «Sin mora» apaga interés, comisión, FEGA, TIIE y pronto pago", () => {
+  const credit = src("src/lib/erp/credit.ts");
+  assert.ok(credit.includes('export const NO_MORA_POLICY = "NONE";'), "un solo lugar dice cuál es la política sin mora");
+  assert.ok(credit.includes("const cobraInteres = input.chargesInterest !== false;"), "el motor recibe el interruptor");
+  const ops = src("src/lib/erp/ops.ts");
+  const live = ops.slice(ops.indexOf("export const getLiveStatement"), ops.indexOf("export async function issueMoraInvoice"));
+  assert.ok(live.includes("const cobraInteres = policyChargesInterest(inv.policy_code);"), "cada fila lee la política del documento");
+  assert.ok(live.includes("chargesInterest: cobraInteres,"), "y se lo pasa a computeMora / computeStatementLine");
+  assert.ok(live.includes("const tasas = cobra && cobraInteres"), "sin mora tampoco hay comisión ni FEGA");
+  assert.ok(live.includes("const bono = productDoc && cobraInteres && tiieIssuePick"), "sin financiamiento no hay bonificación de pronto pago");
+  const fi = ops.slice(ops.indexOf("export async function issueMoraInvoice"), ops.indexOf("export const invoiceLiveMora"));
+  assert.ok(fi.includes("if (!policyChargesInterest(inv[0].policy_code)) {"), "la FI no se emite para un documento sin mora");
+  const ec = src("src/routes/statements.tsx");
+  assert.ok(ec.includes('r.sinMora ? "sin mora"'), "la columna lo dice, no imprime un cero mudo");
+  const car = src("src/routes/credit.tsx");
+  assert.ok(car.includes("const cobraInteres = policyChargesInterest(inv.policy_code);"), "la vista previa del cobro enseña la misma cuenta");
+});
+
+// ---------------------------------------------------------------------------
+// EL CORTE COMPAQ ENTRA CON POLÍTICA ELEGIDA (3-sep-2026, decisión del dueño).
+//
+// Las facturas importadas nacían con el `default 'NONE'` de la columna, es
+// decir «Sin mora»: un valor por omisión que decide dinero. Ahora la política se
+// pide en la pantalla y sin ella no se pega nada.
+// ---------------------------------------------------------------------------
+test("cableado: el importador pide la política y no acepta una que no existe", () => {
+  const cut = src("src/lib/erp/cutover.ts");
+  const apply = cut.slice(cut.indexOf("export const applyOpenInvoices"), cut.indexOf("async function logImportFailure"));
+  assert.ok(
+    apply.includes('z.object({ csv: z.string().min(3), policyCode: z.string().min(1) })'),
+    "el servidor exige la política, no la supone",
+  );
+  assert.ok(apply.includes("select code, name from credit_policies where company_id = ${companyId} and code = ${data.policyCode}"), "y valida que exista");
+  assert.ok(apply.includes("opening_paid, policy_code, created_by"), "la factura importada guarda su política");
+  assert.ok(apply.includes("${data.policyCode}, ${context.userId}"), "la elegida, no la de la columna");
+  assert.ok(apply.includes("política de cobro ${pol[0].name}"), "queda en bitácora con qué política entró");
+  const page = src("src/routes/importar.tsx");
+  assert.ok(page.includes("Política de cobro de estos saldos"), "la pantalla la pide");
+  assert.ok(page.includes('<option value="">Elige la política…</option>'), "nace vacía, sin proponer una");
+  assert.ok(page.includes("disabled={busy || !csvInv.trim() || !policyCode}"), "sin elegirla no se pega nada");
 });

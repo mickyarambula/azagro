@@ -7,7 +7,7 @@ import { SendButton } from "@/components/send-doc";
 import { getDealTrail } from "@/lib/erp/deal";
 import { listInvoices, registerPayment } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
-import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, missingChargesMessage, missingRateMessage, nearestRate, validateDueDates } from "@/lib/erp/credit";
+import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, missingChargesMessage, missingRateMessage, nearestRate, noMoraMessage, policyChargesInterest, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 
@@ -318,6 +318,17 @@ function Page() {
               }
               // TIIE del vencimiento: renglón de la tabla, con fecha. Sin
               // renglón no se calcula ni se estima.
+              // «Sin mora» apaga el interés del documento: ni TIIE ni FI.
+              const cobraInteres = policyChargesInterest(inv.policy_code);
+              const polDoc = settings.policies.find((x) => x.code === inv.policy_code) ?? null;
+              if (!cobraInteres) {
+                return (
+                  <div className="mt-2 text-[12px] text-muted">
+                    <p>Vence {dateDMY(inv.due_date)} · {exactClock(inv.due_date, pay.date).label}.</p>
+                    <p className="mt-1">{noMoraMessage(polDoc?.name)}</p>
+                  </div>
+                );
+              }
               const tiieTable = settings.tiie.map((t) => ({ date: t.date, rate: Number(t.rate) }));
               const pick = nearestRate(tiieTable, inv.due_date);
               if (!pick) {
@@ -331,7 +342,7 @@ function Page() {
               // Comisión y FEGA según la política del documento: los
               // porcentajes son los de Ajustes, la política dice cuál mitad se
               // cobra. Sin capturar, la FI se detiene: aquí se avisa antes.
-              const cp = settings.policies.find((x) => x.code === inv.policy_code) ?? null;
+              const cp = polDoc;
               const cobra = chargesCaptured(cp) ? { commission: cp.commission, fega: cp.fega } : null;
               const tasas = cobra
                 ? chargeRates(settings.fegaRate, settings.commissionRate, cobra)

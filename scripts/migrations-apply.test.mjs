@@ -87,6 +87,28 @@ test("0021 no toca las políticas que ya existían: quedan sin capturar", async 
   await db.close();
 });
 
+test("0022 captura la decisión del dueño y respeta lo que ya se contestó a mano", async () => {
+  const db = new PGlite();
+  const files = pendingMigrations(readdirSync(dir), []);
+  for (const { path } of files.filter((f) => f.name < "0022")) await db.exec(readFileSync(join(dir, path), "utf8"));
+  await db.exec(`insert into companies (id, name, join_code, created_by) values (1, 'AZ', 'AZ1', 'u1'), (2, 'Otra', 'OT1', 'u1')`);
+  await db.exec(`
+    insert into credit_policies (company_id, code, name) values
+      (1, 'NONE', 'Sin mora'), (1, 'GRUPO_SL', 'Grupo SL'), (1, 'ESTANDAR', 'Estándar'),
+      (2, 'ESTANDAR', 'Estándar')
+  `);
+  // La empresa 2 ya contestó a mano: su captura manda, la migración no la pisa.
+  await db.exec(`update credit_policies set charge_commission = true, charge_fega = true where company_id = 2`);
+  await db.exec(readFileSync(join(dir, "0022_politicas_capturadas.sql"), "utf8"));
+  const rows = (await db.query(`select company_id, code, charge_commission, charge_fega from credit_policies order by company_id, code`)).rows;
+  const dime = (cid, code) => rows.find((r) => r.company_id === cid && r.code === code);
+  assert.deepEqual([dime(1, "GRUPO_SL").charge_commission, dime(1, "GRUPO_SL").charge_fega], [true, true]);
+  assert.deepEqual([dime(1, "ESTANDAR").charge_commission, dime(1, "ESTANDAR").charge_fega], [false, false]);
+  assert.deepEqual([dime(1, "NONE").charge_commission, dime(1, "NONE").charge_fega], [false, false]);
+  assert.deepEqual([dime(2, "ESTANDAR").charge_commission, dime(2, "ESTANDAR").charge_fega], [true, true], "no se pisa una captura manual");
+  await db.close();
+});
+
 test("0020 siembra la escalera en los Ajustes que ya existían y respeta una escalera ya capturada", async () => {
   const db = new PGlite();
   const files = pendingMigrations(readdirSync(dir), []);

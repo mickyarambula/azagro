@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
-import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, pctRate, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
+import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, noMoraMessage, pctRate, policyChargesInterest, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
@@ -1920,7 +1920,6 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // no se calcula interés: la fila sale marcada "sin TIIE" y con el aviso,
         // nunca con una tasa inventada.
         const tiiePick = nearestRate(tiieTable, moraDue);
-        const sinTiie = vencido && tiiePick == null;
         const tiie = tiiePick?.rate ?? 0;
         // COMISIÓN Y FEGA SEGÚN LA POLÍTICA DEL DOCUMENTO. El porcentaje sigue
         // saliendo de Ajustes; la política solo dice cuál de las dos mitades se
@@ -1928,8 +1927,15 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // fila queda marcada: la decisión es del dueño, no del sistema.
         const politica = polMap.get(inv.policy_code) ?? null;
         const cobra = chargesCaptured(politica) ? { commission: politica.commission, fega: politica.fega } : null;
-        const sinPolitica = vencido && cobra == null;
-        const tasas = cobra
+        // «Sin mora» apaga el interés del documento: es la política de contado.
+        // Y si no hay interés tampoco hay nada que preguntarle a la política
+        // sobre comisión y FEGA, así que la fila no se marca "sin política".
+        const cobraInteres = policyChargesInterest(inv.policy_code);
+        const sinMora = productDoc && !cobraInteres;
+        const sinPolitica = vencido && cobraInteres && cobra == null;
+        // Un documento sin mora tampoco necesita TIIE: no hay nada que calcular.
+        const sinTiie = vencido && cobraInteres && tiiePick == null;
+        const tasas = cobra && cobraInteres
           ? chargeRates(pol.fegaRate, pol.commissionRate, cobra)
           : { fegaRate: 0, commissionRate: 0, fegaOnlyRate: 0 };
         // FI emitidas hasta el corte, con su desglose guardado interés/FEGA.
@@ -1951,6 +1957,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               spread: pol.collectionSpread,
               fegaRate: tasas.fegaRate,
               fegaAlreadyCharged: fegaCharged,
+              chargesInterest: cobraInteres,
             })
           : {
               daysOverdue: productDoc ? Math.max(0, daysBetween(moraDue, endOverdue)) : 0,
@@ -1976,6 +1983,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               spread: pol.collectionSpread,
               fegaRate: tasas.fegaRate,
               commissionRate: tasas.commissionRate,
+              chargesInterest: cobraInteres,
             })
           : null;
         // BONIFICACIÓN POR PRONTO PAGO — VA A TASA DE COSTO, NO DE COBRO.
@@ -1986,8 +1994,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // ESTIMACIÓN: cuánto se bonificaría si pagara en la fecha del corte.
         const fechaBono = paidForCalc ?? asOf;
         const bonoEstimado = productDoc && paidForCalc == null;
-        const tiieIssuePick = productDoc ? nearestRate(tiieTable, inv.date) : null;
-        const bono = productDoc && tiieIssuePick
+        const tiieIssuePick = productDoc && cobraInteres ? nearestRate(tiieTable, inv.date) : null;
+        const bono = productDoc && cobraInteres && tiieIssuePick
           ? earlyPayBonus({
               cargo,
               issueDate: inv.date,
@@ -1999,8 +2007,13 @@ export const getLiveStatement = createServerFn({ method: "POST" })
             })
           : { applies: false, lived: 0, days: 0, rate: 0, bonus: 0 };
         // Sin renglón de TIIE a la emisión no se estima la bonificación: se avisa.
-        const sinTiieBono = productDoc && !vencido && tiieIssuePick == null;
-        const formula = sinTiie && productDoc
+        const sinTiieBono = productDoc && cobraInteres && !vencido && tiieIssuePick == null;
+        const formula = sinMora
+          ? {
+              short: noMoraMessage(politica?.name),
+              lines: [] as string[],
+            }
+          : sinTiie && productDoc
           ? {
               short: "Sin TIIE en la tabla: interés no calculado.",
               lines: [
@@ -2043,7 +2056,12 @@ export const getLiveStatement = createServerFn({ method: "POST" })
             `Sin bonificación por pronto pago: al ${dateDMY(fechaBono)} ya pasaron ${bono.lived} d desde la emisión y el umbral es ${pol.earlyPayDays} d.`,
           );
         }
-        if (sinPolitica) {
+        if (sinMora) {
+          formula.lines.push(noMoraMessage(politica?.name));
+          formula.lines.push(
+            "No genera interés, ni comisión, ni FEGA, ni bonificación de pronto pago: no hay financiamiento que devolver.",
+          );
+        } else if (sinPolitica) {
           formula.lines.push(missingChargesMessage(inv.policy_code || "(sin política)", politica?.name));
           formula.lines.push("Mientras tanto no se cobra comisión ni FEGA en esta fila: la decisión se captura, no se supone.");
         } else if (vencido && cobra) {
@@ -2081,6 +2099,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           bonificacionEstimada: bonoEstimado,
           sinTiieBono,
           // Política de cobro del documento y sus dos interruptores.
+          sinMora,
           politicaCode: inv.policy_code,
           politicaNombre: politica?.name ?? "",
           cobraComision: cobra?.commission ?? null,
@@ -2118,19 +2137,11 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           utCambiaria: set.reduce((s, r) => s + r.utCambiaria, 0),
         };
       });
-      const byProduct: Record<string, number> = {};
-      for (const r of customerRows) {
-        if (r.products.length === 0) {
-          byProduct[r.origin || r.name] = (byProduct[r.origin || r.name] ?? 0) + r.saldo;
-        } else {
-          const lineSum = r.products.reduce((s, l) => s + Number(l.amount), 0) || 1;
-          for (const l of r.products) {
-            byProduct[l.product] = (byProduct[l.product] ?? 0) + r.saldo * (Number(l.amount) / lineSum);
-          }
-        }
-      }
-
-      result.push({ partner, contacts, rows, ar, ap, byProduct, byCurrency });
+      // "Por producto" ya NO se arma aquí: mezclaba monedas, metía la mora y el
+      // ajuste de TC como si fueran productos, e ignoraba "Ocultar pagadas", así
+      // que nunca cuadraba con la tabla. Lo arma la pantalla con los mismos
+      // renglones que muestra (src/lib/erp/statement-products.ts).
+      result.push({ partner, contacts, rows, ar, ap, byCurrency });
     }
 
     const fegaSplit = splitFegaBundle(pol.fegaRate, pol.commissionRate);
@@ -2187,6 +2198,14 @@ export async function issueMoraInvoice(
   // en esa fecha. El capital es SIEMPRE el cargo original (regla del Excel).
   const moraDue = inv[0].credit_due || inv[0].due_date;
   const paidDate = opts?.paidDate === undefined ? inv[0].paid_date : opts.paidDate;
+  // La política «Sin mora» apaga el interés: no se emite FI y no se pide TIIE.
+  // No es un error de captura —es la política del documento—, así que no
+  // revierte un cobro: simplemente no hay mora que facturar.
+  if (!policyChargesInterest(inv[0].policy_code)) {
+    const formula = noMoraMessage((await creditPolicyMap(sql, companyId)).get(inv[0].policy_code)?.name);
+    if (opts?.requireCharge !== false) throw new Error(formula);
+    return { name: null as string | null, charge: 0, formula };
+  }
   // Primero los días: si no ha vencido no hay mora y no hacen falta ni la TIIE
   // ni la política. Si sí venció, la TIIE tiene que estar en la tabla para esa
   // fecha y la política tiene que decir si cobra comisión y FEGA; sin una de

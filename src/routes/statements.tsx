@@ -7,6 +7,7 @@ import { SearchSelect, asOpts } from "@/components/search-select";
 import { SendButton } from "@/components/send-doc";
 import { getLiveStatement, saveDocument } from "@/lib/erp/ops";
 import { pctRate } from "@/lib/erp/credit";
+import { statementByProduct, statementOutsideDocs } from "@/lib/erp/statement-products";
 import { logoSrc, printHtml, statementSheet } from "@/lib/print-doc";
 import { listPartners } from "@/lib/azagro";
 import { dateDMY, money, moneyIn, todayMx } from "@/lib/utils";
@@ -37,6 +38,10 @@ const EC_HEADERS = [
 
 const EC_HEADERS_USD = [...EC_HEADERS, "Ut. cambiaria"];
 
+function currencyName(cur: string) {
+  return cur === "USD" ? "Dólar americano" : "Peso mexicano";
+}
+
 function productRows(block: Block, hidePaid: boolean) {
   return block.rows.filter((r) => {
     if (r.kind !== "customer") return false;
@@ -64,9 +69,9 @@ function rowCells(r: Row, cur: string, withFx: boolean) {
     moneyIn(r.saldo ?? r.residual, cur),
     r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
     r.vencido ? String(r.daysVencidos ?? r.daysOverdue ?? 0) : "—",
-    r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
-    r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
-    r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
+    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : Math.abs(r.interes) > 0.009 ? moneyIn(r.interes, cur) : "—",
+    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : r.comisionFega > 0.009 ? moneyIn(r.comisionFega, cur) : "—",
+    r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
     r.sinTiieBono ? "sin TIIE" : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—",
   ];
   if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, cur) : "—");
@@ -126,7 +131,7 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       const rows = all.filter((r) => (r.currency || "MXN") === cur);
       const withFx = cur === "USD";
       return {
-        currency: cur === "USD" ? "Dólar americano" : "Peso mexicano",
+        currency: currencyName(cur),
         headers: withFx ? EC_HEADERS_USD : EC_HEADERS,
         rows: rows.map((r) => rowCells(r, cur, withFx)),
         totals: totalsCells(rows, cur, withFx),
@@ -197,7 +202,7 @@ function printConsolidado(list: Block[], asOf: string, legal: string, st: Live |
       { cargo: 0, abono: 0, saldo: 0, interes: 0, comisionFega: 0, totalFinanciero: 0 },
     );
     return {
-      currency: cur === "USD" ? "Dólar americano" : "Peso mexicano",
+      currency: currencyName(cur),
       headers,
       rows,
       totals: [
@@ -504,6 +509,10 @@ function StatementView({
 }) {
   const rows = productRows(viewing, hidePaid);
   const currencies = ["MXN", "USD"].filter((c) => rows.some((r) => (r.currency || "MXN") === c));
+  // El bloque "Por producto" se arma con los MISMOS renglones que la tabla:
+  // un solo criterio de filtrado y, por lo tanto, el mismo total.
+  const blocks = statementByProduct(rows);
+  const outside = statementOutsideDocs(viewing.rows, hidePaid);
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-start overflow-y-auto bg-ink/40 p-4 pt-[6vh]" onClick={onClose}>
@@ -546,7 +555,9 @@ function StatementView({
                 total={viewing.ar}
                 extra={rows
                   .map((r) =>
-                    r.vencido
+                    r.sinMora
+                      ? `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  sin mora (política ${r.politicaNombre || r.politicaCode})`
+                      : r.vencido
                       ? `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  ${r.daysVencidos} d vencidos  int ${moneyIn(r.interes, r.currency)}  C+FEGA ${moneyIn(r.comisionFega, r.currency)}`
                       : `${r.serie || ""} ${r.folio || r.name}  ${dateDMY(r.date)}  plazo ${r.plazo || "—"}  cargo ${moneyIn(r.cargo, r.currency)}  abono ${r.abono ? moneyIn(r.abono, r.currency) : "—"}  saldo ${moneyIn(r.saldo, r.currency)}  vence ${dateDMY(r.due_date)} (faltan ${r.diasPorVencer} d)  sin interés ni comisión ni FEGA${r.bonificacion > 0.009 ? `  pronto pago est. ${moneyIn(r.bonificacion, r.currency)}` : ""}`,
                   )
@@ -588,7 +599,7 @@ function StatementView({
           return (
             <div key={cur} className="mt-4">
               <h3 className="text-[11px] font-semibold uppercase tracking-wide text-forest">
-                Moneda: {cur === "USD" ? "Dólar americano" : "Peso mexicano"}
+                Moneda: {currencyName(cur)}
               </h3>
               <div className="mt-1 overflow-x-auto">
                 <table className="w-full min-w-[1100px] text-left text-[12px]">
@@ -656,17 +667,85 @@ function StatementView({
             </div>
           );
         })}
-        {Object.keys(viewing.byProduct).length > 0 && (
+        {(blocks.length > 0 || outside.length > 0) && (
           <>
-            <h3 className="mt-4 text-sm font-semibold">Por producto</h3>
-            <ul className="mt-2 grid gap-1 text-sm sm:grid-cols-2">
-              {Object.entries(viewing.byProduct).map(([name, amt]) => (
-                <li key={name} className="flex justify-between border-b border-line py-1">
-                  <span>{name}</span>
-                  <span className="tabular-nums">{money(amt)}</span>
-                </li>
-              ))}
-            </ul>
+            <h3 className="mt-5 text-sm font-semibold">Por producto — saldo pendiente</h3>
+            <p className="mt-1 text-[12px] text-muted">
+              El mismo saldo de la tabla de arriba, repartido entre los productos a prorrata del importe de cada partida
+              (no es la venta del periodo). Mismo criterio que arriba:{" "}
+              {hidePaid ? "las pagadas también están ocultas aquí" : "las pagadas también se incluyen aquí"}.
+            </p>
+            {blocks.map((b) => (
+              <div key={b.currency} className="mt-3">
+                <h4 className="text-[11px] font-semibold uppercase tracking-wide text-forest">
+                  Moneda: {currencyName(b.currency)}
+                </h4>
+                <table className="mt-1 w-full text-left text-[13px]">
+                  <tbody>
+                    {b.products.map((p) => (
+                      <tr key={`p-${p.concept}`} className="border-t border-line">
+                        <td className="py-1.5 pr-6">{p.concept}</td>
+                        <td className="w-40 py-1.5 text-right tabular-nums">{moneyIn(p.saldo, b.currency)}</td>
+                      </tr>
+                    ))}
+                    {b.others.length > 0 && (
+                      <Fragment key="otros">
+                        <tr className="border-t border-line">
+                          <td className="py-1.5 pr-6">
+                            Otros cargos <span className="text-muted">(no son mercancía)</span>
+                          </td>
+                          <td className="w-40 py-1.5 text-right tabular-nums">{moneyIn(b.othersTotal, b.currency)}</td>
+                        </tr>
+                        {b.others.map((o) => (
+                          <tr key={`o-${o.concept}`}>
+                            <td className="py-1 pl-5 pr-6 text-[12px] text-muted">
+                              {o.concept}
+                              {o.docs > 1 ? ` · ${o.docs} documentos` : ""}
+                            </td>
+                            <td className="w-40 py-1 text-right text-[12px] text-muted tabular-nums">
+                              {moneyIn(o.saldo, b.currency)}
+                            </td>
+                          </tr>
+                        ))}
+                      </Fragment>
+                    )}
+                    <tr className="border-t border-ink/40">
+                      <td className="py-2 pr-6 font-semibold">
+                        Total en {b.currency === "USD" ? "dólares" : "pesos"}{" "}
+                        <span className="font-normal text-muted">= saldo de la tabla de arriba</span>
+                      </td>
+                      <td className="w-40 py-2 text-right font-semibold tabular-nums">
+                        {moneyIn(b.total, b.currency)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ))}
+            {outside.length > 0 && (
+              <div className="mt-4">
+                <h4 className="text-[11px] font-semibold uppercase tracking-wide text-forest">
+                  Otros cargos facturados aparte
+                </h4>
+                <p className="mt-1 text-[12px] text-muted">
+                  No son mercancía y tampoco están en la tabla de arriba: cada uno es su propio documento, así que no
+                  entran en el total. La mora que todavía no se factura ya sale arriba, en «Interés s/ días».
+                </p>
+                <table className="mt-1 w-full text-left text-[13px]">
+                  <tbody>
+                    {outside.map((d) => (
+                      <tr key={`f-${d.name}`} className="border-t border-line">
+                        <td className="py-1.5 pr-6">
+                          <span className="font-medium">{d.name}</span>
+                          {d.concept && d.concept !== d.name ? <span className="text-muted"> · {d.concept}</span> : null}
+                        </td>
+                        <td className="w-40 py-1.5 text-right tabular-nums">{moneyIn(d.saldo, d.currency)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </>
         )}
       </article>
