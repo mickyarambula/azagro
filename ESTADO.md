@@ -22,6 +22,14 @@ Orden de lectura para quien continúe: `CLAUDE.md` → `DISENO_FINANCIAMIENTO.md
 > desembolsa, y eso es parámetro del circuito (§ 3.d, Decisión 4); el ejemplo
 > de DISENO § 5 se recalculó sin el 1 % y con dos tasas; y se anotó una
 > **pregunta abierta nueva, N1** (¿la protección también se cobra en la mora?).
+> (5) **Cerrado más tarde el mismo día — Decisión 5: N1 se contesta sí, sin
+> excepción** (la mora usa la tasa de cobro, igual que el precio); § 5 y § 6
+> de DISENO quedaron con una sola lectura. (6) **Decisión 6**: en el lineal el
+> 1 % sale de la fórmula sin sustituto — el precio baja $1,118.77 por cada
+> $100,000 de costo, del lado de Santa Rosa, no del margen de Azagro; en
+> doble facturación sigue vigente. (7) Se verificó (no se dio por cierto) que
+> la tasa de mora es hoy un solo número global sin forma de pactarla por
+> cliente — confirmado como **N2**, requisito de la Fase 1, no pregunta.
 > Los cambios están marcados en el texto donde aplican.
 
 Lo que dice cada documento, en una línea:
@@ -124,10 +132,10 @@ directamente (pueden ser iguales); la protección es la diferencia y se
 **calcula**, no se captura. Un solo spread de línea, aplicado a la columna que
 corresponda: costo de la línea = tasa de costo + spread de línea;
 financiamiento en el precio = tasa de cobro + spread de línea; mora al cliente
-= tasa de cobro + spread de mora — **esta última regla está pendiente**: el
-ejemplo de DISENO § 5 calcula la mora a tasa base + spread de mora, y el dueño
-no ha elegido (pregunta abierta **N1**, § 2). **Decidido en documento, no
-construido**; cierra E2 (ver § 2).
+= tasa de cobro + spread de mora — las tres reglas quedaron confirmadas por la
+Decisión 5 del mismo día (§ 2, N1, cerrada), después de que un primer borrador
+del ejemplo de DISENO § 5 calculara la mora a tasa base y abriera esa pregunta
+por un momento. **Decidido en documento, no construido**; cierra E2 (ver § 2).
 
 ### 1.4 La comisión del 1% en el precio
 
@@ -195,11 +203,12 @@ Código: `credit.ts:502` (`saleCapital` × tasa × días) y `reports.ts:165`
 (`saleCapital: sale`), restada entera en `reports.ts:267`; la mora facturada
 entra como ingreso de Azagro al 100% (`reports.ts:267`, `mora`).
 
-**DISENO** (§ 5, cifras corregidas el 5-sep-2026 — ver 1.12): "Costo de la línea
-esos 30 días 971.48 a TIIE + 4%" — que sale de **106,951.87** (lo que Santa
-Rosa desembolsó: costo + margen), no del precio al cliente — y "Utilidad de la
-mora 525.70: Azagro 50%, Santa Rosa 50%. El financiamiento ordinario se queda
-íntegro en Santa Rosa."
+**DISENO** (§ 5, cifras recalculadas dos veces más el 5-sep-2026 — ver 1.12 y
+§ 3.d): "Costo de la línea esos 30 días 971.48" — que sale de **106,951.87**
+(lo que Santa Rosa desembolsó: costo + margen, sin el 1 % que tenía el
+borrador original), no del precio al cliente — y "Utilidad de la mora 524.86:
+Azagro 50%, Santa Rosa 50%. El financiamiento ordinario se queda íntegro en
+Santa Rosa."
 
 **Se disuelve por circuito (revisado 5-sep-2026, punto f) — este sí, sin
 forzarlo.** La fórmula de EXCEL_VS_SISTEMA § 2, que el código de hoy replica
@@ -302,7 +311,10 @@ mezclaba los dos precios.
 sesión): mora **1,497.18** (sobre 112,994.88, el precio real al cliente),
 utilidad de la mora **525.70**, reparto **262.85 / 262.85**. El costo de la
 línea (971.48, sobre 106,951.87 a tasa de costo 4.00%) ya estaba bien y no
-cambió.
+cambió. **Corregido dos veces más el mismo día, después de esta:** al quitar
+el 1 % (Decisión 6) el precio bajó a 111,876.11, y al cerrar N1 (Decisión 5)
+la mora quedó definitivamente en $1,496.34 a tasa de cobro, utilidad $524.86,
+reparto $262.43 / $262.43 — ver § 3.d y el § 5 vigente de DISENO.
 
 ### 1.13 DISENO § 12 "Qué NO cambia: el cálculo de mora"
 
@@ -528,14 +540,20 @@ construir el selector de circuito y que el importador (`cutover.ts:152`) lo
 capture además de la política de cobro.
 
 ### D-A. La comisión del 1% en el precio (DISENO § 13.A)
-**RESUELTA EN DOCUMENTO (Decisión 3 del dueño, 5-sep-2026), no construida.**
-Es la salida 1 del diseño: **la comisión es un parámetro de la línea/circuito**.
-En doble facturación (ASR) se cobra —es un costo real, la línea la cobra, así
-se ha operado siempre—; en el circuito lineal no se cobra (la línea no la
-cobra). Deja de ser una constante global. El código de hoy la cobra siempre y
-la reporta como costo (`pricing.ts:57-77`, `credit.ts:471` "NO QUITAR",
-Ajustes `settings.tsx:340`) — correcto mientras solo exista doble facturación;
-falta condicionarla por circuito cuando se construya el lineal.
+**RESUELTA EN DOCUMENTO (Decisión 3 del dueño, 5-sep-2026; consecuencia
+concreta fijada por la Decisión 6, mismo día), no construida.** Es la salida 1
+del diseño: **la comisión es un parámetro de la línea/circuito**. En doble
+facturación (ASR) se cobra —es un costo real, la línea la cobra, así se ha
+operado siempre—; en el circuito lineal no se cobra: **sale de la fórmula, sin
+sustituto ni compensación automática** (Decisión 6). Si Azagro quiere ese
+margen, lo sube en la operación como cualquier otro margen. Consecuencia con
+el número del § 5 recalculado: el precio al cliente baja **$1,118.77 por cada
+$100,000 de costo** (~1 %), y esa baja sale **del lado de Santa Rosa**, no del
+margen de Azagro (la factura de Azagro a Santa Rosa se queda en $106,951.87).
+Deja de ser una constante global. El código de hoy la cobra siempre y la
+reporta como costo (`pricing.ts:57-77`, `credit.ts:471` "NO QUITAR", Ajustes
+`settings.tsx:340`) — correcto mientras solo exista doble facturación; falta
+condicionarla por circuito cuando se construya el lineal.
 
 ### D-B. ¿A qué tasa se bonifica el pronto pago, de costo o de cobro? (DISENO § 13.B)
 **ABIERTA — reformulada el 5-sep-2026.** Ya no es "real (4.00) vs cálculo
@@ -574,26 +592,71 @@ columna de costo para las tasas ya capturadas.
 (`azagro.ts:1450-1462`, `tiieIssue`) y la utilidad usa esa foto
 (`reports.ts:80`). EXCEL § 2 todavía lo marca "pendiente": está desactualizado.
 
-### N1. ¿La protección de la tasa de cobro también se le cobra al cliente en la mora? (nueva, 5-sep-2026)
-**ABIERTA.** Nace de dos textos del mismo día que dicen cosas distintas. La
-**Decisión 1** (`DECISIONES.md`) dice: "mora al cliente = **tasa de cobro** +
-spread de mora". El ejemplo corregido de **DISENO § 5** la calcula a **tasa
-base** (tasa de costo) + 9 %. Con los números del ejemplo del dueño, sobre el
-precio 112,994.88: a tasa base es 15.90 % y la mora a 30 días son **$1,497.18**;
-a tasa de cobro es 16.05 % y son **$1,511.31**. Sobre el precio recalculado
-sin comisión (111,876.11): $1,482.36 contra $1,496.34; la utilidad de la mora
-510.88 contra 524.86. El código de hoy no distingue: usa una sola tasa de la
-tabla (`ops.ts:1954`, `credit.ts:156`). *Para el dueño: ¿la protección que
-agregas a la tasa de cobro también se le cobra al cliente cuando cae en mora,
-o solo va dentro del financiamiento ordinario?* No se elige aquí; la Decisión
-1 queda marcada pendiente de este punto.
+### N1. ¿La protección de la tasa de cobro también se le cobra al cliente en la mora? — CERRADA el 5-sep-2026 (Decisión 5)
+**RESUELTA EN DOCUMENTO, no construida.** Regla única, sin excepciones: lo que
+mide costo usa la tasa de costo; lo que se le cobra al cliente usa la tasa de
+cobro; la mora es algo que se le cobra al cliente, así que usa la tasa de
+cobro + spread de mora, **sin excepción**. Con los números del ejemplo
+recalculado (precio 111,876.11, tasa de cobro 7.05 % + spread de mora 9 % =
+16.05 %): mora a 30 días **$1,496.34**, costo de la línea $971.48 sobre lo
+desembolsado por Santa Rosa, utilidad de la mora $524.86, reparto
+$262.43 / $262.43. Razón del dueño: controla las dos tasas (si algún día
+quiere mora sin protección, pone las dos iguales), y en mora la exposición al
+movimiento del banco es **mayor**, no menor — no hay motivo para que ahí la
+protección desaparezca. `DISENO_FINANCIAMIENTO.md` § 5 y § 6 actualizados. El
+código de hoy sigue usando una sola tasa de la tabla (`ops.ts:1954`,
+`credit.ts:156`); falta construir la tabla de dos columnas y aplicar esta
+regla.
 
-**ABIERTAS en esta lista: 17** (eran 19; el 5-sep-2026 se cerraron D-A, H8b y
-E2, las tres en documento, ninguna construida, y se abrió N1) — L3a, L3b, L3c,
-L4a (solo la parte de captura; el modelo ya se cerró), L5, L6, L8a, H3, H4a,
-H4b, H4c, H4d, H5, H6, D-B, D-C, N1. (H2 y H7 están decididas en documento;
-D-A, E2 y H8b se movieron a "resuelta en documento" hoy; el resto está en
-código.)
+**ABIERTAS en esta lista: 16** (llegaron a ser 19, luego 17 con N1 abierta;
+el 5-sep-2026 se cerraron D-A, H8b, E2 y, más tarde el mismo día, N1 — las
+cuatro en documento, ninguna construida) — L3a, L3b, L3c, L4a (solo la parte
+de captura; el modelo ya se cerró), L5, L6, L8a, H3, H4a, H4b, H4c, H4d, H5,
+H6, D-B, D-C. (H2 y H7 están decididas en documento; D-A, E2, H8b y N1 se
+movieron a "resuelta en documento" hoy; el resto está en código.)
+
+### N2. La tasa de mora no se puede pactar por cliente hoy — VERIFICADO el 5-sep-2026, requisito confirmado de la Fase 1 (no pregunta abierta)
+Al contestar N1 el dueño dijo que la tasa moratoria "depende del acuerdo con
+el cliente". Se verificó contra el código, sin darlo por hecho:
+
+- **El spread de mora es un solo número global, confirmado.**
+  `company_settings.company_id` es **primary key**
+  (`migrations/0003_erp.sql:40`): una sola fila por empresa, no una por
+  cliente. `collection_spread` vive en esa fila (`migrations/0003_erp.sql:46`)
+  y se lee con `readPolicy(sql, companyId)` (`ops.ts:107`) — la firma no
+  recibe `partnerId`. Cada factura usa `pol.collectionSpread` sin distinguir
+  cliente (`ops.ts:2014`, `:2021`, `:2040`, `:2173`, `:2302`, `:2328`).
+- **Solo existen tres políticas, y no se pueden crear más desde la
+  aplicación, confirmado.** El catálogo completo está escrito a mano:
+  `CREDIT_POLICY_CATALOG` en `src/lib/erp/catalog.ts:31-35` (NONE, GRUPO_SL,
+  ESTANDAR). Se siembra con ese arreglo fijo en `src/lib/azagro.ts:123-129`
+  (`for (const p of CREDIT_POLICY_CATALOG) … on conflict … do update set
+  name`); nunca inserta un código que no esté en el arreglo. La única función
+  que edita una política, `saveCreditPolicy` (`ops.ts:432`), **rechaza un
+  código que no exista**: `ops.ts:444`
+  `if (!before[0]) throw new Error(\`No existe la política de cobro «\${data.code}».\`)`.
+  Solo cambia sus dos interruptores (comisión/FEGA); nunca la tasa. Crear una
+  cuarta política hoy exige tocar código.
+- **No hay ningún camino, hoy, para pactar una tasa de mora distinta por
+  cliente.** Se buscó un campo de spread a nivel pedido/cotización/factura:
+  no existe (`orders.ts`, `sales.$orderId.tsx`, `quotes.tsx` no tienen
+  `collectionSpread` ni equivalente). `credit_policies` sí tiene columnas
+  `spread` y `fega_rate` en su definición (`azagro.ts:97-105`), pero **nadie
+  las lee**: la única consulta que trae una política solo pide `code, name,
+  charge_commission, charge_fega` (`ops.ts:203`). Son columnas muertas, ya
+  señaladas en `HANDOFF.md` § "Qué falta".
+
+**Confirmado, no corregido: la afirmación del dueño era exacta.** No es una
+pregunta que falte contestar — el dueño ya dijo qué necesita ("depende del
+acuerdo con el cliente") y el sistema hoy no lo permite. Queda escrito como
+**requisito confirmado de la Fase 1** de `DISENO_FINANCIAMIENTO.md` § 14
+("Políticas editables. Catálogo, valor por omisión en el cliente, ajuste por
+operación"): esa fase ya prometía un catálogo editable y un ajuste por
+operación; con esta confirmación deja de ser una mejora genérica y pasa a
+tener un caso de uso real y necesario — pactar mora por cliente/operación, no
+solo comisión y FEGA. **El dueño lo confirmó como necesidad real de
+operación, no como mejora opcional.** No se cuenta en las ABIERTAS: no es una
+pregunta, es un alcance ya fijado para cuando se construya la Fase 1.
 
 ---
 
@@ -898,15 +961,20 @@ construir el paso 10 ("espejo").
 
 ## 5. Qué hacer con esto
 
-- Las **17 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
-  punto 4 (de 10; 4.6 y 4.9 se cerraron hoy) se contestan en `DECISIONES.md`
-  conforme el dueño decida, un renglón por decisión, con fecha.
+- Las **16 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
+  punto 4 se contestan en `DECISIONES.md` conforme el dueño decida, un
+  renglón por decisión, con fecha.
 - El 5-sep-2026 el dueño cerró las **cuatro** preguntas que gateaban la Fase
-  2: **D-A** (comisión, parámetro del circuito), **E2** (colchón, tabla de dos
-  columnas), **H8b / 4.6** (saldos del corte, circuito de doble facturación) y
-  **4.9** (base del financiamiento, parámetro del circuito — verificada en
-  § 3.d) — las cuatro decididas en documento, ninguna construida todavía. Lo
-  que se abrió en su lugar es **N1** (si la protección se cobra también en la
-  mora), que no gatea la Fase 2 pero sí la Fase 3 (es la fórmula de la mora
-  que Santa Rosa cobraría).
+  2 (**D-A**, **E2**, **H8b / 4.6**, **4.9**) y, más tarde el mismo día, **N1**
+  (la que gateaba la Fase 3: si la protección se cobra también en la mora) —
+  las cinco decididas en documento, ninguna construida todavía.
+- El mismo día se verificó y confirmó **N2**: la tasa de mora no se puede
+  pactar por cliente hoy (spread global, tres políticas fijas en código, sin
+  camino para una cuarta ni para una tasa propia). No es una pregunta — es un
+  requisito ya fijado para la Fase 1, confirmado como necesidad real de
+  operación por el dueño.
+- Nada de lo verificado hoy encontró una razón para **no empezar a construir**
+  la Fase 0 del § 14 del diseño: las cuatro preguntas que la Fase 2 necesitaba
+  cerradas ya están cerradas en documento, y N2 solo agrega alcance a una fase
+  (la 1) que ya estaba planeada, no bloquea nada.
 - Este archivo se actualiza cada vez que una pregunta cambie de columna.

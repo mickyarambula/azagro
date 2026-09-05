@@ -155,28 +155,25 @@ Decisión 4).
 
 ### Si el cliente se atrasa 30 días
 
-> **Corregido el 5-sep-2026 dos veces.** (1) Error aritmético del borrador: la
-> mora estaba calculada sobre 112,927.36 (precio a la tasa de costo), no sobre
-> el precio real al cliente; quedó en 1,497.18 sobre 112,994.88. (2) Al
-> recalcular el precio sin comisión (arriba), la mora se vuelve a calcular
-> sobre el precio nuevo, **111,876.11**. Y queda a la vista una cosa que los
-> documentos hoy dicen de dos formas: la Decisión 1 dice "mora al cliente =
-> **tasa de cobro** + spread de mora" (7.05 + 9 = **16.05 %**); este ejemplo
-> la venía calculando a **tasa base** + 9 % (6.90 + 9 = **15.90 %**). **Es la
-> pregunta abierta N1 de `ESTADO.md`; no está contestada y aquí no se elige.**
-> Se muestran las dos.
+> **Corregido tres veces el 5-sep-2026.** (1) Error aritmético del borrador:
+> la mora estaba calculada sobre 112,927.36 (precio a la tasa de costo), no
+> sobre el precio real al cliente. (2) Al recalcular el precio sin comisión
+> (arriba), la mora se recalculó sobre el precio nuevo, 111,876.11. (3)
+> **Decisión 5 del dueño, cierra N1: la mora usa la tasa de cobro, sin
+> excepción — regla única: lo que mide costo usa la tasa de costo, lo que se
+> le cobra al cliente usa la tasa de cobro, y la mora es algo que se le cobra
+> al cliente.** Queda una sola lectura.
 
 ```
-Mora que cobra Santa Rosa (30 d, sobre 111,876.11):
-    a tasa base 6.90 % + 9 % = 15.90 %       1,482.36    ~~1,497.18~~ (era sobre 112,994.88)
-    a tasa de cobro 7.05 % + 9 % = 16.05 %   1,496.34    ← si la protección también se cobra en la mora (N1)
-Costo de la línea esos 30 días               971.48    a tasa de costo 6.90 % + 4.00 %, sobre 106,951.87 (sin cambio)
-Utilidad de la mora
-    a 15.90 %                                510.88    ~~525.70~~   → Azagro 255.44 · Santa Rosa 255.44
-    a 16.05 %                                524.86               → Azagro 262.43 · Santa Rosa 262.43
+Mora que cobra Santa Rosa (30 d, sobre 111,876.11, a tasa de cobro 7.05 % + spread de mora 9 % = 16.05 %):
+                                            1,496.34
+Costo de la línea esos 30 días               971.48    a tasa de costo 6.90 % + spread de línea 4.00 % = 10.90 %, sobre 106,951.87 (lo desembolsado por Santa Rosa)
+Utilidad de la mora                          524.86
+    Azagro          50%                      262.43
+    Santa Rosa      50%                      262.43
 ```
 
-El financiamiento ordinario (los 6,043.00 del plazo pactado) se queda íntegro en
+El financiamiento ordinario (los 4,924.24 del plazo pactado) se queda íntegro en
 Santa Rosa. Solo la utilidad de la mora se reparte.
 
 ---
@@ -196,9 +193,13 @@ Santa Rosa. Solo la utilidad de la mora se reparte.
 >
 > - Costo de la línea = **tasa de costo** + spread de línea.
 > - Financiamiento que entra al precio = **tasa de cobro** + spread de línea.
-> - Mora al cliente = **tasa de cobro** + spread de mora. **← Pendiente:**
->   el ejemplo del § 5 la calcula a tasa base + spread de mora; son dos reglas
->   distintas y el dueño no ha elegido (pregunta abierta N1 de `ESTADO.md`).
+> - Mora al cliente = **tasa de cobro** + spread de mora. **Decisión 5 del
+>   dueño (5-sep-2026), cierra N1**: regla única, sin excepciones — lo que
+>   mide costo usa la tasa de costo, lo que se le cobra al cliente usa la
+>   tasa de cobro, y la mora es algo que se le cobra al cliente. Razón: el
+>   dueño controla las dos tasas (si algún día quiere mora sin protección,
+>   pone las dos iguales), y en mora la exposición al movimiento del banco es
+>   **mayor**, no menor. El § 5 ya quedó con una sola lectura.
 >
 > El reporte de utilidad debe poder mostrar el costo real y la protección por
 > separado; el sistema debe poder mostrar qué tasa de mora está recibiendo el
@@ -341,17 +342,22 @@ reescribe lo que ya funciona.
 
 ## 13. Decisiones abiertas
 
-**A. La comisión del 1% en el precio.** La línea que se usa normalmente no cobra
-comisiones, pero el sistema mete 1% en cada precio, herencia del circuito viejo con
-ASR. Son unos $1,069 por operación cobrados por un costo que no existe.
+**A. La comisión del 1% en el precio — CERRADA el 5-sep-2026 (Decisión 6).** La
+línea que se usa normalmente no cobra comisiones, pero el sistema mete 1% en
+cada precio, herencia del circuito viejo con ASR. Son unos $1,069 por
+operación cobrados por un costo que no existe.
 
-No está mal cobrarlo, pero hoy aparece como costo y no lo es. Si se deja, es margen
-y debe reportarse como margen. Tres salidas:
-
-1. La comisión es un parámetro de la línea. Si la línea la cobra, es costo; si no, no
-   se cobra.
-2. Se deja el 1% siempre, pero el reporte lo muestra como margen, no como costo.
-3. Se quita del precio.
+**Salida elegida: la 1 — es parámetro del circuito.** En el circuito lineal el
+1 % **sale de la fórmula** del precio a crédito; no se sustituye por nada ni
+se compensa automáticamente. Si Azagro quiere ese margen extra, lo sube en la
+operación como cualquier otro margen, con la bitácora que ya existe (no hay un
+"margen escondido" nuevo). Con el número del § 5: el precio al cliente baja
+**$1,118.77 por cada $100,000 de costo** (~1 %), y esa baja sale **del lado de
+Santa Rosa, no del margen de Azagro** — la factura de Azagro a Santa Rosa
+sigue siendo $106,951.87, sin cambio. **En el circuito de doble facturación el
+1 % sigue vigente**, por la razón fiscal ya documentada (§ 1, § 3): es
+parámetro de ESE circuito, no constante global. Decidido en documento, no
+construido.
 
 **B. La bonificación por pronto pago, ¿a qué tasa?** Se calcula a tasa de costo. Con
 dos tasas ahora hay que elegir: a la real (4.00%) conserva el colchón; a la de
@@ -380,6 +386,16 @@ todo lo demás de este documento.
 **Fase 1 — Políticas editables.**
 Catálogo, valor por omisión en el cliente, ajuste por operación, congelamiento al
 confirmar. Solo administrador puede ajustar por operación.
+
+> **Confirmado el 5-sep-2026 (`ESTADO.md` N2, `DECISIONES.md`): esto no es
+> una mejora genérica, es una necesidad real de operación.** El dueño dijo que
+> la tasa moratoria "depende del acuerdo con el cliente"; verificado contra el
+> código, hoy es imposible: el spread de mora es un solo número por empresa
+> (`company_settings`, una fila, `migrations/0003_erp.sql:40`) y solo existen
+> tres políticas escritas a mano en `catalog.ts:31-35`, sin forma de crear una
+> cuarta ni de darle una tasa propia desde la aplicación. El "catálogo,
+> valor por omisión en el cliente, ajuste por operación" de esta fase tiene
+> que cubrir explícitamente la tasa de mora, no solo comisión y FEGA.**
 
 **Fase 2 — Líneas y disposiciones.**
 Catálogo de líneas, registro de disposiciones, costo real por operación, separación
