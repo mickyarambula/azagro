@@ -2,7 +2,7 @@
 
 ERP operativo de **AZ Insumos Agrícolas (Azagro)**, Los Mochis. Reemplaza Compaq + Excel de cartera (Grupo SL / A. Premier / SL Agrícola), no el timbrado SAT.
 
-Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No preguntes de más: si el usuario dice “adelante”, implementa.
+Lee `HANDOFF.md` entero antes de tocar código. **Antes de tocar cualquier cosa de financiamiento, precio, cartera, mora o el circuito con Santa Rosa, lee además, en este orden: `DISENO_FINANCIAMIENTO.md` (el circuito vigente: lineal, Santa Rosa financia y factura al cliente; el de doble facturación está abandonado), `ESTADO.md` (contradicciones entre documentos, preguntas ABIERTAS clasificadas contra el código, comprobaciones numéricas) y `DECISIONES.md` (un renglón por decisión, con fecha).** Una pregunta ABIERTA en `ESTADO.md` no se contesta en código: se le pregunta al dueño y la respuesta se escribe en `DECISIONES.md` el mismo día. Producto en **español**. No preguntes de más: si el usuario dice “adelante”, implementa.
 
 ## Stack
 
@@ -14,7 +14,7 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 
 ## No romper
 
-1. **Crédito Azagro** (`src/lib/erp/credit.ts`, `rules.ts`): días calendario exactos; interés **días/360**; TIIE + spread 9%; comisión 1% + FEGA 2.04% = 3.04% una vez. **Nada de eso nace antes del vencimiento**: con días vencidos ≤ 0 no hay interés, ni comisión, ni FEGA (nunca un interés negativo "a favor"). Lo que se le regresa al cliente por pagar antes es la bonificación de pronto pago, **a tasa de costo** (TIIE de la emisión + spread ASR), sujeta al umbral de Ajustes, y en el estado de cuenta va en su propia columna, etiquetada como estimación mientras el documento siga abierto. Comisión y FEGA se cobran solo si la política de cobro del documento lo dice (dos interruptores por política). La política **«Sin mora» (NONE) apaga el interés** del documento —y con él la comisión, el FEGA y la bonificación de pronto pago—; un documento *sin política capturada* no es "sin mora": se marca y se detiene. Los saldos del corte Compaq entran con la política que se elija en `/importar`, nunca por omisión de la columna. El estado de cuenta es el Excel de trabajo, **no** el export crudo de Compaq: el bloque "Por producto" muestra **saldo**, con el mismo filtro y el mismo total que la tabla de arriba.
+1. **Crédito Azagro** (`src/lib/erp/credit.ts`, `rules.ts`): días calendario exactos; interés **días/360**; TIIE + spread 9%; comisión 1% + FEGA 2.04% = 3.04% una vez. **Nada de eso nace antes del vencimiento**: con días vencidos ≤ 0 no hay interés, ni comisión, ni FEGA (nunca un interés negativo "a favor"). Lo que se le regresa al cliente por pagar antes es la bonificación de pronto pago, **a tasa de costo** (TIIE de la emisión + spread ASR), sujeta al umbral de Ajustes, y en el estado de cuenta va en su propia columna, etiquetada como estimación mientras el documento siga abierto. Comisión y FEGA se cobran solo si la política de cobro del documento lo dice (dos interruptores por política). La comisión ASR 1 % y el spread ASR 4 % que van dentro del precio vienen del circuito viejo (abandonado el 5-sep-2026); siguen ahí **hasta que el dueño decida** la pregunta D-A de `ESTADO.md` — no quitarlos ni cambiarlos por cuenta propia. La política **«Sin mora» (NONE) apaga el interés** del documento —y con él la comisión, el FEGA y la bonificación de pronto pago—; un documento *sin política capturada* no es "sin mora": se marca y se detiene. Los saldos del corte Compaq entran con la política que se elija en `/importar`, nunca por omisión de la columna. El estado de cuenta es el Excel de trabajo, **no** el export crudo de Compaq: el bloque "Por producto" muestra **saldo**, con el mismo filtro y el mismo total que la tabla de arriba.
 2. **Kardex es la verdad** (`src/lib/erp/stock.ts`): `stock_moves` inmutable; `stock_quants` proyección; promedio móvil. Nunca una columna suelta de “existencia”.
 3. **Compaq sigue timbrando.** No inventar PAC/CFDI ahora.
 4. **No importar facturas ya liquidadas** ni P&L histórico. Solo saldos abiertos + existencias de corte (`src/lib/erp/cutover.ts`), clave única `cutover_key`.
@@ -47,6 +47,9 @@ Lee `HANDOFF.md` entero antes de tocar código. Producto en **español**. No pre
 | **Todo el texto que sale de la empresa** (notas de papeles, expediente filtrado, mensajes, explicación de la FI) | `src/lib/erp/doc-text.ts`; plantillas en `src/lib/print-doc.ts` |
 | Bloque "Por producto" del estado de cuenta (saldo, no venta) | `src/lib/erp/statement-products.ts`, `/statements` |
 | Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
+| **Circuito de financiamiento vigente** (lineal con Santa Rosa; fases de construcción) | `DISENO_FINANCIAMIENTO.md` |
+| **Contradicciones entre documentos, preguntas ABIERTAS, comprobaciones numéricas** | `ESTADO.md` |
+| **Decisiones tomadas, una por renglón, con fecha** (se escribe el mismo día) | `DECISIONES.md` |
 | Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |
 | Barrido: ningún número de negocio en código | `scripts/erp-sin-numeros.test.mjs` |
 | Margen sobre precio + escalera (casos del dueño) | `scripts/erp-escalera.test.mjs` |

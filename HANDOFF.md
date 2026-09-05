@@ -4,6 +4,17 @@ Documento para quien continúa (Claude Code, Claude.ai, u otro). El ERP se
 construyó primero en Grok Build; desde finales de agosto vive en este repo de
 GitHub y todo el trabajo posterior se hizo aquí, con Claude Code.
 
+> **Nota del 5 de septiembre de 2026.** El circuito de financiamiento que este
+> documento describe más abajo (doble facturación con la empresa hermana, § "El
+> circuito con la empresa hermana (ASR)") **quedó abandonado**. El vigente es el
+> circuito **lineal** de `DISENO_FINANCIAMIENTO.md` (Azagro factura a Santa Rosa
+> con su margen; Santa Rosa agrega el financiamiento y factura al cliente). Las
+> contradicciones entre documentos, las preguntas abiertas y tres
+> comprobaciones numéricas están en `ESTADO.md`; cada decisión tomada, con
+> fecha, en `DECISIONES.md`. Orden de lectura: `CLAUDE.md` →
+> `DISENO_FINANCIAMIENTO.md` → `ESTADO.md` → `DECISIONES.md` → este archivo.
+> La explicación del circuito viejo se conserva abajo como historia.
+
 ## Qué es
 
 Azagro vende agroquímicos/fertilizantes a productores (crédito agrícola
@@ -514,6 +525,23 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
       tasa de costo, Ajustes, bitácora, kardex, umbral, migración, tabla,
       Excel, política, "toca", "haz clic", "pantalla".
 
+22. **Sesión de alineación** (5-sep-2026, solo documentos, sin tocar código).
+    Se subió `DISENO_FINANCIAMIENTO.md` (circuito lineal con Santa Rosa) y
+    este documento todavía describía el circuito viejo. Se escribieron
+    `ESTADO.md` — 13 contradicciones entre documentos con cita y veredicto,
+    las preguntas abiertas en una sola lista (8 de LOGICA, las de "Qué falta",
+    las decisiones A/B/C del diseño y 3 de EXCEL_VS_SISTEMA) clasificadas
+    contra el código, tres comprobaciones numéricas (el motor de precios es
+    igual al diseño solo con margen en %; con margen en $ fijo diverge margen
+    × k; el colchón +0.30 de la TIIE no está escrito en ningún lado y se
+    encimaría con el +0.15 del diseño; qué archivos cambian por la Capa 2 y el
+    reparto de mora) y lo que el diseño no contesta (flete, comisión + FEGA de
+    la mora, dólares, límite de crédito, quién absorbe el pronto pago, saldos
+    del corte, estado de cuenta con Santa Rosa como tercera audiencia, quién
+    emite la FI, margen en $ fijo, la instrucción de facturación) — y
+    `DECISIONES.md`, un renglón por decisión con fecha, sembrado con todo lo
+    confirmado hasta hoy. **19 preguntas ABIERTAS** en ESTADO § 2 y 10 en § 4.
+
 Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 360 hoy,
 incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
@@ -551,7 +579,16 @@ incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
   pronto pago (120). Cambiarlos exige ser administrador y queda en bitácora
   con el valor anterior y el nuevo.
 
-## El circuito con la empresa hermana (ASR)
+## El circuito con la empresa hermana (ASR) — HISTÓRICO, abandonado el 5-sep-2026
+
+> **Estado:** este esquema de **doble facturación** se abandonó el 5 de
+> septiembre de 2026 **porque inflaba los ingresos de Azagro y pegaba
+> fiscalmente** (`DISENO_FINANCIAMIENTO.md` § 1). El circuito vigente es
+> lineal: Azagro factura a Santa Rosa con su margen; Santa Rosa agrega el
+> financiamiento y factura al cliente. Lo que sigue se conserva tal cual porque
+> explica de dónde salieron dos números que **siguen en el precio** hasta que el
+> dueño decida qué hacer con ellos: la comisión ASR 1 % y el spread ASR 4 %
+> (`ESTADO.md` § 1.4 y § 2 D-A). No construir nada de este esquema.
 
 Azagro no financia solo: cuando vende a crédito, el capital de esa operación
 lo pone una empresa hermana (ASR / Santa Rosa), a través de un circuito de
@@ -564,10 +601,10 @@ Para el sistema, hoy ese circuito se resume matemáticamente en dos números:
 costo financiero que se le cobra al cliente dentro del precio (ver arriba).
 
 **No se construyó el circuito documental** (las facturas de ida y vuelta
-entre Azagro y la hermana, con sus propias cuentas por cobrar/pagar). El
-dueño está por cambiar ese esquema, así que no tenía caso construir algo que
-va a cambiar pronto. Si se decide mantenerlo, es el siguiente candidato
-natural de trabajo grande.
+entre Azagro y la hermana, con sus propias cuentas por cobrar/pagar), y **ya no
+se construirá**: el esquema cambió el 5-sep-2026 (ver la nota de arriba). Lo
+que sí se construye es el circuito lineal de `DISENO_FINANCIAMIENTO.md`, en el
+orden de su § 14.
 
 ## Qué falta
 
@@ -727,16 +764,20 @@ reiniciar — eso no es la empresa real.
 - Duplicar cartera histórica.
 - Tocar el kardex o las fórmulas de cartera/precio sin que el dueño lo pida
   explícitamente — son las piezas más auditadas y más caras de romper.
-- Construir el circuito documental con la empresa hermana (ASR) sin
-  confirmar antes con el dueño: está por cambiar ese esquema.
+- Construir el circuito ASR de **doble facturación**: está abandonado
+  (5-sep-2026). El circuito vigente es el lineal de `DISENO_FINANCIAMIENTO.md`;
+  antes de tocar financiamiento, precio o cartera, leer también `ESTADO.md`
+  (preguntas abiertas) y `DECISIONES.md`. Toda decisión nueva se escribe en
+  `DECISIONES.md` el mismo día.
 - Preguntar puertos/paths al usuario: él no tiene terminal; si estás en
   Claude Code, sí tienes repo.
 
 ## Cómo dárselo a Claude
 
 1. **Claude Code (recomendado):** `claude` en el clone de este repo. Lee
-   `CLAUDE.md` primero; si vas a tocar cartera, permisos o kardex, lee
-   también el documento de auditoría correspondiente de la lista de arriba.
+   `CLAUDE.md` primero; luego `DISENO_FINANCIAMIENTO.md`, `ESTADO.md` y
+   `DECISIONES.md`; si vas a tocar cartera, permisos o kardex, lee también el
+   documento de auditoría correspondiente de la lista de arriba.
 2. **claude.ai proyecto:** pega `CLAUDE.md` + `HANDOFF.md` en las
    instrucciones del proyecto y sube el zip del repo (sin `node_modules`).
 3. **Chat suelto:** primer mensaje = contenido de `HANDOFF.md` + "el código
