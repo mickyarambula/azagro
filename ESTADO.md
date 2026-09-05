@@ -17,7 +17,12 @@ Orden de lectura para quien continúe: `CLAUDE.md` → `DISENO_FINANCIAMIENTO.md
 > un circuito elegible, fuera de uso por ahora; el lineal es el nuevo
 > predeterminado, no el reemplazo. Esto corrige el veredicto de § 1.1 de esta
 > misma versión anterior (decía "Vigente: DISENO, el viejo se abandona") y
-> cierra D-A y H8b. Los cambios están marcados en el texto donde aplican.
+> cierra D-A y H8b. (4) Más tarde el mismo día: se verificó la hipótesis del
+> dueño sobre 4.9 — la base del financiamiento es lo que el financiador
+> desembolsa, y eso es parámetro del circuito (§ 3.d, Decisión 4); el ejemplo
+> de DISENO § 5 se recalculó sin el 1 % y con dos tasas; y se anotó una
+> **pregunta abierta nueva, N1** (¿la protección también se cobra en la mora?).
+> Los cambios están marcados en el texto donde aplican.
 
 Lo que dice cada documento, en una línea:
 
@@ -119,8 +124,10 @@ directamente (pueden ser iguales); la protección es la diferencia y se
 **calcula**, no se captura. Un solo spread de línea, aplicado a la columna que
 corresponda: costo de la línea = tasa de costo + spread de línea;
 financiamiento en el precio = tasa de cobro + spread de línea; mora al cliente
-= tasa de cobro + spread de mora. **Decidido en documento, no construido**;
-cierra E2 (ver § 2).
+= tasa de cobro + spread de mora — **esta última regla está pendiente**: el
+ejemplo de DISENO § 5 calcula la mora a tasa base + spread de mora, y el dueño
+no ha elegido (pregunta abierta **N1**, § 2). **Decidido en documento, no
+construido**; cierra E2 (ver § 2).
 
 ### 1.4 La comisión del 1% en el precio
 
@@ -168,6 +175,16 @@ ese circuito) cobraría de menos. Sigue abierta la pregunta 4.9. El motor de
 hoy también congela el margen y el financiamiento en la partida
 (`quote_lines.margin_*`, `finance_unit`), así que "igual" no es solo
 aritmética: es qué número se guarda.
+
+**Verificado más tarde el mismo día (§ 3.d) — sí se disuelve por circuito,
+con una condición.** La base del financiamiento es lo que el financiador
+desembolsa, y eso cambia por circuito: en doble facturación ASR desembolsa
+costo + 1 % (el margen nunca pasa por ASR, Azagro factura al cliente directo)
+— exactamente lo que el código y el Excel hacen hoy; en el lineal Santa Rosa
+desembolsa costo + margen. Los dos documentos tenían razón, cada uno en su
+circuito. La condición: DISENO afirmaba que "el motor no cambia", y eso **no**
+es cierto para el lineal — ahí el motor tiene que financiar costo + margen en
+los dos modos de margen (Decisión 4). La 4.9 quedó reformulada así.
 
 ### 1.6 Capa 2: sobre qué corre y de quién es la mora
 
@@ -318,13 +335,15 @@ sus propios parámetros. **Se disuelven, sin forzarlas:**
 
 **No se disuelve, y se reporta tal cual — punto f pide no forzar:**
 
-- **1.5** (sobre qué base se calcula el financiamiento): la fórmula sí puede
-  leerse "una por circuito" en el fondo, pero eso no resuelve el problema real:
-  **dentro del circuito lineal**, con margen en monto fijo, la fórmula de hoy
-  (que seguiría siendo la base del cálculo) da un precio distinto al que el
-  diseño exige. Es una discrepancia técnica real que sigue pendiente de
-  decisión (4.9), no una contradicción entre documentos que un circuito
-  distinto explique.
+- **1.5** (sobre qué base se calcula el financiamiento): en la primera
+  revisión se dejó como "no se disuelve". Más tarde el mismo día el dueño
+  planteó la hipótesis correcta y se verificó (§ 3.d): la base es lo que el
+  financiador desembolsa — costo + 1 % en doble facturación (código y Excel de
+  hoy), costo + margen en el lineal — y por lo tanto **sí es parámetro del
+  circuito**, igual que el 1 %. Lo que sigue siendo real no es una
+  contradicción entre documentos sino un requisito de construcción del
+  circuito lineal: el motor tiene que financiar costo + margen ahí, en los dos
+  modos de margen (Decisión 4; 4.9 reformulada).
 - **1.3** (una tasa vs dos): no se disolvió por circuito — la resolvió
   directamente la Decisión 1 del dueño (tabla de dos columnas), independiente
   de cuál circuito se use.
@@ -555,11 +574,26 @@ columna de costo para las tasas ya capturadas.
 (`azagro.ts:1450-1462`, `tiieIssue`) y la utilidad usa esa foto
 (`reports.ts:80`). EXCEL § 2 todavía lo marca "pendiente": está desactualizado.
 
-**ABIERTAS en esta lista: 16** (eran 19; el 5-sep-2026 se cerraron D-A, H8b y
-E2, las tres en documento, ninguna construida) — L3a, L3b, L3c, L4a
-(solo la parte de captura; el modelo ya se cerró), L5, L6, L8a, H3, H4a, H4b,
-H4c, H4d, H5, H6, D-B, D-C. (H2 y H7 están decididas en documento; D-A, E2 y
-H8b se movieron a "resuelta en documento" hoy; el resto está en código.)
+### N1. ¿La protección de la tasa de cobro también se le cobra al cliente en la mora? (nueva, 5-sep-2026)
+**ABIERTA.** Nace de dos textos del mismo día que dicen cosas distintas. La
+**Decisión 1** (`DECISIONES.md`) dice: "mora al cliente = **tasa de cobro** +
+spread de mora". El ejemplo corregido de **DISENO § 5** la calcula a **tasa
+base** (tasa de costo) + 9 %. Con los números del ejemplo del dueño, sobre el
+precio 112,994.88: a tasa base es 15.90 % y la mora a 30 días son **$1,497.18**;
+a tasa de cobro es 16.05 % y son **$1,511.31**. Sobre el precio recalculado
+sin comisión (111,876.11): $1,482.36 contra $1,496.34; la utilidad de la mora
+510.88 contra 524.86. El código de hoy no distingue: usa una sola tasa de la
+tabla (`ops.ts:1954`, `credit.ts:156`). *Para el dueño: ¿la protección que
+agregas a la tasa de cobro también se le cobra al cliente cuando cae en mora,
+o solo va dentro del financiamiento ordinario?* No se elige aquí; la Decisión
+1 queda marcada pendiente de este punto.
+
+**ABIERTAS en esta lista: 17** (eran 19; el 5-sep-2026 se cerraron D-A, H8b y
+E2, las tres en documento, ninguna construida, y se abrió N1) — L3a, L3b, L3c,
+L4a (solo la parte de captura; el modelo ya se cerró), L5, L6, L8a, H3, H4a,
+H4b, H4c, H4d, H5, H6, D-B, D-C, N1. (H2 y H7 están decididas en documento;
+D-A, E2 y H8b se movieron a "resuelta en documento" hoy; el resto está en
+código.)
 
 ---
 
@@ -691,6 +725,72 @@ texto en Ajustes junto a la tabla que diga qué número se captura.
    de mora que le toca a Azagro: es la Fase 2/3 del diseño (líneas,
    disposiciones, reparto).
 
+### 3.d Verificación de la hipótesis del dueño sobre 4.9 (5-sep-2026, tarde): la base del financiamiento es lo que el financiador desembolsa
+
+**Hipótesis:** el financiamiento corre sobre lo que el financiador realmente
+desembolsa, y eso cambia por circuito. En doble facturación, ASR compra a
+costo + 1 % y desembolsa eso; el margen nunca pasa por ASR porque Azagro
+factura al cliente directo. En el lineal, Santa Rosa compra a costo + margen y
+desembolsa eso.
+
+**Sobre qué base corre hoy el financiamiento en el código:**
+
+- `src/lib/erp/pricing.ts:57` `landedUnit = cost + freight + other` (costo
+  puesto, con el flete adentro por la decisión del 3-sep);
+  `pricing.ts:61` `supplierCost: landedUnit` — esa es la base que se le pasa
+  al motor; `pricing.ts:70` `financeUnit = fin.commission + fin.layer1`;
+  `pricing.ts:77` `priceUnit = landedUnit + financeUnit + marginUnit`. **El
+  margen se suma después: no está en la base.**
+- `src/lib/erp/credit.ts:499` `commission = cost × comisión` (el 1 %);
+  `credit.ts:501` `layer1 = cost × (1 + comisión) × tasa × días / 360`, con el
+  comentario de `:500` "Base de la Capa 1 = costo + comisión (columna AN del
+  Excel: AL × 1.01)". **La base de hoy es costo puesto + 1 % = exactamente lo
+  que ASR desembolsa en doble facturación.**
+- Con margen en %, `margins.ts:131-132` aplica el % sobre `landed + finance`,
+  lo que hace que el precio final coincida con el del lineal (3.a) — pero por
+  la fórmula, no porque el margen esté en la base del financiamiento.
+
+**Qué base usa el Excel real (fuente autoritativa, documentada en
+`EXCEL_VS_SISTEMA.md` § 2 y en `credit.ts:471-476`):** hoja
+`DIF_TC_SL_AGRICOLA`, columna `AN = AL × (1 + 0.01) × W / 360 × 150`, con
+**AL = costo de proveedor MXN** y W = TIIE de emisión + 4 %; la comisión 1 %
+va aparte sobre el mismo AL. Es decir: **costo de proveedor + 1 %**, sin
+margen. `HANDOFF.md` § "circuito ASR" (líneas 610-611) lo describe igual:
+"Azagro le factura a la hermana (costo + 1 % de comisión), la hermana adelanta
+el dinero". El Excel es el del circuito de doble facturación; para el lineal
+no hay Excel (no ha operado): la única fuente de su base es DISENO § 5 ("sobre
+el precio con margen, los 106,951.87 […] lo que Santa Rosa desembolsó").
+Matiz que no cambia la conclusión: el Excel usa costo de proveedor, el código
+usa costo puesto (con flete) por decisión del 3-sep; si el flete va en la
+factura a Santa Rosa sigue siendo la pregunta 4.1.
+
+**Veredicto: la hipótesis SE SOSTIENE.** En los dos circuitos la base es lo que
+el financiador desembolsa; el código de hoy implementa la de doble facturación
+(costo + 1 %) y coincide con el Excel; la del lineal (costo + margen) solo
+existe en DISENO. **La 4.9 se reformula: la base del financiamiento es
+parámetro del circuito, igual que el 1 %** — doble facturación: costo puesto +
+comisión; lineal: costo puesto + margen. Anotado como Decisión 4 en
+`DECISIONES.md`.
+
+**Dentro del circuito lineal, el margen en monto fijo cobra de menos:
+CONFIRMADO**, y con un hallazgo más. Con el ejemplo recalculado (costo
+100,000, margen 6,951.87, tasa de cobro 7.05 % + spread de línea 4.00 %, 150
+días → k = 4.6042 %):
+
+| Modo de margen | Motor de hoy (financia solo el costo) | Lineal (financia costo + margen) | Diferencia |
+|---|---|---|---|
+| **$ fijo** 6,951.87 | 100,000 + 4,604.17 + 6,951.87 = **111,556.04** | (100,000 + 6,951.87) × 1.046042 = **111,876.11** | **320.08 de menos** (= margen × k) |
+| **%** 6.5 | (100,000 + 4,604.17) ÷ 0.935 = **111,876.11** | **111,876.11** | 0.00 en el precio… |
+| … pero la partición con % | margen 7,271.95 · financiamiento 4,604.17 | margen 6,951.87 · financiamiento 4,924.24 | **320.08 mal atribuidos** |
+
+Con margen en % el cliente paga lo mismo, pero el motor le atribuye a Azagro
+como margen 320.08 que en el lineal son financiamiento de Santa Rosa. Eso no
+es cosmético: en el lineal la partición **es un documento** (la factura de
+Azagro a Santa Rosa, 106,951.87 = costo + margen) y la utilidad de cada
+empresa. Así que para el lineal el motor tiene que cambiar en los dos modos:
+la base pasa a costo + margen, y el margen % deja de calcularse sobre
+(costo + financiamiento). En doble facturación no se toca nada.
+
 ---
 
 ## 4. Lo que el documento nuevo no contesta (y va a hacer falta al construir)
@@ -775,10 +875,18 @@ si el botón "Mora" desaparece en el circuito Santa Rosa. *Para el dueño: la
 factura de intereses al cliente, ¿la hace Santa Rosa en su sistema y nosotros
 solo anotamos lo que nos toca?*
 
-### 4.9 El margen en monto fijo (sale de la comprobación 3.a)
-Con margen en $ fijo el motor de hoy da un precio menor al del diseño. *Para
-el dueño: ¿se sigue permitiendo capturar margen en pesos por unidad en el
-circuito Santa Rosa? Si sí, el precio tiene que financiar también el margen.*
+### 4.9 La base del financiamiento — REFORMULADA y RESUELTA EN DOCUMENTO el 5-sep-2026 (Decisión 4)
+Era: "con margen en $ fijo el motor de hoy da un precio menor al del diseño;
+¿se sigue permitiendo el margen en pesos en el circuito Santa Rosa?". Con la
+hipótesis del dueño verificada (§ 3.d) la pregunta cambia de forma: **la base
+del financiamiento es parámetro del circuito, igual que el 1 %** — doble
+facturación: costo puesto + comisión (lo que ASR desembolsa; es lo que el
+código y el Excel hacen hoy); lineal: costo puesto + margen (lo que Santa Rosa
+desembolsa). El margen en pesos se sigue permitiendo en los dos circuitos; lo
+que cambia es que en el lineal el motor tiene que financiar también el margen,
+en los dos modos (con % hoy coincide el precio pero no la partición; con $
+fijo cobra 320.08 de menos en el ejemplo). **Decidido en documento, no
+construido**: es parte de la Fase 3 del diseño.
 
 ### 4.10 La "instrucción de facturación" (§ 4, paso 8)
 El diseño la nombra y no dice qué lleva: ¿precio final por partida, plazo,
@@ -790,14 +898,15 @@ construir el paso 10 ("espejo").
 
 ## 5. Qué hacer con esto
 
-- Las **16 ABIERTAS** del punto 2 y las **9 preguntas sin contestar** del
-  punto 4 (de 10; 4.6 se cerró hoy) se contestan en `DECISIONES.md` conforme
-  el dueño decida, un renglón por decisión, con fecha.
-- El 5-sep-2026 (tarde) el dueño cerró tres de las cuatro preguntas que
-  gateaban la Fase 2: **D-A** (comisión, parámetro del circuito), **E2**
-  (colchón, tabla de dos columnas) y **H8b / 4.6** (saldos del corte, circuito
-  de doble facturación) — las tres decididas en documento, ninguna construida
-  todavía. **Sigue pendiente una sola: 4.9 (margen en $ fijo)** — sin
-  contestarla, el motor de precios del circuito lineal no financia lo mismo
-  que el diseño exige cuando el margen es en pesos.
+- Las **17 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
+  punto 4 (de 10; 4.6 y 4.9 se cerraron hoy) se contestan en `DECISIONES.md`
+  conforme el dueño decida, un renglón por decisión, con fecha.
+- El 5-sep-2026 el dueño cerró las **cuatro** preguntas que gateaban la Fase
+  2: **D-A** (comisión, parámetro del circuito), **E2** (colchón, tabla de dos
+  columnas), **H8b / 4.6** (saldos del corte, circuito de doble facturación) y
+  **4.9** (base del financiamiento, parámetro del circuito — verificada en
+  § 3.d) — las cuatro decididas en documento, ninguna construida todavía. Lo
+  que se abrió en su lugar es **N1** (si la protección se cobra también en la
+  mora), que no gatea la Fase 2 pero sí la Fase 3 (es la fórmula de la mora
+  que Santa Rosa cobraría).
 - Este archivo se actualiza cada vez que una pregunta cambie de columna.

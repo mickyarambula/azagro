@@ -113,34 +113,67 @@ TIIE 6.9%.
 
 ### Precio al cliente
 
+> **Recalculado el 5-sep-2026 (tarde).** El ejemplo original todavía metía el
+> 1 % de comisión y el factor × 1.01 del circuito de doble facturación, y una
+> "tasa de cálculo 4.15 %" que la Decisión 1 sustituyó. Se rehace con las dos
+> decisiones del mismo día: **sin comisión** (Decisión 3: el 1 % es parámetro
+> del circuito de doble facturación, en el lineal no aplica) y con el **modelo
+> de dos tasas** (Decisión 1: tasa de costo 6.90 %, tasa de cobro 7.05 % — la
+> protección de 0.15 es la diferencia y se calcula —, un solo spread de línea
+> de 4.00 %). El número viejo va tachado; el desglose de por qué cambió está
+> abajo del bloque.
+
 ```
 Azagro paga al proveedor                 100,000.00
-Azagro factura a Santa Rosa              106,951.87    margen 6,951.87
-Santa Rosa agrega el costo financiero      6,043.00
-Santa Rosa factura al cliente            112,994.88
+Azagro factura a Santa Rosa              106,951.87    margen 6,951.87 (6.5 % de esta factura)
+Santa Rosa agrega el costo financiero      4,924.24    ~~6,043.00~~  (tasa de cobro 7.05 % + spread de línea 4.00 % = 11.05 %) × 150 / 360, sobre 106,951.87
+    de los cuales, costo real de la línea  4,857.40    (tasa de costo 6.90 % + 4.00 % = 10.90 %)
+    y protección                              66.84    (0.15 % × 150 / 360, sobre 106,951.87)
+Santa Rosa factura al cliente            111,876.11    ~~112,994.88~~
 ```
 
-El costo financiero se calcula **sobre el precio con margen** (los 106,951.87), no
-sobre el costo. Es aritméticamente igual a como el sistema lo calcula hoy, así que
-**el motor de precios no cambia**.
+Por qué cambió el 6,043.00: desarmado, era **1,069.52 de comisión (1 %)** +
+**4,973.48 de 1.01 × (6.90 % + 4.15 %) × 150 / 360**, todo sobre 106,951.87. En
+el circuito lineal no hay comisión ni × 1.01 (la línea no adelanta "costo +
+comisión", adelanta la factura de Azagro tal cual), y la tasa que entra al
+precio es la de cobro más el spread de línea. Al cliente le cuesta **1,118.77
+menos** que en el ejemplo original. El reporte de utilidad puede mostrar la
+protección (66.84) separada del costo real (4,857.40), como pide la Decisión 1.
+
+El costo financiero se calcula **sobre lo que Santa Rosa desembolsa** — la
+factura de Azagro a Santa Rosa, costo + margen (los 106,951.87) —, no sobre el
+costo. **Ojo (verificado el 5-sep-2026, `ESTADO.md` § 3.d): NO es
+aritméticamente igual a como el sistema lo calcula hoy.** El motor de hoy
+financia solo el costo, que es la base correcta del circuito de doble
+facturación (lo que ASR desembolsa es costo + 1 %, y el margen nunca pasa por
+ASR). En el lineal la base es costo + margen. Con margen en porcentaje el
+precio al cliente coincide, pero la partición margen / financiamiento no (el
+motor le atribuye a Azagro 320.08 que aquí son financiamiento de Santa Rosa);
+con margen en monto fijo el motor cobra 320.08 de menos. La base del
+financiamiento es **parámetro del circuito**, igual que el 1 % (`DECISIONES.md`,
+Decisión 4).
 
 ### Si el cliente se atrasa 30 días
 
-> **Corregido el 5-sep-2026: error aritmético del borrador original.** La mora
-> estaba calculada sobre 112,927.36 (el precio que habría salido a la tasa de
-> costo 4.00%), no sobre 112,994.88 (el precio real que se le factura al
-> cliente, a la tasa de cobro 4.15%, el mismo de la sección "Precio al
-> cliente" arriba). Con el número correcto la mora sube $0.89 y la utilidad de
-> la mora sube $0.89 más (el reparto 50/50 se recalcula sobre el número
-> corregido). El costo de la línea SÍ estaba bien: corre sobre 106,951.87 (lo
-> que Santa Rosa desembolsó), no sobre el precio al cliente.
+> **Corregido el 5-sep-2026 dos veces.** (1) Error aritmético del borrador: la
+> mora estaba calculada sobre 112,927.36 (precio a la tasa de costo), no sobre
+> el precio real al cliente; quedó en 1,497.18 sobre 112,994.88. (2) Al
+> recalcular el precio sin comisión (arriba), la mora se vuelve a calcular
+> sobre el precio nuevo, **111,876.11**. Y queda a la vista una cosa que los
+> documentos hoy dicen de dos formas: la Decisión 1 dice "mora al cliente =
+> **tasa de cobro** + spread de mora" (7.05 + 9 = **16.05 %**); este ejemplo
+> la venía calculando a **tasa base** + 9 % (6.90 + 9 = **15.90 %**). **Es la
+> pregunta abierta N1 de `ESTADO.md`; no está contestada y aquí no se elige.**
+> Se muestran las dos.
 
 ```
-Mora que cobra Santa Rosa                  1,497.18    a TIIE + 9%, sobre 112,994.88 (precio real al cliente)
-Costo de la línea esos 30 días               971.48    a TIIE + 4%, sobre 106,951.87 (lo desembolsado por Santa Rosa)
-Utilidad de la mora                          525.70
-    Azagro          50%                      262.85
-    Santa Rosa      50%                      262.85
+Mora que cobra Santa Rosa (30 d, sobre 111,876.11):
+    a tasa base 6.90 % + 9 % = 15.90 %       1,482.36    ~~1,497.18~~ (era sobre 112,994.88)
+    a tasa de cobro 7.05 % + 9 % = 16.05 %   1,496.34    ← si la protección también se cobra en la mora (N1)
+Costo de la línea esos 30 días               971.48    a tasa de costo 6.90 % + 4.00 %, sobre 106,951.87 (sin cambio)
+Utilidad de la mora
+    a 15.90 %                                510.88    ~~525.70~~   → Azagro 255.44 · Santa Rosa 255.44
+    a 16.05 %                                524.86               → Azagro 262.43 · Santa Rosa 262.43
 ```
 
 El financiamiento ordinario (los 6,043.00 del plazo pactado) se queda íntegro en
@@ -163,7 +196,9 @@ Santa Rosa. Solo la utilidad de la mora se reparte.
 >
 > - Costo de la línea = **tasa de costo** + spread de línea.
 > - Financiamiento que entra al precio = **tasa de cobro** + spread de línea.
-> - Mora al cliente = **tasa de cobro** + spread de mora.
+> - Mora al cliente = **tasa de cobro** + spread de mora. **← Pendiente:**
+>   el ejemplo del § 5 la calcula a tasa base + spread de mora; son dos reglas
+>   distintas y el dueño no ha elegido (pregunta abierta N1 de `ESTADO.md`).
 >
 > El reporte de utilidad debe poder mostrar el costo real y la protección por
 > separado; el sistema debe poder mostrar qué tasa de mora está recibiendo el
