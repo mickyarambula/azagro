@@ -986,3 +986,36 @@ construir el paso 10 ("espejo").
   cerradas ya están cerradas en documento, y N2 solo agrega alcance a una fase
   (la 1) que ya estaba planeada, no bloquea nada.
 - Este archivo se actualiza cada vez que una pregunta cambie de columna.
+
+---
+
+## 6. Hallazgo de construcción (5-sep-2026): la comisión no se congela en la cotización
+
+Encontrado al revisar el código para el plan de construcción del catálogo de
+circuitos (§ 5, paso 3). Es un defecto real contra el principio "congelar al
+confirmar" (`DISENO_FINANCIAMIENTO.md` § 2 y § 11) que ya existía **antes** de
+esta construcción; se anota aquí para que no se pierda si el trabajo se pausa.
+
+**Lo que sí se congela en la cotización, correcto:** la TIIE y el spread
+viven en columnas propias de `quotes` (`quotes.tiie`, `quotes.spread`,
+`migrations/0010_rfq.sql:1-2`), y los caminos que reprecian los leen de ahí:
+`orders.ts:435` `tiie: Number(q[0].tiie), costSpread: Number(q[0].spread)`;
+igual en `ops.ts:1050` (dentro de `reviseQuote`).
+
+**Lo que NO se congela: la comisión.** Esos mismos dos caminos —
+`changeOrderTerm` (`orders.ts:435`) y `reviseQuote` (`ops.ts:1050`) — pasan
+`commissionRate: pol.asrCommission`: **relee Ajustes en vivo**, no un valor
+guardado en la cotización. Lo mismo en los otros cuatro lugares donde se
+calcula financiamiento: `ops.ts:700, 714, 734, 876`.
+
+**Consecuencia concreta:** si alguien cambia la comisión en Ajustes hoy, una
+cotización vieja **cambia de precio** en cuanto se revisa o se le cambia el
+plazo — exactamente lo que el principio de congelar quiere evitar, y
+exactamente lo que sí funciona bien para TIIE y spread.
+
+**No se corrige aquí.** Entra en el **paso 3** del plan de construcción del
+catálogo de circuitos (§ 5): cuando la comisión deje de ser
+`company_settings.asr_commission` y pase a vivir en el circuito
+(`credit_circuits.commission_rate`), la cotización va a necesitar su propia
+columna congelada (`quotes.commission_rate`) igual que ya tiene `tiie` y
+`spread` — y de paso se cierra este hallazgo.

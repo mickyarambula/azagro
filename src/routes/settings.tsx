@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { Field, PageHead, Panel } from "@/components/erp";
 import { useAccess } from "@/lib/access";
 import { creditPolicyUsage, getSettingsForm, listCreditPolicies, POLICY_FIELDS, QUOTE_TERMS_LABEL, saveCreditPolicy, saveFx, saveSettings, saveTiie, type CreditPolicyRow, type PolicyField } from "@/lib/erp/ops";
+import { FINANCING_BASE_LABEL, listCreditCircuits, listFundingRates, WHO_LABEL, type CreditCircuit, type FundingRateRow } from "@/lib/erp/circuits";
 import { formatTerms, parseTerms } from "@/lib/erp/ladder";
 import { BUSINESS_RULES, YEAR_DAYS } from "@/lib/erp/rules";
 import { dbStatus, exportBackup } from "@/lib/erp/cutover";
@@ -64,6 +65,12 @@ function SettingsBody() {
   const [openPolicy, setOpenPolicy] = useState<string | null>(null);
   const [tiie, setTiie] = useState<Array<{ date: string; rate: string }>>([]);
   const [fx, setFx] = useState<Array<{ date: string; usd_mxn: string }>>([]);
+  // Catálogo de circuitos de financiamiento y tabla de tasas de dos columnas
+  // (PASO 0, 5-sep-2026). Solo lectura: todavía no hay pantalla para crear,
+  // editar ni capturar nada aquí — nace con la migración 0024 y nadie en el
+  // sistema lo lee todavía (ni el precio, ni la mora, ni los reportes).
+  const [circuits, setCircuits] = useState<CreditCircuit[] | null>(null);
+  const [fundingRates, setFundingRates] = useState<FundingRateRow[] | null>(null);
   const [tDate, setTDate] = useState(() => todayMx());
   const [tRate, setTRate] = useState<number | null>(null);
   const [fDate, setFDate] = useState(() => todayMx());
@@ -98,6 +105,8 @@ function SettingsBody() {
     setPolicies(cps);
     const yn = (v: boolean | null) => (v == null ? "" : v ? "si" : "no");
     setPolEdit(Object.fromEntries(cps.map((c) => [c.code, { commission: yn(c.commission), fega: yn(c.fega) }])));
+    setCircuits(await listCreditCircuits().catch(() => []));
+    setFundingRates(await listFundingRates().catch(() => []));
   }
 
   async function loadUsage() {
@@ -615,6 +624,92 @@ function SettingsBody() {
           </ul>
         </Panel>
       </div>
+
+      <Panel className="mt-5">
+        <h2 className="text-sm font-semibold">Circuitos de financiamiento (solo lectura)</h2>
+        <p className="mt-0.5 text-sm text-muted">
+          Cada pedido va a declarar por dónde corre su financiamiento: quién pone el capital, quién le factura al
+          cliente, sobre qué base corre el financiamiento y qué comisión de apertura cobra. Es el paso 0 de esa
+          construcción — este catálogo todavía no lo lee nadie: ni el precio, ni la mora, ni los reportes. El motor de
+          hoy sigue usando la comisión y el spread de Ajustes.
+        </p>
+        {circuits == null ? (
+          <p className="mt-3 text-[12px] text-muted">Leyendo…</p>
+        ) : (
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[720px] text-left text-[13px]">
+              <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+                <tr>
+                  <th className="py-2 font-medium">Circuito</th>
+                  <th className="py-2 font-medium">Comisión de apertura</th>
+                  <th className="py-2 font-medium">Base del financiamiento</th>
+                  <th className="py-2 font-medium">Factura al cliente</th>
+                  <th className="py-2 font-medium">Financia</th>
+                  <th className="py-2 font-medium">¿Elegible hoy?</th>
+                </tr>
+              </thead>
+              <tbody>
+                {circuits.map((c) => (
+                  <tr key={c.code} className="border-t border-line align-top">
+                    <td className="py-2 pr-3 font-medium">
+                      {c.name}
+                      <span className="ml-2 font-mono text-[11px] text-muted">{c.code}</span>
+                    </td>
+                    <td className="py-2 pr-3">
+                      {c.commissionRate == null ? (
+                        <span className="text-muted">
+                          {c.code === "PROPIA" ? "sin construir" : "no cobra"}
+                        </span>
+                      ) : (
+                        `${(c.commissionRate * 100).toFixed(2)}%`
+                      )}
+                    </td>
+                    <td className="py-2 pr-3">
+                      {c.financingBase ? FINANCING_BASE_LABEL[c.financingBase] : <span className="text-muted">{c.code === "CONTADO" ? "no financia" : "sin construir"}</span>}
+                    </td>
+                    <td className="py-2 pr-3">{c.invoicesClient ? WHO_LABEL[c.invoicesClient] : "—"}</td>
+                    <td className="py-2 pr-3">{c.finances ? WHO_LABEL[c.finances] : <span className="text-muted">nadie</span>}</td>
+                    <td className="py-2 pr-3">{c.enabled ? "Sí" : "Por construir"}</td>
+                  </tr>
+                ))}
+                {circuits.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="py-6 text-center text-sm text-muted">
+                      Sin circuitos en la base.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <h3 className="mt-5 text-[12px] font-semibold uppercase tracking-wide text-forest">
+          Tabla de tasas — tasa de costo / tasa de cobro
+        </h3>
+        <p className="mt-1 text-[12px] text-muted">
+          Dos columnas, capturadas directamente por el dueño: la tasa de costo (lo que de verdad cuesta la línea) y la
+          tasa de cobro (la que entra al precio y a la mora del cliente); pueden ser iguales. La protección es la
+          diferencia entre ambas y se calcula, no se captura aparte. Nace vacía a propósito: no se deriva de la tabla
+          de TIIE de arriba. Todavía no hay dónde capturarla.
+        </p>
+        {fundingRates == null ? (
+          <p className="mt-3 text-[12px] text-muted">Leyendo…</p>
+        ) : fundingRates.length === 0 ? (
+          <p className="mt-3 text-[12px] text-muted">Sin renglones capturados todavía.</p>
+        ) : (
+          <ul className="mt-3 text-sm">
+            {fundingRates.map((r) => (
+              <li key={r.date} className="flex justify-between border-b border-line py-1.5">
+                <span>{r.date}</span>
+                <span className="tabular-nums">
+                  costo {(r.costRate * 100).toFixed(2)}% · cobro {(r.collectionRate * 100).toFixed(2)}%
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
     </>
   );
 }

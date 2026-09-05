@@ -228,3 +228,75 @@ test("0019 respeta un 12% que sí fue capturado a mano", async () => {
   ], "solo la firma exacta del default (migración, %, 12, sin nominal) se limpia");
   await db.close();
 });
+
+test("0024 siembra el catálogo de circuitos copiando la comisión de Ajustes (nunca un 1% escrito) y dos por circuito quedan sin construir", async () => {
+  const db = new PGlite();
+  const files = pendingMigrations(readdirSync(dir), []);
+  for (const { path } of files.filter((f) => f.name < "0024")) await db.exec(readFileSync(join(dir, path), "utf8"));
+  await db.exec(`
+    insert into companies (id, name, join_code, created_by) values (1, 'AZ', 'AZ1', 'u1'), (2, 'Sin captura', 'SC1', 'u1');
+    insert into company_settings (company_id, asr_commission) values (1, 0.0123);
+    insert into company_settings (company_id) values (2);
+  `);
+  await db.exec(readFileSync(join(dir, "0024_circuitos_financiamiento.sql"), "utf8"));
+
+  const rows = (
+    await db.query(`
+      select company_id, code, commission_rate::text as commission_rate, financing_base, invoices_client, finances,
+        mora_share_azagro::text as mora_share_azagro, mora_share_financier::text as mora_share_financier, enabled, sort_order
+      from credit_circuits where company_id = 1 order by sort_order
+    `)
+  ).rows;
+  assert.equal(rows.length, 4, "las cuatro filas fijas");
+  assert.deepEqual(rows.map((r) => r.code), ["CONTADO", "ASR", "SANTA_ROSA", "PROPIA"], "en el orden del catálogo");
+
+  const contado = rows[0];
+  assert.equal(contado.commission_rate, null);
+  assert.equal(contado.financing_base, null, "Contado no financia");
+  assert.equal(contado.invoices_client, "azagro");
+  assert.equal(contado.finances, null, "nadie pone capital de contado");
+  assert.equal(contado.enabled, true);
+
+  const asr = rows[1];
+  // La comisión NO es un 0.01 escrito: es la que ya tenía la empresa en Ajustes.
+  assert.equal(Number(asr.commission_rate), 0.0123, "copiada de company_settings.asr_commission, no un 1% inventado");
+  assert.equal(asr.financing_base, "costo_comision");
+  assert.equal(asr.invoices_client, "azagro", "el cliente nunca ve a Santa Rosa en este circuito");
+  assert.equal(asr.finances, "santa_rosa");
+  assert.equal(asr.enabled, true, "es el circuito con el que se ha operado todo hasta hoy");
+
+  const santaRosa = rows[2];
+  assert.equal(santaRosa.commission_rate, null, "la línea no cobra comisión de apertura");
+  assert.equal(santaRosa.financing_base, "costo_margen", "lo que Santa Rosa desembolsaría: costo + margen");
+  assert.equal(santaRosa.invoices_client, "santa_rosa", "factura directo al cliente");
+  assert.equal(santaRosa.enabled, false, "por construir");
+
+  const propia = rows[3];
+  assert.equal(propia.commission_rate, null);
+  assert.equal(propia.financing_base, null, "sin construir");
+  assert.equal(propia.invoices_client, "azagro");
+  assert.equal(propia.finances, "azagro");
+  assert.equal(propia.enabled, false, "cuando llegue la línea");
+
+  // El reparto de mora nace SIN CAPTURAR en los cuatro, aunque el 50/50 del
+  // circuito lineal ya esté decidido en DECISIONES.md: la captura es Fase 3.
+  for (const r of rows) {
+    assert.equal(r.mora_share_azagro, null, `${r.code}: reparto de mora sin capturar`);
+    assert.equal(r.mora_share_financier, null, `${r.code}: reparto de mora sin capturar`);
+  }
+
+  // Una empresa sin la comisión capturada en Ajustes: el circuito ASR nace
+  // TAMBIÉN sin capturar. No se inventa un número donde antes no lo había.
+  const sinCaptura = (
+    await db.query(`select commission_rate from credit_circuits where company_id = 2 and code = 'ASR'`)
+  ).rows[0];
+  assert.equal(sinCaptura.commission_rate, null, "sin Ajustes capturado, el circuito tampoco inventa una comisión");
+
+  // La tabla de tasas de dos columnas nace, y nace vacía.
+  const cols = (await db.query(`select column_name from information_schema.columns where table_name = 'funding_rates'`)).rows.map((r) => r.column_name);
+  for (const c of ["company_id", "date", "cost_rate", "collection_rate"]) assert.ok(cols.includes(c), `funding_rates.${c}`);
+  const fr = (await db.query(`select count(*)::int as n from funding_rates`)).rows[0];
+  assert.equal(fr.n, 0, "nace vacía: no se deriva de tiie_rates + spread");
+
+  await db.close();
+});
