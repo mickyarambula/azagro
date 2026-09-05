@@ -502,6 +502,14 @@ movimiento contrario?*
 **ABIERTA.** No existen. *Para el dueño: ¿qué documentos se pueden cancelar,
 quién puede, y qué pasa con la mercancía y el dinero que ya se movieron?*
 
+**Nota (5-sep-2026):** en la base de producción quedan **dos pedidos de
+prueba, confirmados por el dueño**, que sirven como casos de referencia para
+cuando se construya esta cancelación: `PV-0003` (facturado y **pagado**) y
+`PV-0004` (facturado y **abierto**) — cubren los dos escenarios. No se borran
+a mano; se limpian cuando se construya la cancelación o con un script de
+limpieza dedicado, porque tocan cartera, kardex y bitácora a la vez
+(`DECISIONES.md`, misma fecha).
+
 ### H4c. Devolución a proveedor y nota de crédito de proveedor (LOGICA h.15)
 **ABIERTA.** No existen; la FP se queda viva. *Para el dueño: si nos llega
 mercancía equivocada, ¿cómo se regresa y cómo se baja la deuda con el
