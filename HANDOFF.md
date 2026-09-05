@@ -4,16 +4,24 @@ Documento para quien continúa (Claude Code, Claude.ai, u otro). El ERP se
 construyó primero en Grok Build; desde finales de agosto vive en este repo de
 GitHub y todo el trabajo posterior se hizo aquí, con Claude Code.
 
-> **Nota del 5 de septiembre de 2026.** El circuito de financiamiento que este
-> documento describe más abajo (doble facturación con la empresa hermana, § "El
-> circuito con la empresa hermana (ASR)") **quedó abandonado**. El vigente es el
-> circuito **lineal** de `DISENO_FINANCIAMIENTO.md` (Azagro factura a Santa Rosa
-> con su margen; Santa Rosa agrega el financiamiento y factura al cliente). Las
-> contradicciones entre documentos, las preguntas abiertas y tres
-> comprobaciones numéricas están en `ESTADO.md`; cada decisión tomada, con
+> **Nota del 5 de septiembre de 2026, corregida el mismo día.** El circuito de
+> financiamiento que este documento describe más abajo (doble facturación con
+> la empresa hermana, § "El circuito con la empresa hermana (ASR)") **NO está
+> abandonado — sigue fuera de uso por ahora, pero es un circuito elegible**:
+> todo lo que Azagro ha operado hasta hoy se hizo con él, y el dueño no
+> descarta volver a usarlo. Lo que cambió es el **predeterminado**: el nuevo
+> circuito lineal de `DISENO_FINANCIAMIENTO.md` (Azagro factura a Santa Rosa
+> con su margen; Santa Rosa agrega el financiamiento y factura al cliente) es
+> el que se usa salvo que se elija otro. Los dos conviven en el catálogo de
+> cuatro circuitos (DISENO § 3): contado, doble facturación (ASR), línea Santa
+> Rosa (lineal), línea propia. Los saldos del corte de Compaq entran con el
+> circuito de doble facturación, porque así se operaron (decisión del
+> 5-sep-2026). Las contradicciones entre documentos, las preguntas abiertas y
+> tres comprobaciones numéricas están en `ESTADO.md`; cada decisión tomada, con
 > fecha, en `DECISIONES.md`. Orden de lectura: `CLAUDE.md` →
 > `DISENO_FINANCIAMIENTO.md` → `ESTADO.md` → `DECISIONES.md` → este archivo.
-> La explicación del circuito viejo se conserva abajo como historia.
+> La explicación del circuito de doble facturación se conserva abajo: sigue
+> siendo el manual de un circuito vigente, no una historia.
 
 ## Qué es
 
@@ -579,16 +587,23 @@ incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
   pronto pago (120). Cambiarlos exige ser administrador y queda en bitácora
   con el valor anterior y el nuevo.
 
-## El circuito con la empresa hermana (ASR) — HISTÓRICO, abandonado el 5-sep-2026
+## El circuito con la empresa hermana (ASR) — fuera de uso por ahora, sigue siendo un circuito elegible
 
-> **Estado:** este esquema de **doble facturación** se abandonó el 5 de
-> septiembre de 2026 **porque inflaba los ingresos de Azagro y pegaba
-> fiscalmente** (`DISENO_FINANCIAMIENTO.md` § 1). El circuito vigente es
-> lineal: Azagro factura a Santa Rosa con su margen; Santa Rosa agrega el
-> financiamiento y factura al cliente. Lo que sigue se conserva tal cual porque
-> explica de dónde salieron dos números que **siguen en el precio** hasta que el
-> dueño decida qué hacer con ellos: la comisión ASR 1 % y el spread ASR 4 %
-> (`ESTADO.md` § 1.4 y § 2 D-A). No construir nada de este esquema.
+> **Estado (corregido el 5-sep-2026, mismo día que la nota anterior):** este
+> esquema de **doble facturación** no se abandona. El 1 % de comisión existía
+> por una razón fiscal real: Azagro le vendía a Santa Rosa y Santa Rosa le
+> vendía de vuelta al cliente, así que Santa Rosa tenía que agregar algo a lo
+> que revendía. **Dos razones para que quede como opción seleccionable, no
+> como historia:** (1) el dueño no descarta volver a usarlo; (2) **todo lo que
+> el negocio ha operado hasta la fecha se hizo con este método** — incluidos
+> los saldos que va a traer el corte de Compaq. El circuito **lineal** de
+> `DISENO_FINANCIAMIENTO.md` (Azagro factura a Santa Rosa con su margen; Santa
+> Rosa agrega el financiamiento y factura al cliente) es el nuevo
+> **predeterminado**, no el único. Los dos parámetros de este circuito — la
+> comisión ASR 1 % y el spread ASR 4 % — dejan de ser globales y pasan a ser
+> **parámetros del circuito de doble facturación**: en el circuito lineal la
+> línea no cobra comisión de apertura, así que ese parámetro no aplica ahí
+> (`ESTADO.md` § 1.4 y § 2 D-A, cerrada el 5-sep-2026).
 
 Azagro no financia solo: cuando vende a crédito, el capital de esa operación
 lo pone una empresa hermana (ASR / Santa Rosa), a través de un circuito de
@@ -598,13 +613,14 @@ interés del plazo (TIIE del mes + 4% de spread).
 
 Para el sistema, hoy ese circuito se resume matemáticamente en dos números:
 **comisión 1% y spread de costo 4%** — son los parámetros que alimentan el
-costo financiero que se le cobra al cliente dentro del precio (ver arriba).
+costo financiero que se le cobra al cliente dentro del precio, y son los
+mismos con los que se operó **todo lo hecho hasta el 5-sep-2026** (ver arriba).
 
 **No se construyó el circuito documental** (las facturas de ida y vuelta
-entre Azagro y la hermana, con sus propias cuentas por cobrar/pagar), y **ya no
-se construirá**: el esquema cambió el 5-sep-2026 (ver la nota de arriba). Lo
-que sí se construye es el circuito lineal de `DISENO_FINANCIAMIENTO.md`, en el
-orden de su § 14.
+entre Azagro y la hermana, con sus propias cuentas por cobrar/pagar). Con la
+corrección del 5-sep-2026 sigue siendo candidato a construirse — no se
+descarta —, pero el orden de construcción del `DISENO_FINANCIAMIENTO.md` § 14
+empieza por el circuito lineal, que es el predeterminado nuevo.
 
 ## Qué falta
 
@@ -764,11 +780,13 @@ reiniciar — eso no es la empresa real.
 - Duplicar cartera histórica.
 - Tocar el kardex o las fórmulas de cartera/precio sin que el dueño lo pida
   explícitamente — son las piezas más auditadas y más caras de romper.
-- Construir el circuito ASR de **doble facturación**: está abandonado
-  (5-sep-2026). El circuito vigente es el lineal de `DISENO_FINANCIAMIENTO.md`;
-  antes de tocar financiamiento, precio o cartera, leer también `ESTADO.md`
-  (preguntas abiertas) y `DECISIONES.md`. Toda decisión nueva se escribe en
-  `DECISIONES.md` el mismo día.
+- Construir cualquier circuito de financiamiento (doble facturación ASR o
+  línea Santa Rosa) sin confirmar el orden de fases de
+  `DISENO_FINANCIAMIENTO.md` § 14: el predeterminado nuevo es el lineal, pero
+  la doble facturación sigue viva y es la que ha operado todo hasta hoy — no
+  se elige uno u otro por cuenta propia. Antes de tocar financiamiento, precio
+  o cartera, leer también `ESTADO.md` (preguntas abiertas) y `DECISIONES.md`.
+  Toda decisión nueva se escribe en `DECISIONES.md` el mismo día.
 - Preguntar puertos/paths al usuario: él no tiene terminal; si estás en
   Claude Code, sí tienes repo.
 

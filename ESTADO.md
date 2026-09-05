@@ -8,11 +8,24 @@ del código está citado con archivo y línea al estado de `main` de hoy
 Orden de lectura para quien continúe: `CLAUDE.md` → `DISENO_FINANCIAMIENTO.md`
 → este archivo → `DECISIONES.md` → `HANDOFF.md`.
 
+> **Actualizado el 5-sep-2026 (tarde), con tres decisiones del dueño el mismo
+> día** (`DECISIONES.md`, mismas fechas): (1) la tabla de tasas lleva dos
+> columnas — tasa de costo y tasa de cobro — captura directa, sin colchón
+> calculado aparte; sustituye el § 6 de DISENO y cierra E2. (2) La moneda y el
+> TC pertenecen a la operación, no al cliente; cierra la parte de modelo de
+> L4a. (3) **El circuito de doble facturación (ASR) NO está abandonado**: es
+> un circuito elegible, fuera de uso por ahora; el lineal es el nuevo
+> predeterminado, no el reemplazo. Esto corrige el veredicto de § 1.1 de esta
+> misma versión anterior (decía "Vigente: DISENO, el viejo se abandona") y
+> cierra D-A y H8b. Los cambios están marcados en el texto donde aplican.
+
 Lo que dice cada documento, en una línea:
 
-- `DISENO_FINANCIAMIENTO.md` (5-sep): el circuito **vigente** de financiamiento:
-  lineal, Azagro factura a Santa Rosa con su margen, Santa Rosa agrega el
-  financiamiento y factura al cliente. Borrador con tres decisiones abiertas.
+- `DISENO_FINANCIAMIENTO.md` (5-sep, corregido el mismo día): el **nuevo
+  predeterminado** de financiamiento: circuito lineal, Azagro factura a Santa
+  Rosa con su margen, Santa Rosa agrega el financiamiento y factura al
+  cliente. No reemplaza al circuito de doble facturación (ASR), que sigue
+  elegible. Borrador; quedan D-B y D-C abiertas (D-A se cerró el 5-sep).
 - `HANDOFF.md` (3–4 sep): bitácora de todo lo construido y las decisiones
   confirmadas; describía el circuito **viejo** (doble facturación). Desde hoy lo
   marca como histórico y remite al diseño.
@@ -54,10 +67,15 @@ y § 5: "Azagro factura a Santa Rosa 106,951.87 (margen 6,951.87) · Santa Rosa
 agrega el costo financiero 6,043.00 · Santa Rosa factura al cliente
 112,994.88".
 
-**Vigente: DISENO.** El circuito viejo queda como historia (HANDOFF lo marca
-así desde hoy). Ojo: los dos parámetros que el viejo dejó en Ajustes —comisión
-ASR 1% y spread ASR 4%— siguen alimentando el precio (`src/lib/erp/pricing.ts:57-77`,
-`src/lib/erp/credit.ts:487-503`); el diseño nuevo los reinterpreta (ver 1.4 y 1.5).
+**Corregido el 5-sep-2026 (tarde): no es "vigente uno, se abandona el otro".**
+Son **dos circuitos que conviven** (decisión del dueño, `DECISIONES.md`
+5-sep-2026): doble facturación sigue siendo el que ha operado todo hasta hoy y
+sigue elegible; el lineal es el **nuevo predeterminado** para operaciones
+nuevas, no su reemplazo. Los dos parámetros que alimentan el precio hoy
+—comisión ASR 1% y spread ASR 4%— (`src/lib/erp/pricing.ts:57-77`,
+`src/lib/erp/credit.ts:487-503`) siguen siendo exactamente los del circuito de
+doble facturación: dejan de ser globales y pasan a ser **parámetros de ese
+circuito** (cierra 1.4 y D-A, ver § 2).
 
 ### 1.2 Quién le factura al cliente
 
@@ -69,13 +87,17 @@ cliente es **Santa Rosa**; en "Contado", Azagro. § 9.4: "si Santa Rosa factura,
 el cliente legalmente le debe a Santa Rosa. El documento que se le mande al
 cliente no puede decir que le debe a Azagro."
 
-**Vigente: DISENO, por circuito.** "Compaq sigue timbrando" sigue siendo cierto
-para lo que factura Azagro (contado, saldos del corte); en el circuito Santa
-Rosa la factura al cliente la emite Santa Rosa. El código de hoy asume una sola
-razón social emisora: el estado de cuenta se imprime con la razón social de
-Ajustes (`src/routes/statements.tsx:152` y `:225`, respaldo
-`"AZ INSUMOS AGRICOLAS SA DE CV"` en `:380`), y la FI la emite Azagro
-(`src/lib/erp/ops.ts`, `issueMoraInvoice`).
+**Resuelto por circuito (revisado 5-sep-2026 con el catálogo de cuatro
+circuitos).** "Compaq sigue timbrando" es cierto en **tres** de los cuatro:
+contado, doble facturación (ASR) y línea propia — en los tres factura Azagro,
+porque en doble facturación el financiamiento de Santa Rosa queda escondido
+dentro del costo, invisible para el cliente (así se ha operado siempre). Solo
+en **línea Santa Rosa (lineal)** factura Santa Rosa directo. El código de hoy
+asume una sola razón social emisora en todos los casos: el estado de cuenta se
+imprime con la razón social de Ajustes (`src/routes/statements.tsx:152` y
+`:225`, respaldo `"AZ INSUMOS AGRICOLAS SA DE CV"` en `:380`), y la FI la
+emite Azagro (`src/lib/erp/ops.ts`, `issueMoraInvoice`) — correcto para tres
+circuitos de cuatro, hace falta agregar el caso lineal.
 
 ### 1.3 Una tasa de costo vs dos tasas
 
@@ -87,13 +109,18 @@ código usa ese único número para el precio (`pricing.ts:57-77` vía
 (`src/lib/erp/reports.ts:80`) y para la bonificación de pronto pago
 (`src/lib/erp/ops.ts:1673`, `credit.ts:445`).
 
-**DISENO** (§ 6): "Hoy el sistema usa un solo número, el spread ASR de 4%, para
-poner precio y para saber cuánto cuesta. Con el colchón de protección son dos
-cosas distintas": tasa real TIIE + 4.00% (costo y reparto de mora) y tasa de
-cálculo TIIE + 4.15% (precio). "El reporte de utilidad debe usar la tasa real."
+**DISENO** (§ 6, ahora sustituida) proponía dos spreads sobre una sola tasa:
+real TIIE + 4.00% (costo y reparto de mora) y de cálculo TIIE + 4.15% (precio).
 
-**Vigente: DISENO (en documento; no construido).** Ver comprobación 3.b: el
-colchón de +0.30 de la tabla TIIE se encima con este +0.15.
+**Resuelto por Decisión 1 del dueño (5-sep-2026, `DECISIONES.md`), sustituye el
+§ 6 de DISENO.** No son dos spreads sobre una tasa: la tabla lleva **dos
+columnas por renglón**, tasa de costo y tasa de cobro, capturadas las dos
+directamente (pueden ser iguales); la protección es la diferencia y se
+**calcula**, no se captura. Un solo spread de línea, aplicado a la columna que
+corresponda: costo de la línea = tasa de costo + spread de línea;
+financiamiento en el precio = tasa de cobro + spread de línea; mora al cliente
+= tasa de cobro + spread de mora. **Decidido en documento, no construido**;
+cierra E2 (ver § 2).
 
 ### 1.4 La comisión del 1% en el precio
 
@@ -107,10 +134,17 @@ spread ASR) × días / 360. […] **No quitarlo** — se quitó por error el
 el sistema mete 1% en cada precio, herencia del circuito viejo con ASR. Son
 unos $1,069 por operación cobrados por un costo que no existe."
 
-**Vigente: ninguno todavía — es la decisión A.** Los dos documentos tienen
-razón en su momento: el 1% era un costo real del circuito viejo (la hermana lo
-cobraba); en el lineal la línea no lo cobra. El código lo sigue cobrando y lo
-reporta como costo (`reports.ts:239-267`, `commission` dentro de `finance`).
+**Ya no es una contradicción — se disolvió con la Decisión 3 del dueño
+(5-sep-2026).** Los dos documentos tenían razón, cada uno en su circuito:
+HANDOFF describe la **doble facturación**, donde el 1 % es un costo real y
+"no quitarlo" sigue siendo correcto (Santa Rosa le compraba y le revendía a
+Azagro, y necesitaba agregar algo); DISENO describe el circuito **lineal**,
+donde la línea no cobra comisión de apertura y ese 1 % no aplica. El 1 % pasa
+de constante global a **parámetro del circuito de doble facturación**; en el
+lineal su valor es 0 (o ausente). Cierra D-A. El código de hoy lo sigue
+cobrando siempre y lo reporta como costo (`reports.ts:239-267`, `commission`
+dentro de `finance`) — correcto mientras solo exista el circuito de doble
+facturación; falta condicionarlo por circuito cuando se construya el lineal.
 
 ### 1.5 Sobre qué se calcula el financiamiento
 
@@ -123,10 +157,17 @@ costo puesto** y el margen se aplica después (`pricing.ts:57-77`,
 margen** (los 106,951.87), no sobre el costo. Es aritméticamente igual a como
 el sistema lo calcula hoy, así que el motor de precios no cambia."
 
-**Vigente: los dos, solo con margen en porcentaje.** Con margen en monto fijo
-divergen (comprobación 3.a). El motor de hoy también congela el margen y el
-financiamiento en la partida (`quote_lines.margin_*`, `finance_unit`), así que
-"igual" no es solo aritmética: es qué número se guarda.
+**Revisado el 5-sep-2026 por el punto (f) — NO se disuelve del todo por
+circuito, y no lo fuerzo.** Es tentador leerlo como "cada circuito tiene su
+propia base" (doble facturación: sobre el costo, como hoy; lineal: sobre
+costo + margen, como Santa Rosa desembolsa) y en el fondo así es — pero eso no
+quita el problema real: **dentro del circuito lineal**, con margen en
+porcentaje las dos fórmulas dan el mismo precio (comprobación 3.a); con margen
+en **monto fijo** no, y el motor de hoy (que seguiría usándose tal cual para
+ese circuito) cobraría de menos. Sigue abierta la pregunta 4.9. El motor de
+hoy también congela el margen y el financiamiento en la partida
+(`quote_lines.margin_*`, `finance_unit`), así que "igual" no es solo
+aritmética: es qué número se guarda.
 
 ### 1.6 Capa 2: sobre qué corre y de quién es la mora
 
@@ -137,12 +178,22 @@ Código: `credit.ts:502` (`saleCapital` × tasa × días) y `reports.ts:165`
 (`saleCapital: sale`), restada entera en `reports.ts:267`; la mora facturada
 entra como ingreso de Azagro al 100% (`reports.ts:267`, `mora`).
 
-**DISENO** (§ 5): "Costo de la línea esos 30 días 971.48 a TIIE + 4%" — que sale
-de **106,951.87** (lo que Santa Rosa desembolsó: costo + margen), no del precio
-al cliente — y "Utilidad de la mora 524.81: Azagro 50%, Santa Rosa 50%. El
-financiamiento ordinario se queda íntegro en Santa Rosa."
+**DISENO** (§ 5, cifras corregidas el 5-sep-2026 — ver 1.12): "Costo de la línea
+esos 30 días 971.48 a TIIE + 4%" — que sale de **106,951.87** (lo que Santa
+Rosa desembolsó: costo + margen), no del precio al cliente — y "Utilidad de la
+mora 525.70: Azagro 50%, Santa Rosa 50%. El financiamiento ordinario se queda
+íntegro en Santa Rosa."
 
-**Vigente: DISENO (en documento; no construido).** Ver comprobación 3.c.
+**Se disuelve por circuito (revisado 5-sep-2026, punto f) — este sí, sin
+forzarlo.** La fórmula de EXCEL_VS_SISTEMA § 2, que el código de hoy replica
+exactamente, describe el Excel del circuito de **doble facturación** (verificado
+línea por línea en `EXCEL_VS_SISTEMA.md` § 2, con el mismo circuito que
+HANDOFF documenta): ahí Capa 2 corre sobre el capital de la venta y la mora es
+100 % ingreso de Azagro, y eso sigue siendo correcto porque es el circuito con
+el que se ha operado. La fórmula de DISENO — sobre lo desembolsado, reparto
+50/50 — es específica del circuito **lineal**, que no existe todavía. No hay
+contradicción: son dos fórmulas correctas, una por circuito. Falta construir
+la del lineal cuando llegue su fase (ver comprobación 3.c).
 
 ### 1.7 La bonificación por pronto pago: a qué tasa
 
@@ -153,8 +204,12 @@ financiamiento ordinario se queda íntegro en Santa Rosa."
 **DISENO** (§ 13.B): "Con dos tasas ahora hay que elegir: a la real (4.00%)
 conserva el colchón; a la de cálculo (4.15%) devuelve lo que se cobró."
 
-**Vigente: la decisión de HANDOFF sigue en pie mientras haya un solo spread;
-con dos, es la decisión B.**
+**Sigue abierta — reformulada con el vocabulario de la Decisión 1
+(5-sep-2026).** Ya no hay "tasa real" ni "tasa de cálculo": hay tasa de costo
+y tasa de cobro, dos columnas capturadas. La pregunta D-B sigue en pie con las
+palabras nuevas: ¿la bonificación usa la tasa de costo o la tasa de cobro? El
+dueño no la contestó en esta sesión (anotado también en `DISENO_FINANCIAMIENTO.md`
+§ 13.B).
 
 ### 1.8 Qué se congela en el documento
 
@@ -170,8 +225,11 @@ vivo** de `credit_policies` cada vez (`ops.ts:1853` y `:1985` en el estado de
 cuenta; `creditPolicyMap` en `issueMoraInvoice`). Cambiar un interruptor en
 Ajustes hoy sí mueve facturas ya emitidas.
 
-**Vigente: DISENO.** HANDOFF describía una referencia, no un congelamiento. Es
-la Fase 0/1 del § 14 del diseño; no está construida.
+**Vigente: DISENO, con un detalle nuevo desde la Decisión 1 (5-sep-2026).** No
+es solo congelar la política: con la tabla de dos columnas, el documento tiene
+que congelar **las dos tasas** (costo y cobro) al confirmar, no una. HANDOFF
+describía una referencia, no un congelamiento. Es la Fase 0/1 del § 14 del
+diseño; no está construida.
 
 ### 1.9 "Circuito" no es lo mismo que "ruta"
 
@@ -188,6 +246,13 @@ solo marca el pedido como 'ruta ASR' y se salta la bodega".
 **Vigente: DISENO.** La "ruta ASR" de hoy es logística (no entra a bodega),
 no el circuito de financiamiento. Son dos datos distintos que hoy comparten
 nombre; al construir hay que separarlos.
+
+Nota de continuidad (5-sep-2026, sin forzar nada): con el catálogo de **cuatro**
+circuitos de financiamiento confirmado hoy, el `route_kind = "asr"` que ya
+existe en código (`orders.ts:63`) queda como un punto de partida natural para
+el selector de circuito — hoy solo decide bodega sí/no, pero ya es un campo
+del pedido con ese nombre. No es una decisión, solo una observación para quien
+construya el selector.
 
 ### 1.10 Plazo fijo de 150 vs días del pedido
 
@@ -207,24 +272,67 @@ desde el vencimiento de factura (día 120)". **EXCEL_VS_SISTEMA.md** (§ 9.5) y
 días de factura y días de interés". Todos alineados; se deja anotado porque
 LOGICA sigue diciendo lo viejo.
 
-### 1.12 Inconsistencia interna del diseño (menor)
+### 1.12 Inconsistencia interna del diseño (corregida el 5-sep-2026)
 
 **DISENO** (§ 5): el precio al cliente sale con la tasa de cálculo (TIIE +
 4.15%): 106,951.87 + 6,043.00 = **112,994.88** (verificado en 3.a). Pero la
-"Mora que cobra Santa Rosa 1,496.29 a TIIE + 9%" solo cuadra sobre
+"Mora que cobra Santa Rosa 1,496.29 a TIIE + 9%" solo cuadraba sobre
 **112,927.36** (el precio a TIIE + 4.00%): 112,927.36 × 15.9% × 30 / 360 =
-1,496.29; sobre 112,994.88 daría 1,497.18. Diferencia de $0.89: el ejemplo
-mezcla los dos precios. No cambia la conclusión, solo hay que corregir el
-ejemplo cuando se revise el documento.
+1,496.29; sobre 112,994.88 da 1,497.18. Diferencia de $0.89: el ejemplo
+mezclaba los dos precios.
+
+**Corregido en `DISENO_FINANCIAMIENTO.md` § 5 el 5-sep-2026** (punto g de la
+sesión): mora **1,497.18** (sobre 112,994.88, el precio real al cliente),
+utilidad de la mora **525.70**, reparto **262.85 / 262.85**. El costo de la
+línea (971.48, sobre 106,951.87 a tasa de costo 4.00%) ya estaba bien y no
+cambió.
 
 ### 1.13 DISENO § 12 "Qué NO cambia: el cálculo de mora"
 
 Es cierto para la **fórmula** (cargo × (TIIE + 9%) × días / 360, desde el día
-150), que no se toca. Pero § 5 y § 9.3 sí cambian **quién la cobra** (Santa
-Rosa) y **de quién es** (reparto 50/50). Hoy la FI la emite Azagro y es 100%
-ingreso de Azagro (`ops.ts`, `issueMoraInvoice`; `reports.ts:267`). No es una
-contradicción, pero leerlo como "la mora no cambia" llevaría a no tocar
-`issueMoraInvoice` ni `computeDealPnl`, y sí hay que tocarlos (3.c).
+150), que no se toca — y, con la corrección del 5-sep-2026 (punto f, junto con
+1.6), ahora se puede decir con precisión **para cuál circuito**: es cierto
+**dentro de doble facturación** (la fórmula, quién la cobra y de quién es la
+utilidad se quedan exactamente como hoy: Azagro, 100 %). Cambia **al entrar al
+circuito lineal**: la cobra Santa Rosa y la utilidad se reparte 50/50 (§ 5 y
+§ 9.3). No es una contradicción entre documentos — es que "no cambia" describía
+un solo circuito y hacía falta decir cuál. `issueMoraInvoice` y
+`computeDealPnl` no se tocan para doble facturación; sí hace falta construir
+el camino lineal cuando llegue su fase (3.c).
+
+### 1.14 Revisión pedida por el dueño (punto f, 5-sep-2026): ¿qué más se disuelve por ser parámetro de circuito?
+
+Se repasaron las 13 contradicciones contra la idea de que cada circuito trae
+sus propios parámetros. **Se disuelven, sin forzarlas:**
+
+- **1.2** (quién factura al cliente): en tres circuitos de cuatro factura
+  Azagro; solo en lineal factura Santa Rosa. No era una contradicción, faltaba
+  decir "por circuito".
+- **1.6** (Capa 2 y de quién es la mora): la fórmula de EXCEL_VS_SISTEMA / el
+  código actual es la del circuito de doble facturación, verificada contra su
+  Excel; la del diseño es la del lineal. Dos fórmulas correctas, una por
+  circuito.
+- **1.13** (mismo tema que 1.6, sobre "qué no cambia").
+- **1.4** (comisión del 1 %): tratada en 1.4 directamente — HANDOFF describe
+  doble facturación (comisión sí), DISENO describe lineal (comisión no).
+
+**No se disuelve, y se reporta tal cual — punto f pide no forzar:**
+
+- **1.5** (sobre qué base se calcula el financiamiento): la fórmula sí puede
+  leerse "una por circuito" en el fondo, pero eso no resuelve el problema real:
+  **dentro del circuito lineal**, con margen en monto fijo, la fórmula de hoy
+  (que seguiría siendo la base del cálculo) da un precio distinto al que el
+  diseño exige. Es una discrepancia técnica real que sigue pendiente de
+  decisión (4.9), no una contradicción entre documentos que un circuito
+  distinto explique.
+- **1.3** (una tasa vs dos): no se disolvió por circuito — la resolvió
+  directamente la Decisión 1 del dueño (tabla de dos columnas), independiente
+  de cuál circuito se use.
+- **1.7 / D-B** (tasa del pronto pago): sigue sin contestar; solo cambió el
+  vocabulario (costo/cobro en vez de real/cálculo).
+- **1.8, 1.9, 1.10, 1.11, 1.12**: no tratan de qué circuito aplica una
+  fórmula, sino de mecanismos (congelar, nombrar un dato, fechas, un error de
+  aritmética); no hay nada que disolver ahí por esta vía.
 
 ---
 
@@ -272,19 +380,27 @@ descuenta de su siguiente factura, se le regresa, o las dos cosas según el
 caso?*
 
 ### L4a. En un pedido en dólares, ¿el precio se captura en dólares o en pesos? (LOGICA h.14)
-**ABIERTA — y el código se contradice a sí mismo.** Al emitir la factura, el
-total del pedido se toma como **pesos** y los dólares se derivan dividiendo
-entre el TC: `azagro.ts:1435` `const mxn = Number(so[0].total)` y
-`azagro.ts:1470` `mxn / fx`; el cobro también trabaja "en pesos al TC pactado"
-(`ops.ts:1518`). Pero los papeles imprimen ese mismo número con signo de
-**dólares**: el pedido (`src/routes/sales.$orderId.tsx:283`,
+**La parte de MODELO quedó RESUELTA por la Decisión 2 del dueño (5-sep-2026,
+`DECISIONES.md`): la moneda y el tipo de cambio pertenecen a la OPERACIÓN, no
+al cliente.** Un mismo cliente puede tener un pedido en pesos y otro en
+dólares al mismo tiempo, con TC pactado por operación. Esto confirma lo que ya
+hace el esquema (`sales_orders.currency`, `quotes.currency`,
+`invoices.currency` son campos por registro, no por `partners`) como regla
+deliberada, no como coincidencia.
+
+**Lo que sigue ABIERTO — el código se contradice a sí mismo en la
+captura.** Al emitir la factura, el total del pedido se toma como **pesos** y
+los dólares se derivan dividiendo entre el TC: `azagro.ts:1435` `const mxn =
+Number(so[0].total)` y `azagro.ts:1470` `mxn / fx`; el cobro también trabaja
+"en pesos al TC pactado" (`ops.ts:1518`). Pero los papeles imprimen ese mismo
+número con signo de **dólares**: el pedido (`src/routes/sales.$orderId.tsx:283`,
 `moneyIn(ln.unitPrice, form.currency)`), la cotización (`src/routes/quotes.tsx:342`)
 y el estado de cuenta (`doc-text.ts:212`, `money(r.cargo)` con la moneda USD).
 Ninguna pantalla dice en qué moneda escribir el precio (la única etiqueta USD
-es "Dólar pactado", `quotes.tsx:390`). *Para el dueño: cuando el vendedor
-captura un precio para un cliente que paga en dólares, ¿escribe dólares o
-pesos? Hoy el sistema lo trata como pesos por dentro y lo enseña como dólares
-por fuera.*
+es "Dólar pactado", `quotes.tsx:390`). El dueño lo dejó anotado explícitamente:
+*el campo de captura del precio debe indicar la moneda del pedido (USD o MXN),
+nunca un "$" ambiguo, porque hoy la pantalla muestra "$" mientras el código
+guarda pesos.* Falta construirlo.
 
 ### L4b. Al cobrar una factura en dólares, ¿se pregunta el tipo de cambio del pago? (LOGICA h.13)
 **RESUELTA EN CÓDIGO.** Sí. La pantalla de cobro captura **"Importe (pesos
@@ -384,22 +500,31 @@ idempotente y exige elegir la política de cobro (`src/lib/erp/cutover.ts:152`).
 Falta el archivo.
 
 ### H8b. ¿Con qué circuito entran los saldos del corte?
-**ABIERTA.** Ver 4.6. Son deudas del cliente **con Azagro**, a crédito, sin
-línea de por medio: no caben en ninguno de los tres circuitos de la tabla de
-DISENO § 3. *Para el dueño: los saldos viejos de Compaq, ¿siguen siendo de
-Azagro hasta que se cobren, con su mora normal, o pasan a Santa Rosa?*
+**RESUELTA EN DOCUMENTO (Decisión 3.d del dueño, 5-sep-2026).** Los saldos del
+corte de Compaq entran con el circuito de **doble facturación (ASR)**, porque
+así se operaron: son deudas reales que ya corrieron por ese circuito, no un
+caso nuevo. Con el catálogo corregido de cuatro circuitos (DISENO § 3), sí
+caben — ya no hacía falta un quinto caso. Ver 4.6, misma respuesta. Falta
+construir el selector de circuito y que el importador (`cutover.ts:152`) lo
+capture además de la política de cobro.
 
 ### D-A. La comisión del 1% en el precio (DISENO § 13.A)
-**ABIERTA.** Hoy se cobra siempre y se reporta como costo: `pricing.ts:57-77`,
-`credit.ts:471` ("NO QUITAR"), Ajustes `settings.tsx:340` "Comisión ASR (en
-precio, una sola vez)". Las tres salidas del diseño están sin elegir. *Para el
-dueño: ese 1% que hoy va en cada precio, ¿es un costo que solo se cobra cuando
-la línea lo cobra, es margen nuestro que se queda siempre, o se quita?*
+**RESUELTA EN DOCUMENTO (Decisión 3 del dueño, 5-sep-2026), no construida.**
+Es la salida 1 del diseño: **la comisión es un parámetro de la línea/circuito**.
+En doble facturación (ASR) se cobra —es un costo real, la línea la cobra, así
+se ha operado siempre—; en el circuito lineal no se cobra (la línea no la
+cobra). Deja de ser una constante global. El código de hoy la cobra siempre y
+la reporta como costo (`pricing.ts:57-77`, `credit.ts:471` "NO QUITAR",
+Ajustes `settings.tsx:340`) — correcto mientras solo exista doble facturación;
+falta condicionarla por circuito cuando se construya el lineal.
 
-### D-B. ¿A qué tasa se bonifica el pronto pago, real (4.00) o de cálculo (4.15)? (DISENO § 13.B)
-**ABIERTA.** Hoy hay una sola tasa (`ops.ts:1673`, `credit.ts:445`). *Para el
-dueño: cuando un cliente paga antes, ¿le regresamos exactamente lo que le
-cobramos de financiamiento, o un poco menos y nos quedamos el colchón?*
+### D-B. ¿A qué tasa se bonifica el pronto pago, de costo o de cobro? (DISENO § 13.B)
+**ABIERTA — reformulada el 5-sep-2026.** Ya no es "real (4.00) vs cálculo
+(4.15)": con la Decisión 1, la tabla tiene tasa de costo y tasa de cobro
+capturadas directamente. Hoy el código usa una sola tasa para todo
+(`ops.ts:1673`, `credit.ts:445`). *Para el dueño: cuando un cliente paga
+antes, ¿le regresamos exactamente lo que le cobramos (tasa de cobro), o solo
+lo que a nosotros nos costó (tasa de costo), quedándonos la diferencia?*
 
 ### D-C. ¿Cuánto tarda Santa Rosa en pagarle a Azagro, y cuánto hay expuesto en ese tramo? (DISENO § 13.C)
 **ABIERTA.** No hay nada en código: no existe la cuenta "Santa Rosa por
@@ -412,10 +537,17 @@ cuánto nos deben en cada momento?*
 (`credit.ts:156-157`, HANDOFF Decisiones "Tasa de cobro TIIE + 9%").
 
 ### E2. ¿La tabla de TIIE se captura con el colchón de +0.30 sobre Banxico? (EXCEL § 1 y § 9.6)
-**ABIERTA.** Ni el código ni Ajustes dicen nada (comprobación 3.b). *Para el
-dueño: la TIIE que se captura en Ajustes, ¿es la de Banxico tal cual, o ya con
-los 0.30 de protección? Y si el diseño nuevo agrega otros 0.15, ¿se quieren
-los dos colchones?*
+**RESUELTA EN DOCUMENTO (Decisión 1 del dueño, 5-sep-2026), no construida.**
+Deja de existir la pregunta tal como estaba planteada: ya no hay una sola
+tasa con un colchón escondido adentro. La tabla lleva **dos columnas
+capturadas directamente** —tasa de costo y tasa de cobro—, ninguna se llama
+"TIIE" (un número con protección adentro no es la TIIE que publica Banxico), y
+la protección se calcula como la diferencia entre las dos. El riesgo de los
+dos colchones encimados (comprobación 3.b) desaparece porque ya no hay un
+colchón "agregado en código" sobre una tasa que quizá ya traía uno: los dos
+números que importan se capturan tal cual. Falta construir la tabla de dos
+columnas (hoy es de una sola, `tiie_rates`) y decidir con qué se siembra la
+columna de costo para las tasas ya capturadas.
 
 ### E3. La TIIE del precio (al cotizar) y la del costo (al emitir la factura) son distintas (EXCEL § 1 y § 2)
 **RESUELTA EN CÓDIGO.** El precio usa el renglón vigente al cotizar
@@ -423,9 +555,11 @@ los dos colchones?*
 (`azagro.ts:1450-1462`, `tiieIssue`) y la utilidad usa esa foto
 (`reports.ts:80`). EXCEL § 2 todavía lo marca "pendiente": está desactualizado.
 
-**ABIERTAS en esta lista: 19** — L3a, L3b, L3c, L4a, L5, L6, L8a, H3, H4a, H4b,
-H4c, H4d, H5, H6, H8b, D-A, D-B, D-C, E2. (H7 y H2 están decididas en
-documento; el resto está en código.)
+**ABIERTAS en esta lista: 16** (eran 19; el 5-sep-2026 se cerraron D-A, H8b y
+E2, las tres en documento, ninguna construida) — L3a, L3b, L3c, L4a
+(solo la parte de captura; el modelo ya se cerró), L5, L6, L8a, H3, H4a, H4b,
+H4c, H4d, H5, H6, D-B, D-C. (H2 y H7 están decididas en documento; D-A, E2 y
+H8b se movieron a "resuelta en documento" hoy; el resto está en código.)
 
 ---
 
@@ -470,7 +604,15 @@ financiamiento. O el motor cambia para el modo $ (financiar costo + margen), o
 el modo $ deja de usarse en el circuito Santa Rosa. Es una decisión, no un
 detalle; queda anotada en 4.9.
 
-### 3.b El colchón de la TIIE: hoy no está escrito en ningún lado, y con el diseño quedarían dos encimados
+### 3.b El colchón de la TIIE: hoy no está escrito en ningún lado, y con el diseño quedarían dos encimados — riesgo resuelto por la Decisión 1
+
+> **El riesgo que describe esta comprobación quedó resuelto el 5-sep-2026 por
+> la Decisión 1 del dueño** (tabla de dos columnas, tasa de costo y tasa de
+> cobro, capturadas directamente; ver 1.3 y E2). El análisis de abajo se
+> conserva porque explica **por qué** hacía falta esa decisión: con una sola
+> tasa y un spread calculado aparte, dos colchones podían encimarse sin que
+> nadie lo notara. Con dos columnas capturadas no hay cómo encimar nada: lo
+> que se ve es lo que hay.
 
 - **Código y Ajustes:** ninguna mención. Búsqueda de "colchón", "Banxico",
   "0.30" y "protección" en `src/` y `migrations/`: cero resultados. El único
@@ -600,14 +742,15 @@ bonificación es devolver parte de ese financiamiento. § 13.B decide la
 le devuelve parte del financiamiento, ¿lo pone Santa Rosa, Azagro, o a
 medias?*
 
-### 4.6 Con qué circuito entran los saldos del corte de Compaq
-El importador exige elegir política de cobro (`cutover.ts:152`) pero no
-circuito; esos saldos son deudas con Azagro, a crédito, sin línea, con mora
-normal — un cuarto caso que la tabla de § 3 no tiene ("Línea propia: cuando
-llegue"). Igual que **cualquier venta a crédito que Azagro haga sin Santa
-Rosa mientras no tenga línea**. *Para el dueño: (= H8b) los saldos viejos y las
-ventas a crédito que no pasen por Santa Rosa, ¿se manejan como "Azagro
-financia sin línea", con su mora, tal como hoy?*
+### 4.6 Con qué circuito entran los saldos del corte de Compaq — RESUELTO el 5-sep-2026
+**Cerrado (Decisión 3.d, `DECISIONES.md`).** Entran con el circuito de
+**doble facturación (ASR)**: son deudas reales que Azagro operó con ese
+método, y el catálogo corregido de cuatro circuitos (DISENO § 3) ya tiene
+dónde ponerlas, sin inventar un quinto caso. Mismo criterio para cualquier
+venta a crédito que Azagro haga sin pasar por la línea de Santa Rosa mientras
+no tenga línea propia: doble facturación. Falta construir: que el importador
+(`cutover.ts:152`) capture el circuito además de la política de cobro, y el
+selector de circuito en el pedido.
 
 ### 4.7 El estado de cuenta que sale al cliente, y Santa Rosa como tercera audiencia
 Hoy los papeles tienen dos audiencias, `"cliente" | "proveedor"`
@@ -647,11 +790,14 @@ construir el paso 10 ("espejo").
 
 ## 5. Qué hacer con esto
 
-- Las **19 ABIERTAS** del punto 2 y las **10 preguntas** del punto 4 se
-  contestan en `DECISIONES.md` conforme el dueño decida, un renglón por
-  decisión, con fecha.
-- Antes de la Fase 2 del diseño (líneas y disposiciones) hay que cerrar como
-  mínimo: D-A (comisión 1 %), E2 (colchón), 4.6 (circuito de los saldos del
-  corte y de las ventas sin línea) y 4.9 (margen en $ fijo). Sin esas cuatro,
-  el motor de precios que "no cambia" sí cambia de significado.
+- Las **16 ABIERTAS** del punto 2 y las **9 preguntas sin contestar** del
+  punto 4 (de 10; 4.6 se cerró hoy) se contestan en `DECISIONES.md` conforme
+  el dueño decida, un renglón por decisión, con fecha.
+- El 5-sep-2026 (tarde) el dueño cerró tres de las cuatro preguntas que
+  gateaban la Fase 2: **D-A** (comisión, parámetro del circuito), **E2**
+  (colchón, tabla de dos columnas) y **H8b / 4.6** (saldos del corte, circuito
+  de doble facturación) — las tres decididas en documento, ninguna construida
+  todavía. **Sigue pendiente una sola: 4.9 (margen en $ fijo)** — sin
+  contestarla, el motor de precios del circuito lineal no financia lo mismo
+  que el diseño exige cuando el margen es en pesos.
 - Este archivo se actualiza cada vez que una pregunta cambie de columna.

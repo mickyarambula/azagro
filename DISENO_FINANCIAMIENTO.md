@@ -5,6 +5,22 @@ crédito y circuito con Almacenes Santa Rosa se revisa contra este documento.
 
 Estado: borrador para revisión. Las decisiones abiertas están marcadas al final.
 
+> **Corrección del 5-sep-2026 (mismo día del borrador).** El § 1 y la tabla de
+> § 3 decían que el circuito de doble facturación con la empresa hermana
+> "se abandonó". No es así: **sigue siendo un circuito elegible**, no una
+> historia. Lo que este documento fija es el circuito **lineal** como el nuevo
+> **predeterminado** para operaciones nuevas — no como reemplazo del anterior.
+> Razón: el 1 % de comisión de la doble facturación existía por una necesidad
+> fiscal real (Santa Rosa le compraba y le revendía a Azagro, y tenía que
+> agregar algo a lo que revendía); en el circuito lineal esa necesidad no
+> existe, así que ahí no se cobra — pero el circuito viejo puede volver a
+> usarse. Y todo lo que Azagro ha operado hasta hoy, incluidos los saldos que
+> va a traer el corte de Compaq, se hizo con el método de doble facturación.
+> El § 3 se corrige más abajo con el catálogo de cuatro circuitos; el § 6
+> queda **sustituida** por la decisión del dueño del 5-sep-2026 sobre la tabla
+> de tasas (ver la nota en esa sección). Detalle completo en `ESTADO.md`
+> § 1.1, § 1.4 y `DECISIONES.md`.
+
 ---
 
 ## 1. Para qué existe este documento
@@ -44,14 +60,24 @@ conviven los distintos esquemas sin condicionales regados por el sistema.
 
 Cada pedido nace declarando su circuito. No todos los clientes van por el mismo.
 
-| Circuito | Quién financia | Quién factura al cliente | Estado |
-|---|---|---|---|
-| Contado | Nadie | Azagro | Existe hoy |
-| Línea Santa Rosa | Santa Rosa | Santa Rosa | Por construir |
-| Línea propia | Azagro | Azagro | Cuando llegue la línea |
+> **Corregido el 5-sep-2026: son CUATRO circuitos, no tres.** La tabla original
+> omitía el de doble facturación, que no está abandonado — es el que ha
+> financiado toda la operación hasta hoy.
 
-Los tres deben poder convivir. Cuando Azagro tenga línea propia, no va a alcanzar
-para todo, así que va a haber operaciones por las dos vías al mismo tiempo.
+| Circuito | Quién financia | Quién factura al cliente | Comisión de apertura | Estado |
+|---|---|---|---|---|
+| Contado | Nadie | Azagro | — | Existe hoy |
+| Doble facturación (ASR) | Santa Rosa, vía Azagro↔Santa Rosa↔Azagro | Azagro | Sí, 1 % (necesidad fiscal del esquema) | Existe hoy — es cómo se ha operado todo hasta el 5-sep-2026 |
+| Línea Santa Rosa (lineal) | Santa Rosa, directo | Santa Rosa | No (la línea no la cobra) | Por construir — nuevo predeterminado |
+| Línea propia | Azagro | Azagro | Según la línea que se contrate | Cuando llegue la línea |
+
+Los cuatro deben poder convivir. La comisión de apertura, el spread y quién
+factura no son globales: son **parámetros de cada circuito**. El corte de
+Compaq y cualquier venta a crédito que no pase por la línea Santa Rosa (porque
+Azagro todavía no tiene línea propia) entran por **doble facturación**, que
+para ese propósito sigue haciendo el mismo trabajo que hace hoy. Cuando Azagro
+tenga línea propia, tampoco va a alcanzar para todo: va a haber operaciones por
+varias vías al mismo tiempo.
 
 ---
 
@@ -100,12 +126,21 @@ sobre el costo. Es aritméticamente igual a como el sistema lo calcula hoy, así
 
 ### Si el cliente se atrasa 30 días
 
+> **Corregido el 5-sep-2026: error aritmético del borrador original.** La mora
+> estaba calculada sobre 112,927.36 (el precio que habría salido a la tasa de
+> costo 4.00%), no sobre 112,994.88 (el precio real que se le factura al
+> cliente, a la tasa de cobro 4.15%, el mismo de la sección "Precio al
+> cliente" arriba). Con el número correcto la mora sube $0.89 y la utilidad de
+> la mora sube $0.89 más (el reparto 50/50 se recalcula sobre el número
+> corregido). El costo de la línea SÍ estaba bien: corre sobre 106,951.87 (lo
+> que Santa Rosa desembolsó), no sobre el precio al cliente.
+
 ```
-Mora que cobra Santa Rosa                  1,496.29    a TIIE + 9%
-Costo de la línea esos 30 días               971.48    a TIIE + 4%
-Utilidad de la mora                          524.81
-    Azagro          50%                      262.40
-    Santa Rosa      50%                      262.40
+Mora que cobra Santa Rosa                  1,497.18    a TIIE + 9%, sobre 112,994.88 (precio real al cliente)
+Costo de la línea esos 30 días               971.48    a TIIE + 4%, sobre 106,951.87 (lo desembolsado por Santa Rosa)
+Utilidad de la mora                          525.70
+    Azagro          50%                      262.85
+    Santa Rosa      50%                      262.85
 ```
 
 El financiamiento ordinario (los 6,043.00 del plazo pactado) se queda íntegro en
@@ -113,7 +148,32 @@ Santa Rosa. Solo la utilidad de la mora se reparte.
 
 ---
 
-## 6. Las dos tasas
+## 6. Las dos tasas — SUSTITUIDA el 5-sep-2026, se conserva como historia
+
+> **Esta sección quedó sustituida por la decisión del dueño del 5-sep-2026**
+> (`DECISIONES.md`, misma fecha). El esquema de "tasa real 4.00% / tasa de
+> cálculo 4.15%" de aquí abajo **no se construye**. En su lugar: la tabla de
+> tasas lleva **dos columnas por renglón** — "tasa de costo" (lo que de verdad
+> cuesta la línea) y "tasa de cobro" (la que entra al precio y a la mora del
+> cliente) — capturadas las dos por el dueño; pueden ser iguales. La
+> protección **se calcula** (es la diferencia entre las dos), no se captura
+> aparte. Ya no hacen falta dos spreads sobre una sola tasa: el spread de
+> línea vuelve a ser uno solo, aplicado sobre cada una de las dos tasas según
+> corresponda:
+>
+> - Costo de la línea = **tasa de costo** + spread de línea.
+> - Financiamiento que entra al precio = **tasa de cobro** + spread de línea.
+> - Mora al cliente = **tasa de cobro** + spread de mora.
+>
+> El reporte de utilidad debe poder mostrar el costo real y la protección por
+> separado; el sistema debe poder mostrar qué tasa de mora está recibiendo el
+> cliente de verdad; y el documento congela **las dos** tasas al confirmar, no
+> una. Las columnas de la tabla **no se llaman "TIIE"**: un número que ya trae
+> protección adentro no es la TIIE que publica Banxico. Esto cierra la
+> pregunta E2 de `ESTADO.md` — decidido en documento, todavía no implementado.
+>
+> Texto original de esta sección, sin tocar, porque explica el porqué del
+> colchón (siguen aplicando el motivo y el ejemplo, solo cambia el mecanismo):
 
 Hoy el sistema usa un solo número, el spread ASR de 4%, para poner precio y para
 saber cuánto cuesta. Con el colchón de protección son dos cosas distintas y hay que
@@ -261,6 +321,12 @@ y debe reportarse como margen. Tres salidas:
 **B. La bonificación por pronto pago, ¿a qué tasa?** Se calcula a tasa de costo. Con
 dos tasas ahora hay que elegir: a la real (4.00%) conserva el colchón; a la de
 cálculo (4.15%) devuelve lo que se cobró.
+
+> *Nota del 5-sep-2026:* el § 6 quedó sustituido por la tabla de dos columnas
+> (tasa de costo / tasa de cobro, ver ahí). Esta pregunta sigue **abierta**,
+> pero reformulada con el vocabulario nuevo: ¿la bonificación usa la **tasa de
+> costo** (lo que de verdad cuesta la línea) o la **tasa de cobro** (lo que se
+> le cobró al cliente)? No la contestó el dueño en esta sesión.
 
 **C. ¿Cuánto tarda Santa Rosa en pagar a Azagro?** No hay regla: depende de si hay
 dinero o si hay que disponer. Ese hueco es dinero de Azagro parado y conviene
