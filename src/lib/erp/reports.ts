@@ -9,6 +9,7 @@ import { policy } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { circuitTerms, financingCircuit } from "@/lib/erp/circuits";
 import { linealMarginFromPrice, type FinancingBase } from "@/lib/erp/pricing";
+import { YEAR_DAYS } from "@/lib/erp/rules";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -39,9 +40,13 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     quote_id: number | null;
     circuit_code: string | null;
     q_commission: string | null;
+    q_cost_rate: string | null;
+    q_collection_rate: string | null;
   }>`
     select so.name, so.currency, so.date::text, coalesce(so.credit_days,0)::int as credit_days, so.quote_id, so.circuit_code,
-      (select q.commission_rate::text from quotes q where q.id = so.quote_id) as q_commission
+      (select q.commission_rate::text from quotes q where q.id = so.quote_id) as q_commission,
+      (select q.cost_rate::text from quotes q where q.id = so.quote_id) as q_cost_rate,
+      (select q.collection_rate::text from quotes q where q.id = so.quote_id) as q_collection_rate
     from sales_orders so where so.id = ${soId} and so.company_id = ${companyId}
   `;
   if (!so[0]) throw new Error("Pedido no encontrado");
@@ -115,6 +120,12 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     commissionRate = (await circuitTerms(sql, companyId, circuitCode)).commissionRate;
   }
   const commissionOrZero = commissionRate ?? 0;
+  // Paso 4: las DOS tasas del lineal (Decisión 1), congeladas en la factura o,
+  // si no, en la cotización. Nunca se inventan: si faltan, la protección
+  // queda "sin dato", no en cero. La tasa de cobro entró al precio; la de
+  // costo es lo que de verdad cuesta la línea; la protección es la diferencia.
+  const costRate = snap.costRate ?? (so[0].q_cost_rate != null ? Number(so[0].q_cost_rate) : null);
+  const collectionRate = snap.collectionRate ?? (so[0].q_collection_rate != null ? Number(so[0].q_collection_rate) : null);
   const exceededEnd = fv[0]?.paid_date && fv[0].paid_date < today ? fv[0].paid_date : today;
   const daysExceeded = fv[0]
     ? Math.max(0, daysBetween(fv[0].credit_due || fv[0].due_date, exceededEnd))
@@ -224,6 +235,20 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       disbursed = qty * perUnit;
     }
     const financierFinance = !asr && !excluded ? Math.round((sale - disbursed) * 100) / 100 : 0;
+    // Paso 4: LA PROTECCIÓN SE VE POR SEPARADO. Lineal: costo real de la línea
+    // = lo desembolsado × (tasa de costo + spread) × días / 360; protección =
+    // lo que se le cobró al cliente − ese costo (0.15 puntos en DISENO § 5:
+    // 66.84 de 4,924.24). Sin tasa de costo congelada no se estima: null.
+    // ASR: una sola tasa, el costo financiero ES el costo real, protección 0.
+    let lineCost: number | null = asr ? finance : null;
+    let protection: number | null = asr ? 0 : null;
+    if (!asr && !excluded && financialDays > 0 && costRate != null) {
+      lineCost = Math.round(((disbursed * (costRate + costSpread) * financialDays) / YEAR_DAYS) * 100) / 100;
+      protection = Math.round((financierFinance - lineCost) * 100) / 100;
+    } else if (!asr && !excluded && financialDays <= 0) {
+      lineCost = 0;
+      protection = 0;
+    }
     const revenueLine = asr ? sale : excluded ? 0 : disbursed;
     const margin = excluded ? 0 : revenueLine - cogs - freight - other;
     return {
@@ -251,6 +276,10 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       disbursed,
       /** Lineal: lo que Santa Rosa le cobra al cliente por financiar (venta − factura a Santa Rosa). ASR: 0. */
       financierFinance,
+      /** Costo real de la línea (tasa de costo). ASR: = finance. Lineal sin tasa de costo congelada: null. */
+      lineCost,
+      /** Protección = cobrado al cliente − costo real. ASR: 0. Lineal sin tasa de costo: null. */
+      protection,
       revenueLine,
       excluded,
       excludeReason,
@@ -295,6 +324,11 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   const clientPrice = included.reduce((s, l) => s + l.sale, 0);
   const disbursed = included.reduce((s, l) => s + l.disbursed, 0);
   const financierFinance = Math.round(included.reduce((s, l) => s + l.financierFinance, 0) * 100) / 100;
+  // Paso 4: costo real de la línea y protección, sumados. Si alguna partida
+  // del lineal no tiene tasa de costo congelada, el total queda "sin dato".
+  const protectionKnown = included.every((l) => l.lineCost != null && l.protection != null);
+  const lineCost = protectionKnown ? Math.round(included.reduce((s, l) => s + (l.lineCost ?? 0), 0) * 100) / 100 : null;
+  const protection = protectionKnown ? Math.round(included.reduce((s, l) => s + (l.protection ?? 0), 0) * 100) / 100 : null;
   const cogs = included.reduce((s, l) => s + l.cogs, 0);
   const freightQuote = included.reduce((s, l) => s + l.freight, 0);
   const otherQuote = included.reduce((s, l) => s + l.other, 0);
@@ -351,8 +385,12 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     disbursed,
     financierFinance,
     commissionRate,
-    costRate: snap.costRate ?? null,
-    collectionRate: snap.collectionRate ?? null,
+    costRate,
+    collectionRate,
+    spread: costSpread,
+    // Paso 4: el costo financiero desglosado. ASR: lineCost = finance, protección 0.
+    lineCost,
+    protection,
     financeRate: tiieIssue != null ? tiieIssue + costSpread : null,
     tiieIssue,
     tiieDate: tiiePick?.date ?? null,
@@ -431,6 +469,13 @@ export const listDealPnl = createServerFn({ method: "POST" })
         cogs: d.cogs,
         freight: d.freight,
         finance: d.finance,
+        // Paso 4: por dónde corrió y el costo financiero desglosado.
+        circuit: d.circuit,
+        financingBase: d.financingBase,
+        clientPrice: d.clientPrice,
+        financierFinance: d.financierFinance,
+        lineCost: d.lineCost,
+        protection: d.protection,
         margin: d.margin,
         marginPct: d.marginPct,
         netProfit: d.netProfit,
@@ -446,12 +491,28 @@ export const listDealPnl = createServerFn({ method: "POST" })
         cogs: s.cogs + d.cogs,
         freight: s.freight + d.freight,
         finance: s.finance + d.finance,
+        financierFinance: s.financierFinance + d.financierFinance,
+        // null se propaga: un total con una partida sin tasa de costo no se inventa.
+        lineCost: s.lineCost == null || d.lineCost == null ? null : s.lineCost + d.lineCost,
+        protection: s.protection == null || d.protection == null ? null : s.protection + d.protection,
         margin: s.margin + d.margin,
         netProfit: s.netProfit + d.netProfit,
         excluidas: s.excluidas + d.excluidas,
         ventaExcluida: s.ventaExcluida + d.ventaExcluida,
       }),
-      { revenue: 0, cogs: 0, freight: 0, finance: 0, margin: 0, netProfit: 0, excluidas: 0, ventaExcluida: 0 },
+      {
+        revenue: 0,
+        cogs: 0,
+        freight: 0,
+        finance: 0,
+        financierFinance: 0,
+        lineCost: 0 as number | null,
+        protection: 0 as number | null,
+        margin: 0,
+        netProfit: 0,
+        excluidas: 0,
+        ventaExcluida: 0,
+      },
     );
     // Cuántas partidas quedaron fuera y por qué (suma por motivo).
     const motivos = new Map<string, number>();
@@ -573,6 +634,9 @@ export const getPanorama = createServerFn({ method: "GET" })
       capa1: number;
       capa2: number;
       descuento: number;
+      /** Paso 4 — lineal: financiamiento de Santa Rosa (lo paga el cliente) y su protección. ASR: 0. */
+      financiamientoSR: number;
+      proteccion: number | null;
       utilidad: number;
       realizada: number;
       caja: number;
@@ -588,7 +652,7 @@ export const getPanorama = createServerFn({ method: "GET" })
         partner: o.partner,
         group: o.group_name,
         venta: 0, mora: 0, fx: 0, costo: 0, comision: 0, capa1: 0, capa2: 0,
-        descuento: 0, utilidad: 0, realizada: 0, caja: 0, proporcional: 0,
+        descuento: 0, financiamientoSR: 0, proteccion: 0, utilidad: 0, realizada: 0, caja: 0, proporcional: 0,
         excluidas: 0, ventaExcluida: 0,
       };
       r.excluidas += d.excluded.n;
@@ -602,6 +666,8 @@ export const getPanorama = createServerFn({ method: "GET" })
       r.capa1 += d.layer1;
       r.capa2 += d.layer2;
       r.descuento += d.discount;
+      r.financiamientoSR += d.financierFinance;
+      r.proteccion = r.proteccion == null || d.protection == null ? null : r.proteccion + d.protection;
       r.utilidad += d.utilidadDevengada;
       r.realizada += d.utilidadRealizada;
       r.caja += d.utilidadCaja;
@@ -621,6 +687,8 @@ export const getPanorama = createServerFn({ method: "GET" })
       capa1: sum((r) => r.capa1),
       capa2: sum((r) => r.capa2),
       descuento: sum((r) => r.descuento),
+      financiamientoSR: sum((r) => r.financiamientoSR),
+      proteccion: porRazon.some((r) => r.proteccion == null) ? null : sum((r) => r.proteccion ?? 0),
       utilidad: sum((r) => r.utilidad),
       realizada: sum((r) => r.realizada),
       caja: sum((r) => r.caja),

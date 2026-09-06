@@ -472,10 +472,14 @@ function Ficha() {
               value={money(pnl.financingBase === "costo_margen" ? pnl.financierFinance : pnl.finance)}
               hint={
                 pnl.financingBase === "costo_margen"
-                  ? `Lo que Santa Rosa le agrega al cliente sobre la factura de Azagro (${money(pnl.disbursed)}) a la tasa de cobro + spread por ${pnl.financialDays} d. No es costo de Azagro: el precio al cliente lo lleva, la factura a Santa Rosa no.`
+                  ? `Base: la factura de Azagro a Santa Rosa ${money(pnl.disbursed)} (costo + margen), por ${pnl.financialDays} d. Lo paga el cliente a Santa Rosa; no es costo de Azagro. ${
+                      pnl.lineCost != null && pnl.protection != null && pnl.costRate != null && pnl.collectionRate != null
+                        ? `Desglose: costo real de la línea ${money(pnl.lineCost)} (tasa de costo ${pctDe(pnl.costRate)} + spread ${pctDe(pnl.spread)}) + protección ${money(pnl.protection)} (${pctDe(pnl.collectionRate - pnl.costRate)} de diferencia entre la tasa de cobro y la de costo).`
+                        : "Sin tasa de costo congelada: la protección no se estima."
+                    }`
                   : pnl.tiieIssue == null
-                  ? `Sin TIIE en la tabla para la emisión (${pnl.tiieDate ?? "sin fecha"}): el costo financiero no se calcula ni se estima.`
-                  : `Sobre el costo puesto ${money(pnl.financeBase)} (mercancía + flete), la misma base que el precio. Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% (tabla${pnl.tiieDate ? `, ${dateDMY(pnl.tiieDate)}` : ""}) + spread. Comisión y Capa 1 van cobradas al cliente dentro del precio.`
+                    ? `Sin TIIE en la tabla para la emisión (${pnl.tiieDate ?? "sin fecha"}): el costo financiero no se calcula ni se estima.`
+                    : `Base: el costo puesto ${money(pnl.financeBase)} (mercancía + flete) × (1 + comisión del circuito), la misma que el precio. Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)}. Una sola tasa (TIIE ${pctDe(pnl.tiieIssue)} + spread ${pctDe(pnl.spread)}): el costo real es este mismo, protección ${money(0)}.`
               }
             />
             <PnlKpi
@@ -863,6 +867,11 @@ function Ficha() {
       )}
     </form>
   );
+}
+
+/** "6.90 %" a partir de una fracción (0.069). Solo texto de tarjeta. */
+function pctDe(fraction: number) {
+  return `${(fraction * 100).toFixed(2)} %`;
 }
 
 function PnlKpi({ label, value, hint }: { label: string; value: string; hint?: string }) {

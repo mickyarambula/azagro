@@ -25,6 +25,14 @@
  *   3b. Cuántas cotizaciones quedaron SIN comisión congelada (esperado: 0
  *      después de la 0026; las que queden se detienen al repreciar, no
  *      inventan una).
+ *   5. NÚCLEO DEL P&L POR PEDIDO (paso 4): con lo congelado en la factura (o
+ *      en la cotización, o el catálogo) se rehace, pedido por pedido, la
+ *      parte del P&L que no depende del día de hoy — venta, costo, flete,
+ *      comisión, Capa 1, margen; y en el lineal, financiamiento de Santa
+ *      Rosa, costo real de la línea y protección. Entra a la instantánea:
+ *      antes/después de desplegar el paso 4 tiene que dar lo mismo. Quedan
+ *      fuera a propósito la Capa 2 (días excedidos), la mora, el pronto pago
+ *      y el TC: cambian con la fecha y con los cobros, no con el paso 4.
  *
  * Antes/después exacto: corre con --guardar antes de desplegar y con
  * --comparar después; la comparación es partida por partida, folio por folio.
@@ -96,6 +104,31 @@ function marginUnit(m, landed, finance = 0) {
 function priceFromMargin(i) {
   const fin = Math.max(0, i.finance);
   return round4(i.landed + fin + marginUnit(i.margin, i.landed, fin));
+}
+// cost.ts: orden único del costo (kardex → referencia → ninguno).
+function resolveCost(i) {
+  const avg = Number(i.avgCost) || 0;
+  if (avg > 0) return { cost: avg, source: "kardex" };
+  const ref = Number(i.refCost) || 0;
+  if (ref > 0) return { cost: ref, source: "referencia" };
+  return { cost: 0, source: "ninguno" };
+}
+// credit.ts: comisión + Capa 1 (+ Capa 2, que aquí siempre va en 0).
+function financeCost(input) {
+  const cost = Math.max(0, input.supplierCost);
+  const rate = input.tiieAtIssue + input.costSpread;
+  const commission = round2(cost * Math.max(0, input.commissionRate));
+  const layer1 = round2((cost * (1 + Math.max(0, input.commissionRate)) * rate * Math.max(0, input.financialDays)) / YEAR_DAYS);
+  const layer2 = round2((Math.max(0, input.saleCapital) * rate * Math.max(0, input.daysExceeded)) / YEAR_DAYS);
+  return { rate, commission, layer1, layer2, total: round2(commission + layer1 + layer2) };
+}
+// pricing.ts: inverso del lineal (para partidas sin disbursed_unit guardado).
+function linealMarginFromPrice(i) {
+  const k = i.days > 0 ? (Math.max(0, i.rate) * i.days) / YEAR_DAYS : 0;
+  const disbursed = round4(Math.max(0, i.price) / (1 + k));
+  const nominal = round4(disbursed - Math.max(0, i.landed));
+  const pct = disbursed > 0 ? round4((nominal / disbursed) * 100) : 0;
+  return { mode: i.mode, pct, nominal, disbursed, finance: round4(Math.max(0, i.price) - disbursed) };
 }
 // Lineal (paso 3): la factura a Santa Rosa (costo + margen) × (1 + k).
 function linealPriceFromMargin(i) {
@@ -292,6 +325,136 @@ try {
   }
 
   // -------------------------------------------------------------------------
+  // 5. Núcleo del P&L por pedido (paso 4): lo que no depende del día de hoy.
+  // -------------------------------------------------------------------------
+  console.log("\n== 5. Núcleo del P&L por pedido (con lo congelado; sin Capa 2, mora, pronto pago ni TC) ==");
+  const has = async (table, col) => (await q(`select 1 from information_schema.columns where table_name = $1 and column_name = $2`, [table, col])).length > 0;
+  const hasSnap = await has("invoices", "params_snap");
+  const hasSoId = await has("purchase_orders", "so_id");
+  const hasRef = await has("products", "ref_cost");
+  const hasOther = await has("quote_lines", "other_cost");
+  const hasDisb = await has("quote_lines", "disbursed_unit");
+  const hasQRates = await has("quotes", "cost_rate");
+  const hasCircuit = await has("sales_orders", "circuit_code");
+  const spreadVivo = new Map((await q(`select company_id, asr_spread::text as s from company_settings`)).map((r) => [r.company_id, r.s == null ? null : Number(r.s)]));
+  const tiieTabla = await q(`select company_id, date::text as date, rate::text as rate from tiie_rates order by date`);
+  const nearest = (cid, asOf) => {
+    let pick = null;
+    for (const r of tiieTabla) if (r.company_id === cid && r.date <= asOf) pick = Number(r.rate);
+    return pick;
+  };
+  const pedidos = await q(
+    `select so.id, so.company_id, so.name, so.date::text as date, coalesce(so.credit_days,0)::int as credit_days, so.quote_id,
+            ${hasCircuit ? "so.circuit_code" : "null"} as circuito,
+            (select i.date::text from invoices i where i.company_id = so.company_id and i.order_id = so.id and i.kind = 'customer' and i.name like 'FV-%' order by i.id desc limit 1) as fv_date,
+            (select coalesce(i.credit_days,0)::int from invoices i where i.company_id = so.company_id and i.order_id = so.id and i.kind = 'customer' and i.name like 'FV-%' order by i.id desc limit 1) as fv_days,
+            ${hasSnap ? "(select i.params_snap from invoices i where i.company_id = so.company_id and i.order_id = so.id and i.kind = 'customer' and i.name like 'FV-%' order by i.id desc limit 1)" : "null"} as snap,
+            (select q.commission_rate::text from quotes q where q.id = so.quote_id) as q_commission,
+            ${hasQRates ? "(select q.cost_rate::text from quotes q where q.id = so.quote_id)" : "null"} as q_cost_rate,
+            ${hasQRates ? "(select q.collection_rate::text from quotes q where q.id = so.quote_id)" : "null"} as q_collection_rate,
+            (select c.commission_rate::text from credit_circuits c where c.company_id = so.company_id and c.code = 'ASR') as asr_catalogo
+     from sales_orders so order by so.id`,
+  );
+  const partidas = await q(
+    `select sl.so_id, sl.product_id, p.code, sl.qty::text as qty, sl.unit_price::text as unit_price,
+            p.cost::text as catalog_cost, ${hasRef ? "coalesce(p.ref_cost,0)::text" : "'0'"} as ref_cost,
+            ${hasSoId ? "(select pl.unit_price::text from purchase_lines pl join purchase_orders po on po.id = pl.po_id where po.so_id = sl.so_id and pl.product_id = sl.product_id order by pl.id desc limit 1)" : "null"} as po_cost,
+            ql.cost::text as quote_cost, coalesce(ql.freight,0)::text as quote_freight,
+            ${hasOther ? "coalesce(ql.other_cost,0)::text" : "'0'"} as quote_other,
+            ${hasDisb ? "ql.disbursed_unit::text" : "null"} as quote_disbursed
+     from sales_lines sl
+     join products p on p.id = sl.product_id
+     join sales_orders so on so.id = sl.so_id
+     left join quote_lines ql on ql.quote_id = so.quote_id and ql.product_id = sl.product_id
+     order by sl.so_id, sl.id`,
+  );
+  const pnlRows = [];
+  for (const so of pedidos) {
+    let snap = {};
+    try {
+      if (so.snap) snap = JSON.parse(so.snap);
+    } catch {
+      snap = {};
+    }
+    const days = snap.financialDays ?? (so.fv_date != null ? so.fv_days : so.credit_days);
+    const spread = snap.costSpread ?? spreadVivo.get(so.company_id) ?? null;
+    const tiie = snap.tiieIssue ?? nearest(so.company_id, so.fv_date ?? so.date);
+    const lineal = (snap.financingBase ?? (so.circuito === "SANTA_ROSA" ? "costo_margen" : "costo_comision")) === "costo_margen";
+    const comision = snap.commissionRate ?? (so.q_commission != null ? Number(so.q_commission) : so.asr_catalogo != null ? Number(so.asr_catalogo) : null);
+    const costRate = snap.costRate ?? (so.q_cost_rate != null ? Number(so.q_cost_rate) : null);
+    const acc = { venta: 0, costo: 0, flete: 0, otros: 0, comision: 0, capa1: 0, margen: 0, financSR: 0, costoLinea: 0, proteccion: 0, excluidas: 0 };
+    let protKnown = true;
+    for (const l of partidas.filter((x) => x.so_id === so.id)) {
+      const qty = num(l.qty);
+      const saleUnit = num(l.unit_price);
+      const po = l.po_cost != null ? Number(l.po_cost) : null;
+      const qc = l.quote_cost != null && Number(l.quote_cost) > 0 ? Number(l.quote_cost) : null;
+      const cat = resolveCost({ avgCost: l.catalog_cost, refCost: l.ref_cost });
+      const sinCosto = po == null && qc == null && cat.source === "ninguno";
+      const necesitaTiie = days > 0 && !lineal;
+      if (sinCosto || (necesitaTiie && (tiie == null || spread == null || comision == null))) {
+        acc.excluidas += 1;
+        continue;
+      }
+      const costUnit = po ?? qc ?? cat.cost;
+      const freightUnit = num(l.quote_freight);
+      const otherUnit = num(l.quote_other);
+      const sale = qty * saleUnit;
+      const cogs = qty * costUnit;
+      const freight = qty * freightUnit;
+      const other = qty * otherUnit;
+      const landed = cogs + freight + other;
+      if (!lineal) {
+        const fin = days > 0 ? financeCost({ supplierCost: landed, saleCapital: sale, commissionRate: comision, costSpread: spread, tiieAtIssue: tiie, financialDays: days, daysExceeded: 0 }) : { commission: 0, layer1: 0 };
+        acc.venta += sale;
+        acc.comision += fin.commission;
+        acc.capa1 += fin.layer1;
+        acc.margen += sale - cogs - freight - other;
+      } else {
+        const rate = (tiie ?? 0) + (spread ?? 0);
+        const perUnit = l.quote_disbursed != null ? Number(l.quote_disbursed) : days > 0 ? linealMarginFromPrice({ price: saleUnit, landed: costUnit + freightUnit + otherUnit, rate, days, mode: "pct" }).disbursed : saleUnit;
+        const disbursed = qty * perUnit;
+        const financSR = round2(sale - disbursed);
+        acc.venta += disbursed;
+        acc.margen += disbursed - cogs - freight - other;
+        acc.financSR += financSR;
+        if (days > 0 && costRate != null) {
+          const costoLinea = round2((disbursed * (costRate + (spread ?? 0)) * days) / YEAR_DAYS);
+          acc.costoLinea += costoLinea;
+          acc.proteccion += round2(financSR - costoLinea);
+        } else if (days > 0) protKnown = false;
+      }
+      acc.costo += cogs;
+      acc.flete += freight;
+      acc.otros += other;
+    }
+    pnlRows.push({
+      id: so.id,
+      name: so.name,
+      circuito: so.circuito ?? "",
+      base: lineal ? "costo_margen" : "costo_comision",
+      venta: acc.venta.toFixed(2),
+      costo: acc.costo.toFixed(2),
+      flete: acc.flete.toFixed(2),
+      comision: acc.comision.toFixed(2),
+      capa1: acc.capa1.toFixed(2),
+      margen: acc.margen.toFixed(2),
+      financ_sr: acc.financSR.toFixed(2),
+      costo_linea: lineal ? (protKnown ? acc.costoLinea.toFixed(2) : "sin dato") : acc.comision + acc.capa1 > 0 ? (acc.comision + acc.capa1).toFixed(2) : "0.00",
+      proteccion: lineal ? (protKnown ? acc.proteccion.toFixed(2) : "sin dato") : "0.00",
+      excluidas: acc.excluidas,
+    });
+  }
+  console.log(`  Pedidos: ${pnlRows.length}`);
+  for (const r of pnlRows) {
+    console.log(
+      `  ${r.name.padEnd(9)} ${nombre(r.circuito || null).padEnd(18)} venta ${fmt(r.venta)} · costo ${fmt(r.costo)} · flete ${fmt(r.flete)} · comisión ${fmt(r.comision)} · Capa 1 ${fmt(r.capa1)} · margen ${fmt(r.margen)}${
+        r.base === "costo_margen" ? ` · financ. S. Rosa ${fmt(r.financ_sr)} · costo real ${r.costo_linea === "sin dato" ? r.costo_linea : fmt(r.costo_linea)} · protección ${r.proteccion === "sin dato" ? r.proteccion : fmt(r.proteccion)}` : " · protección 0.00"
+      }${r.excluidas ? ` · ${r.excluidas} partida(s) fuera (sin costo o sin tasa)` : ""}`,
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // 4. Instantánea antes/después (precios y totales guardados, folio por folio).
   // -------------------------------------------------------------------------
   const foto = {
@@ -300,6 +463,8 @@ try {
     sales_lines: await q(`select id, so_id, product_id, qty::text as qty, unit_price::text as unit_price from sales_lines order by id`),
     sales_orders: await q(`select id, name, total::text as total, coalesce(credit_days,0)::int as credit_days from sales_orders order by id`),
     invoices: await q(`select id, name, amount::text as amount, residual::text as residual, coalesce(credit_days,0)::int as credit_days from invoices order by id`),
+    // Paso 4: el núcleo del P&L por pedido también se compara antes/después.
+    pnl: pnlRows,
   };
   if (guardar) {
     writeFileSync(guardar, JSON.stringify(foto, null, 1));

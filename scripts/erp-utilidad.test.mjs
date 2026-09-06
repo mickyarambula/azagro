@@ -207,5 +207,6 @@ test("cableado: computeDealPnl financia el COSTO PUESTO, no solo la mercancía",
   assert.ok(!rep.includes("supplierCost: financialDays > 0 ? cogs : 0,"), "ya no se financia solo la mercancía");
   assert.ok(rep.includes("const financeBase = included.reduce((s, l) => s + l.landed, 0);"), "el P&L publica la base para que la tarjeta la enseñe");
   const ficha = src("src/routes/sales.$orderId.tsx");
-  assert.ok(ficha.includes("Sobre el costo puesto ${money(pnl.financeBase)}"), "la tarjeta dice sobre qué base corrió el costo financiero");
+  assert.ok(ficha.includes("Base: el costo puesto ${money(pnl.financeBase)}"), "la tarjeta dice sobre qué base corrió el costo financiero (ASR)");
+  assert.ok(ficha.includes("Base: la factura de Azagro a Santa Rosa ${money(pnl.disbursed)}"), "…y en el lineal, la factura a Santa Rosa (paso 4)");
 });

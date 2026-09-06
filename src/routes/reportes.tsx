@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { Field, FinanceNav, StatusPill } from "@/components/erp";
 import { getCompanyPnl, getPanorama, listDealPnl } from "@/lib/erp/reports";
+import { circuitLabel } from "@/lib/erp/circuits";
 import { exportCsv } from "@/lib/export-csv";
 import { money, todayMx } from "@/lib/utils";
 
@@ -18,6 +19,11 @@ function Page() {
   const [pnl, setPnl] = useState<Awaited<ReturnType<typeof getCompanyPnl>> | null>(null);
   const [deals, setDeals] = useState<Awaited<ReturnType<typeof listDealPnl>> | null>(null);
   const [pano, setPano] = useState<Awaited<ReturnType<typeof getPanorama>> | null>(null);
+  // Paso 4: la protección (tasa de cobro − tasa de costo) se ve por separado.
+  // Solo hay algo que mostrar si algún pedido corrió por la Línea Santa Rosa;
+  // por ASR hay una sola tasa y la protección es cero: no se agrega una
+  // columna de ceros.
+  const conLineal = Boolean(pano && (pano.totales.financiamientoSR !== 0 || pano.totales.proteccion == null || pano.totales.proteccion !== 0));
   const [error, setError] = useState<string | null>(null);
 
   async function load() {
@@ -85,8 +91,24 @@ function Page() {
           onClick={() =>
             exportCsv(
               "utilidad-azagro",
-              ["Pedido", "Fecha", "Cliente", "Estado", "Venta", "Costo", "Flete", "Costo financiero", "Margen", "%", "Utilidad final"],
-              (deals?.deals ?? []).map((d) => [d.name, d.date, d.partner, d.state, d.revenue, d.cogs, d.freight, d.finance, d.margin, d.marginPct, d.netProfit]),
+              ["Pedido", "Fecha", "Cliente", "Estado", "Circuito", "Venta", "Costo", "Flete", "Costo financiero", "Financ. Santa Rosa", "Costo real línea", "Protección", "Margen", "%", "Utilidad final"],
+              (deals?.deals ?? []).map((d) => [
+                d.name,
+                d.date,
+                d.partner,
+                d.state,
+                circuitLabel(d.circuit),
+                d.revenue,
+                d.cogs,
+                d.freight,
+                d.finance,
+                d.financierFinance,
+                d.lineCost ?? "",
+                d.protection ?? "",
+                d.margin,
+                d.marginPct,
+                d.netProfit,
+              ]),
             )
           }
         >
@@ -136,6 +158,8 @@ function Page() {
                     <th className="px-3 py-3 text-right font-medium">Capa 1</th>
                     <th className="px-3 py-3 text-right font-medium">Capa 2</th>
                     <th className="px-3 py-3 text-right font-medium">Descuento</th>
+                    {conLineal ? <th className="px-3 py-3 text-right font-medium">Financ. S. Rosa</th> : null}
+                    {conLineal ? <th className="px-3 py-3 text-right font-medium">Protección</th> : null}
                     <th className="px-4 py-3 text-right font-medium">Utilidad</th>
                     <th className="px-3 py-3 text-right font-medium">Excluidas</th>
                   </tr>
@@ -155,6 +179,8 @@ function Page() {
                       <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.capa1)}</td>
                       <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.capa2)}</td>
                       <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.descuento)}</td>
+                      {conLineal ? <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.financiamientoSR)}</td> : null}
+                      {conLineal ? <td className="px-3 py-3 text-right tabular-nums text-muted">{r.proteccion == null ? "sin dato" : money(r.proteccion)}</td> : null}
                       <td className="px-4 py-3 text-right tabular-nums font-medium">
                         {money(r.utilidad)}
                         <span className="ml-1 text-[11px] text-muted">{r.venta > 0 ? ((r.utilidad / r.venta) * 100).toFixed(1) : "0.0"}%</span>
@@ -174,6 +200,8 @@ function Page() {
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.capa1)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.capa2)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.descuento)}</td>
+                    {conLineal ? <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.financiamientoSR)}</td> : null}
+                    {conLineal ? <td className="px-3 py-3 text-right tabular-nums">{pano.totales.proteccion == null ? "sin dato" : money(pano.totales.proteccion)}</td> : null}
                     <td className="px-4 py-3 text-right tabular-nums">{money(pano.totales.utilidad)}</td>
                     <td className="px-3 py-3 text-right tabular-nums text-warn">{pano.totales.excluidas > 0 ? `${pano.totales.excluidas} (${money(pano.totales.ventaExcluida)})` : "—"}</td>
                   </tr>
@@ -213,6 +241,7 @@ function Page() {
                   <Link to="/sales/$orderId" params={{ orderId: String(d.id) }} className="hover:underline">
                     {d.name}
                   </Link>
+                  <span className="block text-[11px] font-normal text-muted">{circuitLabel(d.circuit)}</span>
                 </td>
                 <td className="px-3 py-3">{d.partner}</td>
                 <td className="px-3 py-3 tabular-nums">{d.date}</td>
@@ -222,7 +251,18 @@ function Page() {
                 <td className="px-3 py-3 text-right tabular-nums">{money(d.revenue)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(d.cogs)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(d.freight)}</td>
-                <td className="px-3 py-3 text-right tabular-nums text-muted">{money(d.finance)}</td>
+                <td className="px-3 py-3 text-right tabular-nums text-muted">
+                  {d.financingBase === "costo_margen" ? (
+                    <>
+                      {money(d.financierFinance)}
+                      <span className="block text-[11px]">
+                        Santa Rosa · costo real {d.lineCost == null ? "sin dato" : money(d.lineCost)} · protección {d.protection == null ? "sin dato" : money(d.protection)}
+                      </span>
+                    </>
+                  ) : (
+                    money(d.finance)
+                  )}
+                </td>
                 <td className="px-3 py-3 text-right tabular-nums">
                   {money(d.margin)}
                   <span className="ml-1 text-[11px] text-muted">{d.marginPct.toFixed(1)}%</span>
@@ -255,7 +295,14 @@ function Page() {
                 <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.revenue)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.cogs)}</td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.freight)}</td>
-                <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.finance)}</td>
+                <td className="px-3 py-3 text-right tabular-nums">
+                  {money(deals.totals.finance)}
+                  {deals.totals.financierFinance !== 0 ? (
+                    <span className="block text-[11px] font-normal text-muted">
+                      Santa Rosa {money(deals.totals.financierFinance)} · protección {deals.totals.protection == null ? "sin dato" : money(deals.totals.protection)}
+                    </span>
+                  ) : null}
+                </td>
                 <td className="px-3 py-3 text-right tabular-nums">{money(deals.totals.margin)}</td>
                 <td className="px-4 py-3 text-right tabular-nums">{money(deals.totals.netProfit)}</td>
               </tr>
