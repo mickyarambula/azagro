@@ -16,6 +16,7 @@ export function QtyField({
   disabled,
   className,
   placeholder = "0",
+  zeroIsBlank = true,
 }: {
   value: number;
   /** Se llama en cada tecla — úsalo solo para reflejo local (cálculo en vivo, borrador). */
@@ -25,13 +26,21 @@ export function QtyField({
   disabled?: boolean;
   className?: string;
   placeholder?: string;
+  /**
+   * false: un 0 capturado se ve "0", no en blanco — para distinguir "0 días,
+   * ya se decidió contado" de "todavía nadie captura nada" (mismo campo,
+   * dos estados distintos). Default true: igual que siempre, un 0 se ve en
+   * blanco (no cambia el comportamiento de los demás campos numéricos).
+   */
+  zeroIsBlank?: boolean;
 }) {
-  const [raw, setRaw] = useState(value ? String(value) : "");
+  const shown = (v: number) => (zeroIsBlank ? (v ? String(v) : "") : String(v));
+  const [raw, setRaw] = useState(shown(value));
   const [focus, setFocus] = useState(false);
 
   useEffect(() => {
-    if (!focus) setRaw(value ? String(value) : "");
-  }, [value, focus]);
+    if (!focus) setRaw(shown(value));
+  }, [value, focus, zeroIsBlank]);
 
   function parsed() {
     return raw === "" || raw === "." ? 0 : Number(raw);
@@ -56,7 +65,7 @@ export function QtyField({
       onBlur={() => {
         setFocus(false);
         onCommit?.(parsed());
-        setRaw(value ? String(value) : "");
+        setRaw(shown(value));
       }}
     />
   );

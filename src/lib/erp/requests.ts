@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
-import { activeMember, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
+import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { addDays, missingRateMessage } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
@@ -11,7 +11,7 @@ import { policy } from "@/lib/erp/ops";
 import { rememberTrade } from "@/lib/erp/links";
 import { marginInvalidMessage, marginOf, marginText, marginValid, normalizeMargin, OFFER_LABEL, type StoredMargin } from "@/lib/erp/margins";
 import { assertRequestOpen } from "@/lib/erp/request-lock";
-import { circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
+import { circuitLabel, inheritCircuit, isSelectableCircuit } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 async function cid(sql: Sql, userId: string) {
@@ -334,11 +334,18 @@ export const saveRequestTerms = createServerFn({ method: "POST" })
       creditDays: z.number().int().nonnegative().optional(),
       currency: z.enum(["MXN", "USD"]).optional(),
       fxRate: z.number().nonnegative().optional(),
+      // Paso 2 (5-sep-2026): solo Contado y Circuito ASR son elegibles a
+      // mano; Línea Santa Rosa y Línea propia siguen por construir.
+      circuitCode: z.enum(["CONTADO", "ASR"]).optional(),
     }),
   )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     await assertCan(sql, context.userId, "quotes", "edit");
+    // Elegir circuito a mano es solo de administrador — cualquier otro rol
+    // lo ve pero no lo mueve (decisión del dueño, paso 2). El resto del
+    // campo (plazo, moneda, TC) sigue abierto a quien pueda editar quotes.
+    if (data.circuitCode !== undefined) await assertAdmin(sql, context.userId);
     const companyId = await cid(sql, context.userId);
     await ensure(sql);
     await assertRequestOpen(sql, companyId, data.id);
@@ -356,10 +363,16 @@ export const saveRequestTerms = createServerFn({ method: "POST" })
     if (data.fxRate !== undefined && data.fxRate !== Number(before[0].fx_rate ?? 0)) {
       cambios.push(`TC ${Number(before[0].fx_rate ?? 0)} → ${data.fxRate}`);
     }
-    // Paso 1: el circuito es una etiqueta que sigue al plazo. Cambia con rastro.
-    const circuit = data.creditDays !== undefined ? inheritCircuit(before[0].circuit_code, data.creditDays) : before[0].circuit_code;
+    // Paso 1: el circuito es una etiqueta que sigue al plazo, salvo que el
+    // administrador lo elija a mano (paso 2) — la elección manual manda.
+    let circuit = data.creditDays !== undefined ? inheritCircuit(before[0].circuit_code, data.creditDays) : before[0].circuit_code;
+    let elegido = false;
+    if (data.circuitCode !== undefined && isSelectableCircuit(data.circuitCode)) {
+      circuit = data.circuitCode;
+      elegido = true;
+    }
     if (circuit !== before[0].circuit_code) {
-      cambios.push(`circuito ${circuitLabel(before[0].circuit_code)} → ${circuitLabel(circuit)}`);
+      cambios.push(`circuito ${circuitLabel(before[0].circuit_code)} → ${circuitLabel(circuit)}${elegido ? " (elegido)" : ""}`);
     }
     await sql`
       update customer_requests

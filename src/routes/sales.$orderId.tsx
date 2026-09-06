@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { OrderFields, stateLabel, type OrderDraft, type OrderLookups } from "@/components/order-form";
+import { inheritCircuit } from "@/lib/erp/circuits";
 import { OFFER_LABEL, SIN_MARGEN, marginText } from "@/lib/erp/margins";
 import { BackBar, StatusPill } from "@/components/erp";
 import { Expediente } from "@/components/expediente";
@@ -26,6 +27,7 @@ function Ficha() {
   const navigate = useNavigate();
   const id = Number(orderId);
   const { can, role } = useAccess();
+  const isAdmin = role === "admin";
   const canEdit = can("sales", "edit");
   const [lookups, setLookups] = useState<OrderLookups | null>(null);
   const [form, setForm] = useState<OrderDraft | null>(null);
@@ -63,6 +65,9 @@ function Ficha() {
   const [newDays, setNewDays] = useState(0);
   // Circuito de financiamiento guardado (etiqueta de solo lectura, paso 1).
   const [circuit, setCircuit] = useState<string | null | undefined>(undefined);
+  // Elección manual del administrador esta sesión (paso 2), solo para un
+  // pedido DIRECTO. null = sin tocar: se sigue proponiendo con la regla.
+  const [circuitOverride, setCircuitOverride] = useState<"CONTADO" | "ASR" | null>(null);
 
   async function load() {
     const [d, l, p] = await Promise.all([getOrder({ data: { id } }), orderLookups(), getDealPnl({ data: { soId: id } }).catch(() => null)]);
@@ -74,6 +79,7 @@ function Ficha() {
     setPurchases(d.purchases ?? []);
     setSold(d.lines);
     setOrigin(d.origin);
+    setCircuitOverride(null);
     setOriginLines(d.lines);
     setChangeTerm(false);
     setNewDays(o.credit_days);
@@ -152,7 +158,7 @@ function Ficha() {
           return;
         }
       }
-      await saveOrder({ data: { ...form, id, confirm, overrideCredit } });
+      await saveOrder({ data: { ...form, id, confirm, overrideCredit, circuitCode: circuitOverride ?? undefined } });
       setMsg(confirm ? "Pedido confirmado" : "Guardado");
       await load();
     } catch (err) {
@@ -333,7 +339,15 @@ function Ficha() {
         setForm={setForm}
         lookups={lookups}
         locked={locked}
-        circuit={circuit}
+        circuit={
+          circuit === undefined
+            ? undefined
+            : {
+                value: circuitOverride ?? inheritCircuit(circuit, form.creditDays),
+                editable: !origin && isAdmin && editable,
+                onChange: (code) => setCircuitOverride(code),
+              }
+        }
         inherited={
           origin
             ? {

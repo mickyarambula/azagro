@@ -12,7 +12,7 @@ import { rememberTrade } from "@/lib/erp/links";
 import { policy } from "@/lib/erp/ops";
 import { financeUnit } from "@/lib/erp/pricing";
 import { marginOf, priceFromMargin, type Offer } from "@/lib/erp/margins";
-import { circuitForTerm, circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
+import { circuitForTerm, circuitLabel, inheritCircuit, isSelectableCircuit } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -66,6 +66,10 @@ const orderSchema = z.object({
   policyCode: z.string(),
   ocCliente: z.string().optional().default(""),
   priceMode: z.enum(["cash", "financed", "custom"]),
+  // Paso 2 (5-sep-2026): solo para un pedido DIRECTO (sin cotización de
+  // origen) y solo de administrador. Un pedido que vino de cotización hereda
+  // el circuito de su cotización y este campo se ignora ahí.
+  circuitCode: z.enum(["CONTADO", "ASR"]).optional(),
   lines: z.array(z.object({ productId: z.number(), qty: z.number().positive(), unitPrice: z.number().nonnegative(), uom: z.string().optional().default("") })).min(1),
 });
 
@@ -496,6 +500,11 @@ export const saveOrder = createServerFn({ method: "POST" })
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
     const member = await assertCan(sql, context.userId, "sales", "edit");
+    // Elegir circuito a mano es solo de administrador — cualquier otro rol lo
+    // ve pero no lo mueve (decisión del dueño, paso 2).
+    if (data.circuitCode !== undefined && member.role !== "admin") {
+      throw new Error("Solo un administrador puede hacer esto");
+    }
 
     // Un pedido en dólares necesita tipo de cambio real (tabla o capturado).
     if (data.currency === "USD" && !(data.fxRate > 0)) {
@@ -570,9 +579,10 @@ export const saveOrder = createServerFn({ method: "POST" })
         invoice_due: string | null;
         delivery_to: string;
         circuit_code: string | null;
+        quote_id: number | null;
       }>`
         select state, name, partner_id, date::text, total::text, currency, fx_rate::text,
-          credit_due::text, invoice_due::text, coalesce(delivery_to,'') as delivery_to, circuit_code
+          credit_due::text, invoice_due::text, coalesce(delivery_to,'') as delivery_to, circuit_code, quote_id
         from sales_orders where id = ${id} and company_id = ${companyId}
       `;
       if (!current[0]) throw new Error("Pedido no encontrado");
@@ -609,9 +619,18 @@ export const saveOrder = createServerFn({ method: "POST" })
       if (Number(current[0].fx_rate) !== data.fxRate) cambios.push(`TC ${Number(current[0].fx_rate)} → ${data.fxRate}`);
       if ((current[0].credit_due ?? "") !== dues.creditDue) cambios.push(`plazo financiero ${current[0].credit_due ?? "—"} → ${dues.creditDue}`);
       if ((current[0].invoice_due ?? "") !== dues.invoiceDue) cambios.push(`vencimiento ${current[0].invoice_due ?? "—"} → ${dues.invoiceDue}`);
-      // Paso 1: la etiqueta de circuito sigue al plazo del pedido.
-      const circuit = inheritCircuit(current[0].circuit_code, dues.creditDays);
-      if (circuit !== current[0].circuit_code) cambios.push(`circuito ${circuitLabel(current[0].circuit_code)} → ${circuitLabel(circuit)}`);
+      // Paso 1: la etiqueta de circuito sigue al plazo del pedido, salvo que
+      // el administrador lo elija a mano — y solo si el pedido es DIRECTO
+      // (sin quote_id): uno que vino de cotización hereda de ahí, punto.
+      let circuit = inheritCircuit(current[0].circuit_code, dues.creditDays);
+      let circuitElegido = false;
+      if (data.circuitCode !== undefined && isSelectableCircuit(data.circuitCode) && current[0].quote_id == null) {
+        circuit = data.circuitCode;
+        circuitElegido = true;
+      }
+      if (circuit !== current[0].circuit_code) {
+        cambios.push(`circuito ${circuitLabel(current[0].circuit_code)} → ${circuitLabel(circuit)}${circuitElegido ? " (elegido)" : ""}`);
+      }
       for (const nl of data.lines) {
         const ol = oldLines.find((o) => o.product_id === nl.productId);
         if (!ol) {
@@ -672,7 +691,8 @@ export const saveOrder = createServerFn({ method: "POST" })
           ${data.notes ?? ""}, ${total}, ${data.currency}, ${data.fxRate}, ${data.deliveryTo ?? ""},
           ${context.userId}, ${data.termKind}, ${dues.invoiceDays}, ${dues.creditDays},
           ${dues.invoiceDue}, ${dues.creditDue}, ${data.routeKind}, ${asrId}, ${data.policyCode},
-          ${data.ocCliente ?? ""}, ${data.priceMode}, ${circuitForTerm(dues.creditDays)}
+          ${data.ocCliente ?? ""}, ${data.priceMode},
+          ${data.circuitCode !== undefined && isSelectableCircuit(data.circuitCode) ? data.circuitCode : circuitForTerm(dues.creditDays)}
         )
         returning id
       `;

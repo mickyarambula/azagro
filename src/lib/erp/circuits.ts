@@ -25,6 +25,22 @@ import { authMiddleware } from "@/lib/auth/middleware";
 
 export type CircuitCode = "CONTADO" | "ASR" | "SANTA_ROSA" | "PROPIA";
 
+/** Los cuatro códigos, en el orden fijo del catálogo (migración 0024). */
+export const CIRCUIT_CODES: CircuitCode[] = ["CONTADO", "ASR", "SANTA_ROSA", "PROPIA"];
+
+/**
+ * Los únicos dos elegibles en el selector hoy (paso 2, 5-sep-2026): Línea
+ * Santa Rosa y Línea propia existen en el catálogo pero están por construir
+ * — aparecen en la lista, apagados. `assertSelectableCircuit` es la misma
+ * regla del lado del servidor: nunca se guarda un circuito no elegible
+ * aunque alguien salte la pantalla.
+ */
+export const SELECTABLE_CIRCUITS: CircuitCode[] = ["CONTADO", "ASR"];
+
+export function isSelectableCircuit(code: unknown): code is "CONTADO" | "ASR" {
+  return code === "CONTADO" || code === "ASR";
+}
+
 export type CreditCircuit = {
   code: CircuitCode;
   name: string;
@@ -158,7 +174,7 @@ export function requestCircuitLabel(code: string | null | undefined): string {
  * sin circuito heredado: plazo 0 → Contado; con plazo, mientras el circuito
  * lineal no exista, el sistema propone el Circuito ASR (el vigente).
  */
-export function circuitForTerm(days: number): CircuitCode {
+export function circuitForTerm(days: number): "CONTADO" | "ASR" {
   return days > 0 ? "ASR" : "CONTADO";
 }
 

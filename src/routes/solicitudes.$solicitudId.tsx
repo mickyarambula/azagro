@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { rfqMessage } from "@/lib/erp/doc-text";
 import { useEffect, useMemo, useState } from "react";
+import { useAccess } from "@/lib/access";
 import { BackBar, HeadBox, StatusPill } from "@/components/erp";
 import { MoneyField, QtyField } from "@/components/fields";
 import { OpsPipeline } from "@/components/pipeline";
@@ -28,7 +29,8 @@ import { destText, RequestFields, type RequestDraft } from "@/components/request
 import { Expediente } from "@/components/expediente";
 import { listDeliveryPoints } from "@/lib/erp/locations";
 import { money, num, qty, humanError, todayMx } from "@/lib/utils";
-import { circuitLabel, requestCircuitLabel } from "@/lib/erp/circuits";
+import { circuitLabel, inheritCircuit, requestCircuitLabel } from "@/lib/erp/circuits";
+import { CircuitSelect } from "@/components/circuit-select";
 
 export const Route = createFileRoute("/solicitudes/$solicitudId")({ component: Page });
 
@@ -130,6 +132,7 @@ function Page() {
   const { solicitudId } = Route.useParams();
   const navigate = useNavigate();
   const id = Number(solicitudId);
+  const isAdmin = useAccess().role === "admin";
   const [data, setData] = useState<Awaited<ReturnType<typeof getRequest>> | null>(null);
   const [lookups, setLookups] = useState<Awaited<ReturnType<typeof listRequests>> | null>(null);
   const [destinos, setDestinos] = useState<Array<{ id: number; name: string; address: string }>>([]);
@@ -145,6 +148,13 @@ function Page() {
   const [spreadPct, setSpreadPct] = useState(0);
   const [commissionPct, setCommissionPct] = useState(0);
   const [days, setDays] = useState(0);
+  // true en cuanto la persona teclea el plazo esta sesión (antes de guardar):
+  // sirve para que el circuito y el "0 capturado" se vean al mismo tiempo que
+  // el precio, sin esperar a saveTerms. Se reinicia en cada load().
+  const [daysTouched, setDaysTouched] = useState(false);
+  // Elección manual del administrador esta sesión (paso 2). null = sin
+  // tocar: se sigue proponiendo con la regla (inheritCircuit) según el plazo.
+  const [circuitOverride, setCircuitOverride] = useState<"CONTADO" | "ASR" | null>(null);
   // Escalera de plazos (Ajustes): columnas de precio de la herramienta interna.
   const [terms, setTerms] = useState<number[]>([]);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
@@ -156,6 +166,8 @@ function Page() {
   async function load() {
     const d = await getRequest({ data: { id } });
     setData(d);
+    setDaysTouched(false);
+    setCircuitOverride(null);
     const next: Record<string, boolean> = {};
     if (d.rfq?.targets.length) {
       for (const t of d.rfq.targets) next[`${t.product_id}:${t.partner_id}`] = true;
@@ -242,6 +254,10 @@ function Page() {
   const { request, lines, suppliers, quote, orders } = data;
   // Candado: en cuanto hay cotización la solicitud queda de solo lectura.
   const locked = Boolean(request.quote_id);
+  // "Decidido" = ya hay un plazo real que resolver (tecleado esta sesión,
+  // guardado antes, o ya cotizada). Antes de eso el circuito no existe
+  // todavía — no es que sea Contado, es que nadie lo ha decidido.
+  const plazoDecidido = daysTouched || request.credit_days != null || Boolean(quote);
   const deliveryNote = `${MODE_LABEL[request.delivery_mode] ?? request.delivery_mode}${request.delivery_to ? ` · ${request.delivery_to}` : ""}`;
   const fail = (e: unknown) => setError(humanError(e));
   const saveTerms = (patch: { creditDays?: number; currency?: "USD" | "MXN"; fxRate?: number }) => {
@@ -677,7 +693,12 @@ function Page() {
               className="w-full border-0 bg-transparent px-0"
               value={days}
               disabled={locked}
-              onChange={setDays}
+              zeroIsBlank={!plazoDecidido}
+              placeholder={plazoDecidido ? "0" : "Sin definir"}
+              onChange={(n) => {
+                setDays(n);
+                setDaysTouched(true);
+              }}
               onCommit={(n) => saveTerms({ creditDays: Math.max(0, Math.floor(n)) })}
             />
           </HeadBox>
@@ -691,12 +712,24 @@ function Page() {
             <p className="text-sm tabular-nums">{commissionPct.toFixed(2)}</p>
           </HeadBox>
           <HeadBox label="Circuito de financiamiento">
-            <p className="text-sm">
-              {data?.quote ? circuitLabel(data.quote.circuit_code) : requestCircuitLabel(data?.request.circuit_code)}
-            </p>
+            {quote ? (
+              <p className="text-sm">{circuitLabel(quote.circuit_code)}</p>
+            ) : !plazoDecidido ? (
+              <p className="text-sm">{requestCircuitLabel(request.circuit_code)}</p>
+            ) : (
+              <CircuitSelect
+                value={circuitOverride ?? inheritCircuit(request.circuit_code, days)}
+                editable={isAdmin && !locked}
+                disabled={locked}
+                onChange={(code) => {
+                  setCircuitOverride(code);
+                  void saveRequestTerms({ data: { id, circuitCode: code } }).catch(fail);
+                }}
+              />
+            )}
             <p className="text-[11px] text-muted">
-              {data?.quote || data?.request.circuit_code
-                ? "Etiqueta: sigue al plazo. El precio sigue saliendo de Ajustes."
+              {plazoDecidido
+                ? "Etiqueta: sigue al plazo, o la elige el administrador. El precio sigue saliendo de Ajustes."
                 : "Se resuelve solo al capturar el plazo."}
             </p>
           </HeadBox>

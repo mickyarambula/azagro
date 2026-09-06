@@ -15,7 +15,7 @@ import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
-import { circuitForTerm, circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
+import { circuitForTerm, circuitLabel, inheritCircuit, isSelectableCircuit } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -787,6 +787,9 @@ export const createQuote = createServerFn({ method: "POST" })
       creditDays: z.number().int().nonnegative(),
       priceOffer: z.enum(["cash", "credit", "both"]).optional().default("both"),
       send: z.boolean().optional().default(true),
+      // Paso 2 (5-sep-2026): elegir circuito a mano es solo de administrador.
+      // Sin capturar, propone la regla (circuitForTerm).
+      circuitCode: z.enum(["CONTADO", "ASR"]).optional(),
       lines: z
         .array(
           z.object({
@@ -809,6 +812,7 @@ export const createQuote = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "quotes", "edit");
+    if (data.circuitCode !== undefined) await assertAdmin(sql, context.userId);
     const today = todayMx();
     if (data.validUntil < today) {
       throw new Error(`La vigencia ya venció (${data.validUntil}). Elige hoy o una fecha posterior.`);
@@ -861,7 +865,7 @@ export const createQuote = createServerFn({ method: "POST" })
       insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, circuit_code)
       values (${cid}, ${name}, ${data.partnerId}, ${today}, ${data.validUntil}, ${data.currency}, ${data.fxRate}, ${state},
         ${data.notes ?? ""}, ${data.deliveryTo ?? ""}, ${total}, ${context.userId}, ${tiie}, ${data.spread ?? 0}, ${data.creditDays ?? 0}, ${offer},
-        ${circuitForTerm(data.creditDays ?? 0)})
+        ${data.circuitCode !== undefined && isSelectableCircuit(data.circuitCode) ? data.circuitCode : circuitForTerm(data.creditDays ?? 0)})
       returning id
     `;
     await sql`alter table quote_lines add column if not exists uom text not null default ''`;
@@ -919,6 +923,8 @@ export const reviseQuote = createServerFn({ method: "POST" })
       creditDays: z.number().optional(),
       priceOffer: z.enum(["cash", "credit", "both"]).optional(),
       notes: z.string().optional(),
+      // Paso 2 (5-sep-2026): elegir circuito a mano es solo de administrador.
+      circuitCode: z.enum(["CONTADO", "ASR"]).optional(),
       lines: z
         .array(
           z.object({
@@ -935,6 +941,7 @@ export const reviseQuote = createServerFn({ method: "POST" })
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "quotes", "edit");
+    if (data.circuitCode !== undefined) await assertAdmin(sql, context.userId);
     await ensureTwoPrices(sql);
     const q = await sql<{ id: number; state: string; name: string; revision: number; price_offer: string; credit_days: number; tiie: string; spread: string; circuit_code: string | null }>`
       select id, state, name, coalesce(revision,1) as revision, coalesce(price_offer,'both') as price_offer,
@@ -1008,8 +1015,15 @@ export const reviseQuote = createServerFn({ method: "POST" })
       cambios.push(`plazo ${q[0].credit_days} → ${data.creditDays} d`);
     }
     // Paso 1: la etiqueta de circuito sigue al plazo de la cotización.
-    const circuitRev = inheritCircuit(q[0].circuit_code, data.creditDays ?? q[0].credit_days);
-    if (circuitRev !== q[0].circuit_code) cambios.push(`circuito ${circuitLabel(q[0].circuit_code)} → ${circuitLabel(circuitRev)}`);
+    let circuitRev = inheritCircuit(q[0].circuit_code, data.creditDays ?? q[0].credit_days);
+    let circuitElegido = false;
+    if (data.circuitCode !== undefined && isSelectableCircuit(data.circuitCode)) {
+      circuitRev = data.circuitCode;
+      circuitElegido = true;
+    }
+    if (circuitRev !== q[0].circuit_code) {
+      cambios.push(`circuito ${circuitLabel(q[0].circuit_code)} → ${circuitLabel(circuitRev)}${circuitElegido ? " (elegido)" : ""}`);
+    }
     for (const line of data.lines) {
       const prev = oldLines.find((o) => o.product_id === line.productId);
       if (prev) {

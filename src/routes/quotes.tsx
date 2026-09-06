@@ -19,7 +19,9 @@ import { expedienteFor, quoteNotes } from "@/lib/erp/doc-text";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
-import { circuitLabel } from "@/lib/erp/circuits";
+import { circuitForTerm, circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
+import { CircuitSelect } from "@/components/circuit-select";
+import { useAccess } from "@/lib/access";
 
 export const Route = createFileRoute("/quotes")({
   // ?ver=<id> abre esa cotización al entrar (ligas desde la solicitud y el pedido).
@@ -122,6 +124,7 @@ function OfferCells({
 }
 
 function Page() {
+  const isAdmin = useAccess().role === "admin";
   const navigate = useNavigate();
   const [data, setData] = useState<Awaited<ReturnType<typeof listQuotes>> | null>(null);
   const [locs, setLocs] = useState<Array<{ id: number; name: string }>>([]);
@@ -135,6 +138,12 @@ function Page() {
   const [validUntil, setValidUntil] = useState(() => addDays(todayMx(), 15));
   const [priceOffer, setPriceOffer] = useState<Offer>("both");
   const [creditDays, setCreditDays] = useState(0);
+  // Circuito de la cotización directa nueva (paso 2): propone la regla según
+  // el plazo; el administrador puede tocarlo. circuitTouched distingue "lo
+  // eligió" (se manda al guardar) de "lo dejó como venía" (el servidor sigue
+  // proponiendo solo, sin pedir permiso de administrador).
+  const [circuitCode, setCircuitCode] = useState<"CONTADO" | "ASR">("CONTADO");
+  const [circuitTouched, setCircuitTouched] = useState(false);
   const [tiie, setTiie] = useState(0);
   const [tiieFrom, setTiieFrom] = useState<string | null>(null);
   const [spread, setSpread] = useState(0);
@@ -149,6 +158,9 @@ function Page() {
   const [revPrices, setRevPrices] = useState<Record<number, { cash: number; credit: number; qty: number }>>({});
   /** Plazo acordado que se está editando en el panel abierto (null = el de la cotización). */
   const [revDays, setRevDays] = useState<number | null>(null);
+  // Circuito elegido a mano en el panel abierto esta sesión (paso 2). null =
+  // sin tocar: se sigue proponiendo con la regla según el plazo acordado.
+  const [circuitOverride, setCircuitOverride] = useState<"CONTADO" | "ASR" | null>(null);
   /** Partidas que se están agregando a la cotización abierta (punto C3): entran al guardar la revisión. */
   const [addLines, setAddLines] = useState<Array<{ productId: number; qty: number }>>([]);
   const [locationId, setLocationId] = useState(0);
@@ -202,6 +214,8 @@ function Page() {
     if (s) {
       setSettingsError(null);
       setCreditDays(s.creditDays);
+      setCircuitCode(circuitForTerm(priceOffer === "cash" ? 0 : s.creditDays));
+      setCircuitTouched(false);
       setSpread(s.asrSpread);
       const fx = nearestRate(s.fx.map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), todayMx());
       setFxRate(fx?.rate ?? 0);
@@ -229,6 +243,7 @@ function Page() {
     setViewId(id);
     setAddLines([]);
     setRevDays(null);
+    setCircuitOverride(null);
     if (!id) return;
     const next: Record<number, number> = {};
     const prices: Record<number, { cash: number; credit: number; qty: number }> = {};
@@ -273,6 +288,7 @@ function Page() {
           spread,
           creditDays: priceOffer === "cash" ? 0 : creditDays,
           priceOffer,
+          circuitCode: circuitTouched ? circuitCode : undefined,
           lines: priced.map((l) => ({
             productId: l.productId,
             qty: l.qty,
@@ -403,7 +419,10 @@ function Page() {
                   key={o}
                   type="button"
                   className={priceOffer === o ? "erp-btn-primary h-8 text-[12px]" : "erp-btn h-8 text-[12px]"}
-                  onClick={() => setPriceOffer(o)}
+                  onClick={() => {
+                    setPriceOffer(o);
+                    if (!circuitTouched) setCircuitCode(inheritCircuit(circuitCode, o === "cash" ? 0 : creditDays) as "CONTADO" | "ASR");
+                  }}
                 >
                   {offerLabel(o)}
                 </button>
@@ -420,10 +439,21 @@ function Page() {
                   const d = Number(e.target.value) || 0;
                   setCreditDays(d);
                   setLines((ls) => syncCredit(ls, d));
+                  if (!circuitTouched) setCircuitCode(inheritCircuit(circuitCode, d) as "CONTADO" | "ASR");
                 }}
               />
             </HeadBox>
           ) : null}
+          <HeadBox label="Circuito de financiamiento">
+            <CircuitSelect
+              value={circuitCode}
+              editable={isAdmin}
+              onChange={(code) => {
+                setCircuitCode(code);
+                setCircuitTouched(true);
+              }}
+            />
+          </HeadBox>
           <HeadBox label="Totales">
             {priceOffer !== "credit" ? <p className="text-sm tabular-nums">Contado {moneyIn(cashTotal, currency)}</p> : null}
             {priceOffer !== "cash" ? <p className="text-sm font-semibold tabular-nums">Crédito {moneyIn(creditTotal, currency)}</p> : null}
@@ -664,9 +694,17 @@ function Page() {
                       <div className="mb-1 flex flex-wrap items-center gap-2">
                         <p className="text-sm font-semibold">Documento al cliente</p>
                         <span className="erp-chip">Revisión {qrow.revision}</span>
-                        <span className="erp-chip" title="Circuito de financiamiento (etiqueta: sigue al plazo; el precio sigue saliendo de Ajustes)">
-                          {circuitLabel(qrow.circuit_code)}
-                        </span>
+                        {!qrow.request_name && revisable ? (
+                          <CircuitSelect
+                            value={circuitOverride ?? (inheritCircuit(qrow.circuit_code, agreedDays) as "CONTADO" | "ASR")}
+                            editable={isAdmin}
+                            onChange={(code) => setCircuitOverride(code)}
+                          />
+                        ) : (
+                          <span className="erp-chip" title="Circuito de financiamiento (etiqueta: sigue al plazo; el precio sigue saliendo de Ajustes)">
+                            {circuitLabel(qrow.circuit_code)}
+                          </span>
+                        )}
                         {qrow.accepted_offer === "cash" || qrow.accepted_offer === "credit" ? (
                           <span className="erp-chip border-ok">El cliente aceptó el precio de {OFFER_LABEL[qrow.accepted_offer]}</span>
                         ) : null}
@@ -958,7 +996,8 @@ function Page() {
                         // Una partida nueva cuenta como cambio en cuanto tiene producto y cantidad.
                         const nuevas = addLines.filter((a) => a.productId && a.qty > 0 && !qlines.some((l) => l.product_id === a.productId));
                         const daysDirty = revDays != null && revDays !== qrow.credit_days;
-                        const dirty = priceDirty || nuevas.length > 0 || daysDirty;
+                        const circuitDirty = circuitOverride != null && circuitOverride !== qrow.circuit_code;
+                        const dirty = priceDirty || nuevas.length > 0 || daysDirty || circuitDirty;
                         return (
                           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-cream px-3 py-2">
                             <p className="text-[12px]">
@@ -968,7 +1007,9 @@ function Page() {
                                     ? `${nuevas.length} partida(s) nueva(s) y precios sin guardar.`
                                     : daysDirty && !priceDirty
                                       ? `Cambiaste el plazo acordado a ${agreedDays} d — todavía no se guarda.`
-                                      : "Cambiaste precios — todavía no se guardan."}
+                                      : circuitDirty && !priceDirty
+                                        ? `Cambiaste el circuito a ${circuitLabel(circuitOverride)} — todavía no se guarda.`
+                                        : "Cambiaste precios — todavía no se guardan."}
                                 </span>
                               ) : (
                                 <span className="text-muted">Sin cambios de precio.</span>
@@ -987,6 +1028,7 @@ function Page() {
                                     quoteId: qrow.id,
                                     priceOffer: (qrow.price_offer as Offer) || "both",
                                     creditDays: agreedDays,
+                                    circuitCode: circuitOverride ?? undefined,
                                     lines: [
                                       ...qlines.map((l) => {
                                         const rp = revPrices[l.product_id];

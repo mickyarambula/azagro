@@ -8,7 +8,8 @@ import { SearchSelect, asOpts } from "@/components/search-select";
 import { computeDues, type TermKind } from "@/lib/erp/order-terms";
 import { validateDueDates } from "@/lib/erp/credit";
 import { cn, fmtDate, moneyIn, num } from "@/lib/utils";
-import { circuitLabel } from "@/lib/erp/circuits";
+import { type CircuitCode } from "@/lib/erp/circuits";
+import { CircuitSelect } from "@/components/circuit-select";
 
 export type RouteKind = "own" | "supplier" | "asr";
 export type PriceMode = "cash" | "financed" | "custom";
@@ -60,7 +61,10 @@ const TERMS: Array<{ id: TermKind; label: string }> = [
 const ROUTES: Array<{ id: RouteKind; label: string }> = [
   { id: "own", label: "Bodega Azagro" },
   { id: "supplier", label: "Entrega proveedor" },
-  { id: "asr", label: "Circuito ASR" },
+  // Es logística (quién despacha), no el circuito de financiamiento del
+  // paso 2 — se renombró para que no se confundan (decisión del dueño,
+  // 5-sep-2026): esto NO cambia qué hace la opción, solo cómo se llama.
+  { id: "asr", label: "Entrega directa vía ASR" },
 ];
 
 export function applyPartnerDefaults(form: OrderDraft, partner: OrderLookups["customers"][number]): OrderDraft {
@@ -164,8 +168,14 @@ export function OrderFields({
   lookups: OrderLookups;
   locked?: boolean;
   inherited?: InheritedTerm | null;
-  /** Circuito de financiamiento guardado en el pedido (solo lectura, paso 1). undefined = pedido nuevo, todavía sin guardar. */
-  circuit?: string | null;
+  /**
+   * Circuito de financiamiento (paso 2, 5-sep-2026). `undefined`/`null`: no
+   * se muestra el bloque (pedido todavía sin cargar). `editable`: pedido
+   * DIRECTO (sin cotización de origen), administrador, y sin candado —
+   * cualquier otro caso se ve pero no se mueve (mismo componente, rama de
+   * solo lectura).
+   */
+  circuit?: { value: CircuitCode; editable: boolean; onChange: (code: "CONTADO" | "ASR") => void } | null;
 }) {
   const partner = lookups.customers.find((c) => c.id === form.partnerId);
   const preview = duesPreview(form);
@@ -227,10 +237,10 @@ export function OrderFields({
             ))}
           </select>
         </HeadBox>
-        {circuit !== undefined ? (
+        {circuit ? (
           <HeadBox label="Circuito de financiamiento">
-            <p className="text-sm">{circuitLabel(circuit)}</p>
-            <p className="text-[11px] text-muted">Etiqueta: sigue al plazo. El precio y la mora siguen saliendo de Ajustes.</p>
+            <CircuitSelect value={circuit.value} editable={circuit.editable} disabled={locked} onChange={circuit.onChange} />
+            <p className="text-[11px] text-muted">Etiqueta: sigue al plazo, o la elige el administrador. El precio y la mora siguen saliendo de Ajustes.</p>
           </HeadBox>
         ) : null}
         <HeadBox label="Fecha">

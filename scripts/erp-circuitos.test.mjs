@@ -149,20 +149,20 @@ test("paso 1: el circuito se guarda y se hereda en cada alta de la cadena (SOL �
   assert.ok(req.slice(req.indexOf("insert into customer_requests"), req.indexOf("insert into customer_requests") + 400).includes("${data.locationId ?? null},\n        ${null})"), "solicitud nueva: circuit_code nulo, no Contado por omisión");
   assert.ok(!req.includes("circuitForTerm"), "requests.ts ya no usa circuitForTerm: la solicitud no nace resuelta");
   assert.ok(req.includes("inheritCircuit(before[0].circuit_code, data.creditDays)"), "saveRequestTerms recalcula la etiqueta con el plazo nuevo (null se resuelve igual que Contado)");
-  assert.ok(req.includes("cambios.push(`circuito ${circuitLabel(before[0].circuit_code)} → ${circuitLabel(circuit)}`)"), "y lo deja en bitácora");
+  assert.ok(req.includes('cambios.push(`circuito ${circuitLabel(before[0].circuit_code)} → ${circuitLabel(circuit)}${elegido ? " (elegido)" : ""}`)'), "y lo deja en bitácora, marcado si lo eligió a mano");
   // SOL → COT.
   assert.ok(req.includes("inheritCircuit(req[0].circuit_code, data.creditDays)"), "quoteFromRequest hereda de la solicitud");
   assert.ok(/insert into quotes \([^)]*request_id, circuit_code\)/.test(req), "…y lo escribe en la cotización");
   // COT directa (sin solicitud) y revisión.
-  assert.ok(ops.includes("${circuitForTerm(data.creditDays ?? 0)}"), "createQuote: regla por plazo");
-  assert.ok(ops.includes("const circuitRev = inheritCircuit(q[0].circuit_code, data.creditDays ?? q[0].credit_days);"), "reviseQuote sigue al plazo nuevo");
+  assert.ok(ops.includes("circuitForTerm(data.creditDays ?? 0)"), "createQuote: regla por plazo (default cuando no se elige a mano)");
+  assert.ok(ops.includes("let circuitRev = inheritCircuit(q[0].circuit_code, data.creditDays ?? q[0].credit_days);"), "reviseQuote sigue al plazo nuevo (o lo elige a mano el administrador)");
   assert.ok(ops.includes("circuit_code = ${circuitRev},"), "…y lo guarda");
   // COT → PV.
   assert.ok(ops.includes("${inheritCircuit(q[0].circuit_code, days)}"), "decideQuote: el pedido hereda de la cotización (días de la oferta aceptada)");
   const pedidoDesdeCot = ops.slice(ops.indexOf("const termKind = days > 0"), ops.indexOf("${inheritCircuit(q[0].circuit_code, days)}"));
   assert.ok(!pedidoDesdeCot.includes("inheritCircuit(routeKind") && !pedidoDesdeCot.includes("circuitForTerm(routeKind"), "route_kind no decide el circuito");
   // PV manual y cambio de plazo.
-  assert.ok(orders.includes("${circuitForTerm(dues.creditDays)}"), "saveOrder (alta manual): regla por plazo");
+  assert.ok(orders.includes("circuitForTerm(dues.creditDays)"), "saveOrder (alta manual): regla por plazo (default cuando no se elige a mano)");
   assert.equal(orders.match(/circuit_code = \$\{circuit\},/g)?.length, 2, "saveOrder y changeOrderTerm recalculan y guardan la etiqueta");
   assert.equal(orders.match(/cambios\.push\(`circuito \$\{circuitLabel\(/g)?.length, 2, "…con bitácora en los dos");
   // OC del cliente → PV.
@@ -182,20 +182,17 @@ test("paso 1: el circuito se guarda y se hereda en cada alta de la cadena (SOL �
   }
 });
 
-test("paso 1: la etiqueta se muestra de solo lectura en las cuatro pantallas y en el estado de cuenta (solo en pantalla)", () => {
-  assert.ok(src("src/routes/solicitudes.$solicitudId.tsx").includes("data?.quote ? circuitLabel(data.quote.circuit_code) : requestCircuitLabel(data?.request.circuit_code)"), "solicitud");
-  assert.ok(src("src/routes/quotes.tsx").includes("{circuitLabel(qrow.circuit_code)}"), "cotización (panel Ver)");
-  const form = src("src/components/order-form.tsx");
-  assert.ok(form.includes("circuit?: string | null;") && form.includes("{circuitLabel(circuit)}"), "pedido: dato de solo lectura, sin selector");
-  // La solicitud (antes de cotizar) usa su propio texto: "Sin definir", no
-  // el "Sin circuito" genérico — no capturar el plazo no es un error.
+test("paso 1: la etiqueta se muestra en las cuatro pantallas y en el estado de cuenta (solo en pantalla), en vivo mientras se decide", () => {
   const sol = src("src/routes/solicitudes.$solicitudId.tsx");
-  assert.ok(sol.includes("requestCircuitLabel(data?.request.circuit_code)"), "solicitud sin cotizar: requestCircuitLabel");
-  assert.ok(sol.includes("data?.quote ? circuitLabel(data.quote.circuit_code)"), "solicitud ya cotizada: la etiqueta resuelta de la cotización");
+  // Antes de que exista un plazo (ni tecleado ni guardado) no hay circuito
+  // que proponer: "Sin definir" propio, no el "Sin circuito" genérico de
+  // un documento roto.
+  assert.ok(sol.includes("requestCircuitLabel(request.circuit_code)"), "solicitud sin plazo decidido: requestCircuitLabel");
+  assert.ok(sol.includes('{quote ? (\n              <p className="text-sm">{circuitLabel(quote.circuit_code)}'), "solicitud ya cotizada: la etiqueta resuelta de la cotización, fija");
+  assert.ok(sol.includes("circuitOverride ?? inheritCircuit(request.circuit_code, days)"), "solicitud: circuito en vivo mientras se teclea el plazo, sin esperar a guardar");
   const c = src("src/lib/erp/circuits.ts");
   assert.ok(c.includes('return isCircuitCode(code) ? CIRCUIT_LABEL[code] : "Sin definir";'), "requestCircuitLabel: nulo dice Sin definir, no Sin circuito");
-  for (const sel of form.match(/<select[\s\S]*?<\/select>/g) ?? []) assert.ok(!/circuit/i.test(sel), "todavía no hay selector de circuito (paso 2)");
-  assert.ok(src("src/routes/sales.$orderId.tsx").includes("circuit={circuit}"), "la pantalla del pedido lo pasa desde el pedido guardado");
+  assert.ok(src("src/routes/quotes.tsx").includes("{circuitLabel(qrow.circuit_code)}"), "cotización (panel Ver, quedó cerrada o vino de una solicitud): solo lectura, fija");
   assert.ok(src("src/routes/credit.tsx").includes("circuitLabel(r.circuit_code)"), "cartera");
   const ops = src("src/lib/erp/ops.ts");
   assert.ok(ops.includes("formula.lines.push(`Circuito de financiamiento: ${circuitLabel(inv.circuit_code)}"), "estado de cuenta: renglón de explicación en pantalla");
@@ -223,7 +220,133 @@ test("paso 1: la migración 0025 etiqueta por plazo y por origen, nunca por rout
   assert.equal((sql.match(/where circuit_code is null/g) ?? []).length + (sql.match(/i\.circuit_code is null/g) ?? []).length, 7, "cada update respeta lo ya etiquetado (idempotente)");
   assert.ok(sql.includes("origin = 'Corte Compaq'"), "el corte de Compaq se reconoce por su origen");
   assert.ok(sql.includes("i.origin in ('Mora ' || o.name, 'Ajuste TC ' || o.name)"), "FI y ATC se ligan a su FV por el origen que escribe el sistema");
-  assert.ok(!sql.includes("not null") || sql.includes("is not null"), "la columna no lleva NOT NULL: sin selector todavía");
+  assert.ok(!sql.includes("not null") || sql.includes("is not null"), "la columna sigue nula-permitida: ni la migración ni el selector del paso 2 obligan a elegir");
+});
+
+// ---------------------------------------------------------------------------
+// PASO 2 — el selector (5-sep-2026): el sistema PROPONE según el plazo, la
+// persona confirma o cambia. Solo Contado y Circuito ASR son elegibles;
+// Línea Santa Rosa y Línea propia salen apagadas, "por construir". Solo
+// ADMINISTRADOR puede moverlo — cualquier otro rol lo ve, no lo mueve.
+// Candado tras confirmar el pedido; para un pedido que vino de cotización el
+// circuito nunca se elige a mano, se hereda. El motor sigue sin leerlo.
+// ---------------------------------------------------------------------------
+
+test("paso 2: solo dos códigos elegibles, los otros dos por construir", () => {
+  const c = src("src/lib/erp/circuits.ts");
+  assert.ok(c.includes('export const SELECTABLE_CIRCUITS: CircuitCode[] = ["CONTADO", "ASR"];'), "solo Contado y Circuito ASR");
+  assert.ok(c.includes('export const CIRCUIT_CODES: CircuitCode[] = ["CONTADO", "ASR", "SANTA_ROSA", "PROPIA"];'), "el selector lista los cuatro, en el orden del catálogo");
+  assert.ok(c.includes('export function circuitForTerm(days: number): "CONTADO" | "ASR" {'), "circuitForTerm nunca propone un circuito por construir");
+});
+
+test("paso 2: CircuitSelect propone, no fuerza — apaga los dos por construir y respeta 'editable' (admin + sin candado)", () => {
+  const cs = src("src/components/circuit-select.tsx");
+  assert.ok(cs.includes("if (!editable) {") && cs.includes("return <p className=\"text-sm\">{circuitLabel(value)}</p>;"), "no editable: se ve, no se mueve (misma etiqueta que paso 1)");
+  assert.ok(cs.includes("disabled={!SELECTABLE_CIRCUITS.includes(code)}"), "Línea Santa Rosa y Línea propia no se pueden elegir en el <select>");
+  assert.ok(cs.includes('{SELECTABLE_CIRCUITS.includes(code) ? "" : " (por construir)"}'), "…y lo dicen");
+  assert.ok(cs.includes("if (isSelectableCircuit(e.target.value)) onChange(e.target.value);"), "el cambio nunca dispara con un código no elegible");
+});
+
+test("paso 2: elegir circuito a mano es solo de administrador — servidor, no solo pantalla", () => {
+  const req = src("src/lib/erp/requests.ts");
+  const ops = src("src/lib/erp/ops.ts");
+  const orders = src("src/lib/erp/orders.ts");
+  assert.ok(req.includes("if (data.circuitCode !== undefined) await assertAdmin(sql, context.userId);"), "saveRequestTerms: admin o truena");
+  assert.equal(ops.match(/if \(data\.circuitCode !== undefined\) await assertAdmin\(sql, context\.userId\);/g)?.length, 2, "createQuote y reviseQuote: admin o truena, en los dos");
+  assert.ok(orders.includes('if (data.circuitCode !== undefined && member.role !== "admin") {'), "saveOrder: admin o truena");
+  // Los cuatro validan contra el mismo par de códigos elegibles, nunca los cuatro.
+  assert.equal(
+    (req.match(/circuitCode: z\.enum\(\["CONTADO", "ASR"\]\)\.optional\(\)/g)?.length ?? 0) +
+      (ops.match(/circuitCode: z\.enum\(\["CONTADO", "ASR"\]\)\.optional\(\)/g)?.length ?? 0) +
+      (orders.match(/circuitCode: z\.enum\(\["CONTADO", "ASR"\]\)\.optional\(\)/g)?.length ?? 0),
+    4,
+    "saveRequestTerms, createQuote, reviseQuote y saveOrder: mismo par elegible en el validador",
+  );
+});
+
+test("paso 2: la elección manual manda sobre la regla, y queda marcada en bitácora", () => {
+  const req = src("src/lib/erp/requests.ts");
+  const ops = src("src/lib/erp/ops.ts");
+  const orders = src("src/lib/erp/orders.ts");
+  assert.ok(
+    req.includes("if (data.circuitCode !== undefined && isSelectableCircuit(data.circuitCode)) {\n      circuit = data.circuitCode;\n      elegido = true;\n    }"),
+    "saveRequestTerms: la elección pisa la regla",
+  );
+  assert.equal(ops.match(/circuitElegido = true;/g)?.length, 1, "reviseQuote también distingue elegido de propuesto");
+  assert.ok(orders.includes("current[0].quote_id == null) {\n        circuit = data.circuitCode;\n        circuitElegido = true;"), "saveOrder: solo aplica en un pedido DIRECTO");
+  for (const [f, cambio] of [
+    [req, 'cambios.push(`circuito ${circuitLabel(before[0].circuit_code)} → ${circuitLabel(circuit)}${elegido ? " (elegido)" : ""}`)'],
+    [ops, 'cambios.push(`circuito ${circuitLabel(q[0].circuit_code)} → ${circuitLabel(circuitRev)}${circuitElegido ? " (elegido)" : ""}`)'],
+    [orders, 'cambios.push(`circuito ${circuitLabel(current[0].circuit_code)} → ${circuitLabel(circuit)}${circuitElegido ? " (elegido)" : ""}`)'],
+  ]) {
+    assert.ok(f.includes(cambio), `bitácora marca "(elegido)" cuando fue un pick manual: ${cambio.slice(0, 40)}…`);
+  }
+});
+
+test("paso 2: un pedido que vino de cotización NUNCA elige circuito a mano — se hereda, punto", () => {
+  const orders = src("src/lib/erp/orders.ts");
+  // decideQuote (COT → PV) sigue siendo herencia pura, sin circuitCode en su validador.
+  const decideStart = orders.indexOf("export const decideQuote");
+  assert.equal(decideStart, -1, "decideQuote vive en ops.ts, no en orders.ts (nada que verificar aquí)");
+  const opsSrc = src("src/lib/erp/ops.ts");
+  const decide = opsSrc.slice(opsSrc.indexOf("export const decideQuote"), opsSrc.indexOf("export const decideQuote") + 3500);
+  assert.ok(!decide.includes("circuitCode"), "decideQuote no acepta un circuito a mano: el pedido que nace de cotización hereda de ahí");
+  // saveOrder: la elección manual solo aplica cuando el pedido no trae quote_id.
+  assert.ok(orders.includes("quote_id: number | null;") && orders.includes("current[0].quote_id == null"), "saveOrder verifica que el pedido sea DIRECTO antes de aceptar una elección manual");
+});
+test("paso 2: las tres pantallas de origen — solicitud, cotización directa, pedido directo — proponen con la regla y dejan cambiar", () => {
+  // Solicitud: ya cubierto arriba (CircuitSelect con inheritCircuit en vivo).
+  const quotes = src("src/routes/quotes.tsx");
+  assert.ok(quotes.includes('const isAdmin = useAccess().role === "admin";'), "cotizaciones: sabe si el usuario es administrador");
+  assert.ok(quotes.includes('const [circuitCode, setCircuitCode] = useState<"CONTADO" | "ASR">("CONTADO");'), "cotización directa nueva: propone con la regla");
+  assert.ok(quotes.includes("circuitCode: circuitTouched ? circuitCode : undefined,"), "…y solo manda el pick si lo tocó (si no, el servidor propone igual)");
+  assert.ok(quotes.includes("{!qrow.request_name && revisable ? ("), "revisión: el selector solo aparece en una cotización DIRECTA (sin solicitud) y todavía abierta");
+  assert.ok(
+    quotes.includes('value={circuitOverride ?? (inheritCircuit(qrow.circuit_code, agreedDays) as "CONTADO" | "ASR")}'),
+    "…en vivo con el plazo acordado de la revisión, no el guardado",
+  );
+  const orderForm = src("src/components/order-form.tsx");
+  assert.ok(
+    orderForm.includes('circuit?: { value: CircuitCode; editable: boolean; onChange: (code: "CONTADO" | "ASR") => void } | null;'),
+    "pedido: el prop ahora trae valor + si es editable + el manejador, no solo el texto del paso 1",
+  );
+  const nuevo = src("src/routes/sales.nuevo.tsx");
+  assert.ok(nuevo.includes('editable: access.role === "admin",'), "pedido directo nuevo: solo administrador lo mueve");
+  assert.ok(nuevo.includes("setCircuitCode((c) => inheritCircuit(c, dues?.creditDays ?? 0)"), "…y propone según el plazo mientras se compone el pedido");
+  const ficha = src("src/routes/sales.$orderId.tsx");
+  assert.ok(ficha.includes("editable: !origin && isAdmin && editable,"), "pedido cargado: el selector solo aparece en uno DIRECTO (sin origin) y sigue las reglas normales de edición");
+});
+
+test("paso 2: candado tras confirmar el pedido — el mismo 'editable' del formulario, no uno nuevo", () => {
+  const ficha = src("src/routes/sales.$orderId.tsx");
+  assert.ok(ficha.includes('const editable = canEdit && state === "draft";'), "el pedido deja de editarse (todo, no solo el circuito) en cuanto sale de borrador");
+  assert.ok(ficha.includes("editable: !origin && isAdmin && editable,"), "el circuito usa exactamente ese mismo candado — no uno aparte, más permisivo o más estricto");
+});
+
+test("paso 2: 'Tipo de entrega: Circuito ASR' se renombró a 'Entrega directa vía ASR' — sigue siendo route_kind, logística, no el circuito de financiamiento", () => {
+  const orderForm = src("src/components/order-form.tsx");
+  assert.ok(orderForm.includes('{ id: "asr", label: "Entrega directa vía ASR" },'), "el texto del renglón de logística cambió");
+  assert.ok(!orderForm.includes('{ id: "asr", label: "Circuito ASR" }'), "…y el nombre viejo, que se confundía con el circuito, ya no está ahí");
+  assert.ok(orderForm.includes('export type RouteKind = "own" | "supplier" | "asr";') && orderForm.includes('routeKind: RouteKind;'), "sigue siendo el mismo campo (route_kind): nada de lógica cambió, solo el texto");
+});
+
+test("paso 2: el motor sigue sin leer el circuito ni el catálogo (mismo barrido que el paso 1, con dos archivos más)", () => {
+  const motor = [
+    "src/lib/erp/pricing.ts",
+    "src/lib/erp/margins.ts",
+    "src/lib/erp/credit.ts",
+    "src/lib/erp/ladder.ts",
+    "src/lib/erp/reports.ts",
+    "src/lib/erp/cpo.ts",
+  ];
+  for (const f of motor) {
+    const body = src(f);
+    for (const palabra of ["credit_circuits", "funding_rates"]) {
+      assert.ok(!body.includes(palabra), `${f} no debe leer ${palabra} todavía (paso 3)`);
+    }
+  }
+  // cpo.ts sí menciona circuitForTerm (paso 1, regla por plazo) — eso ya se
+  // vigiló arriba; aquí solo se confirma que no lee el catálogo.
 });
 
 test("hallazgo anotado: la comisión de la cotización no se congela (pendiente para el paso 3)", () => {

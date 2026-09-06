@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { BackBar } from "@/components/erp";
 import { applyPartnerDefaults, duesPreview, OrderFields, type OrderDraft, type OrderLookups } from "@/components/order-form";
+import { inheritCircuit } from "@/lib/erp/circuits";
 import { orderLookups, saveOrder } from "@/lib/erp/orders";
 import { validateDueDates } from "@/lib/erp/credit";
 import { useAccess } from "@/lib/access";
@@ -56,6 +57,15 @@ function Nuevo() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [overrideCredit, setOverrideCredit] = useState(false);
+  // Circuito de financiamiento del pedido directo (paso 2): propone la
+  // regla según el plazo; el administrador puede tocarlo. circuitTouched
+  // distingue "lo eligió" (se manda al guardar) de "lo dejó como venía".
+  const [circuitCode, setCircuitCode] = useState<"CONTADO" | "ASR">("CONTADO");
+  const [circuitTouched, setCircuitTouched] = useState(false);
+  const dues = form ? duesPreview(form) : null;
+  useEffect(() => {
+    if (!circuitTouched) setCircuitCode((c) => inheritCircuit(c, dues?.creditDays ?? 0) as "CONTADO" | "ASR");
+  }, [dues?.creditDays, circuitTouched]);
 
   useEffect(() => {
     void orderLookups()
@@ -89,7 +99,7 @@ function Nuevo() {
     setBusy(true);
     setError(null);
     try {
-      const res = await saveOrder({ data: { ...form, confirm, overrideCredit } });
+      const res = await saveOrder({ data: { ...form, confirm, overrideCredit, circuitCode: circuitTouched ? circuitCode : undefined } });
       await navigate({ to: "/sales/$orderId", params: { orderId: String(res.id) } });
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudo guardar");
@@ -130,7 +140,19 @@ function Nuevo() {
           Autorizo exceder el límite de crédito (queda en bitácora)
         </label>
       )}
-      <OrderFields form={form} setForm={setForm} lookups={lookups} />
+      <OrderFields
+        form={form}
+        setForm={setForm}
+        lookups={lookups}
+        circuit={{
+          value: circuitCode,
+          editable: access.role === "admin",
+          onChange: (code) => {
+            setCircuitCode(code);
+            setCircuitTouched(true);
+          },
+        }}
+      />
     </form>
   );
 }
