@@ -747,7 +747,7 @@ function Page() {
                             onChange={(code) => setCircuitOverride(code)}
                           />
                         ) : (
-                          <span className="erp-chip" title="Circuito de financiamiento (etiqueta: sigue al plazo; el precio sigue saliendo de Ajustes)">
+                          <span className="erp-chip" title="Circuito de financiamiento (etiqueta: sigue al plazo; la comisión y la base del precio salen de aquí, congeladas al cotizar)">
                             {circuitLabel(qrow.circuit_code)}
                           </span>
                         )}

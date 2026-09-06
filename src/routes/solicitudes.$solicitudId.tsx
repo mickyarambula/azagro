@@ -141,8 +141,9 @@ function Page() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [targets, setTargets] = useState<Record<string, boolean>>({});
-  // TIIE y TC salen de sus tablas (renglón vigente hoy, con fecha); spread y
-  // comisión ASR de Ajustes. Nada nace escrito aquí: 0 = todavía sin dato.
+  // TIIE y TC salen de sus tablas (renglón vigente hoy, con fecha); spread de
+  // Ajustes; comisión y base del circuito que financia (catálogo, paso 3).
+  // Nada nace escrito aquí: 0 = todavía sin dato.
   const [tiiePct, setTiiePct] = useState(0);
   const [tiieFrom, setTiieFrom] = useState<string | null>(null);
   const [spreadPct, setSpreadPct] = useState(0);
@@ -749,7 +750,7 @@ function Page() {
             )}
             <p className="text-[11px] text-muted">
               {plazoDecidido
-                ? "Etiqueta: sigue al plazo, o la elige el administrador. El precio sigue saliendo de Ajustes."
+                ? "Etiqueta: sigue al plazo, o la elige el administrador. La comisión y la base del precio salen de aquí, congeladas al cotizar."
                 : "Se resuelve solo al capturar el plazo."}
             </p>
           </HeadBox>
@@ -795,9 +796,8 @@ function Page() {
                 const mCash = marginOf(l, "cash");
                 const mCredit = marginOf(l, "credit");
                 const landed = num(l.cost) + num(l.freight);
-                // Financiamiento por unidad de cada columna, con las tasas de hoy
-                // (TIIE de la tabla, spread y comisión ASR de Ajustes).
-                // Paso 3: tasa, comisión y base son del circuito que financia.
+                // Financiamiento por unidad de cada columna: tasa, comisión y base
+                // son del circuito que financia (catálogo, congelado al cotizar).
                 // ASR: comisión + Capa 1 sobre el costo puesto. Lineal: la
                 // factura a Santa Rosa (costo + margen) a la tasa de cobro.
                 const finAt = (plazo: number) => financeUnit({ cost: landed, days: plazo, tiie: ratePct / 100, costSpread: spreadPct / 100, commissionRate: commissionPct / 100 });

@@ -240,7 +240,7 @@ export function OrderFields({
         {circuit ? (
           <HeadBox label="Circuito de financiamiento">
             <CircuitSelect value={circuit.value} editable={circuit.editable} disabled={locked} onChange={circuit.onChange} />
-            <p className="text-[11px] text-muted">Etiqueta: sigue al plazo, o la elige el administrador. El precio y la mora siguen saliendo de Ajustes.</p>
+            <p className="text-[11px] text-muted">Etiqueta: sigue al plazo, o la elige el administrador. La comisión y la base del precio salen de aquí, congeladas al cotizar; la mora sigue saliendo de Ajustes.</p>
           </HeadBox>
         ) : null}
         <HeadBox label="Fecha">

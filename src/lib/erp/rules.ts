@@ -24,7 +24,7 @@ export const BUSINESS_RULES = [
   {
     id: "finance",
     title: "Financiamiento dentro del precio",
-    body: "Si hay días de crédito, el precio incluye por unidad: costo × comisión ASR (Ajustes, una sola vez) + costo × (1 + comisión ASR) × (TIIE de la tabla vigente al cotizar + spread ASR de Ajustes) × días / 360. La línea adelanta costo + comisión, por eso el (1 + comisión). De contado es $0, comisión incluida. El financiamiento se suma al costo ANTES de aplicar el margen. Eso no es mora.",
+    body: "Si hay días de crédito, el precio incluye el costo financiero del circuito de esa cotización, congelado al cotizar (Ajustes → Circuitos de financiamiento): en el Circuito ASR, costo × comisión de apertura del circuito (una sola vez) + costo × (1 + comisión) × (TIIE de la tabla vigente al cotizar + spread del circuito) × días / 360 — la línea adelanta costo + comisión, por eso el (1 + comisión). De contado es $0, comisión incluida. El financiamiento se suma al costo ANTES de aplicar el margen. Eso no es mora.",
   },
   {
     id: "margin",
