@@ -15,8 +15,16 @@
  *      a partir del paso 2 un circuito elegido a mano puede diferir de la regla.
  *   3. Que el PRECIO IMPLÍCITO de cada partida cotizada (costo puesto +
  *      financiamiento + margen guardado, con la misma fórmula del motor) sigue
- *      dando el precio guardado. El paso 1 no toca el motor, así que la salida
- *      esperada es CERO diferencias — y la misma antes y después de desplegar.
+ *      dando el precio guardado. Desde el paso 3 el financiamiento se
+ *      recalcula con la COMISIÓN CONGELADA en la cotización
+ *      (quotes.commission_rate, migración 0026) y con la base del circuito
+ *      del documento (ASR: costo × (1 + comisión); lineal: costo + margen).
+ *      Todo lo existente corre por ASR y su comisión congelada es la misma
+ *      que la lectura en vivo daba, así que la salida esperada sigue siendo
+ *      CERO diferencias — y la misma antes y después de desplegar.
+ *   3b. Cuántas cotizaciones quedaron SIN comisión congelada (esperado: 0
+ *      después de la 0026; las que queden se detienen al repreciar, no
+ *      inventan una).
  *
  * Antes/después exacto: corre con --guardar antes de desplegar y con
  * --comparar después; la comparación es partida por partida, folio por folio.
@@ -88,6 +96,12 @@ function marginUnit(m, landed, finance = 0) {
 function priceFromMargin(i) {
   const fin = Math.max(0, i.finance);
   return round4(i.landed + fin + marginUnit(i.margin, i.landed, fin));
+}
+// Lineal (paso 3): la factura a Santa Rosa (costo + margen) × (1 + k).
+function linealPriceFromMargin(i) {
+  const disbursed = round4(Math.max(0, i.landed) + marginUnit(i.margin, Math.max(0, i.landed), 0));
+  const finance = i.days <= 0 ? 0 : round2((disbursed * Math.max(0, i.rate) * Math.max(0, i.days)) / YEAR_DAYS);
+  return { disbursed, finance, price: round4(disbursed + finance) };
 }
 
 const fmt = (n) => Number(n).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
@@ -192,20 +206,31 @@ try {
 
   // -------------------------------------------------------------------------
   // 3. Precio implícito de cada partida cotizada vs el guardado.
+  //    Paso 3: comisión CONGELADA en la cotización; base por circuito.
   // -------------------------------------------------------------------------
   console.log("\n== 3. Precio implícito (costo puesto + financiamiento + margen guardado) vs precio guardado ==");
-  const settings = await q(`select company_id, asr_commission::text as asr_commission from company_settings`);
-  const comision = new Map(settings.map((s) => [s.company_id, s.asr_commission == null ? null : Number(s.asr_commission)]));
+  const qcols = (await q(`select column_name from information_schema.columns where table_name = 'quotes'`)).map((r) => r.column_name);
+  const congelada = qcols.includes("commission_rate");
+  console.log(congelada ? "  Migración 0026: aplicada (comisión congelada en quotes.commission_rate)." : "  Migración 0026: TODAVÍA NO. La comisión se toma de Ajustes / catálogo (lectura en vivo, como antes del paso 3).");
+  // Comisión de respaldo para el "antes": Ajustes (si la columna existe) o el catálogo ASR.
+  const settings = await q(
+    `select cs.company_id, ${(await q(`select 1 from information_schema.columns where table_name = 'company_settings' and column_name = 'asr_commission'`)).length ? "cs.asr_commission::text" : "null"} as asr_commission,
+            (select c.commission_rate::text from credit_circuits c where c.company_id = cs.company_id and c.code = 'ASR') as asr_catalogo
+     from company_settings cs`,
+  );
+  const comisionViva = new Map(settings.map((s) => [s.company_id, s.asr_commission != null ? Number(s.asr_commission) : s.asr_catalogo != null ? Number(s.asr_catalogo) : null]));
   const lineas = await q(
     `select ql.id, q.company_id, q.name as cot, p.code as producto, to_jsonb(ql) as r,
             coalesce(q.credit_days,0)::int as dias, coalesce(q.tiie,0)::text as tiie, coalesce(q.spread,0)::text as spread,
-            coalesce(q.price_offer,'both') as oferta
+            coalesce(q.price_offer,'both') as oferta, ${migrada ? "q.circuit_code" : "null"} as circuito,
+            ${congelada ? "q.commission_rate::text" : "null"} as comision_congelada
      from quote_lines ql join quotes q on q.id = ql.quote_id join products p on p.id = ql.product_id
      order by q.id, ql.id`,
   );
   let ok = 0;
   let sinMargen = 0;
   let noRecalculable = 0;
+  let sinCongelar = 0;
   const difs = [];
   for (const l of lineas) {
     const r = l.r;
@@ -216,18 +241,28 @@ try {
       sinMargen += 1;
       continue;
     }
-    const com = comision.get(l.company_id);
-    let fin;
-    if (r.finance_unit != null) fin = num(r.finance_unit);
-    else if (l.dias <= 0) fin = 0;
-    else if (com == null) {
-      noRecalculable += 1;
-      continue;
-    } else fin = financeUnit({ cost: landed, days: l.dias, tiie: num(l.tiie), costSpread: num(l.spread), commissionRate: com });
+    const lineal = l.circuito === "SANTA_ROSA";
+    // Comisión: la congelada manda; si no hay (antes de la 0026), la viva.
+    const com = l.comision_congelada != null ? Number(l.comision_congelada) : comisionViva.get(l.company_id) ?? null;
+    if (congelada && l.comision_congelada == null && l.dias > 0) sinCongelar += 1;
+    const rate = num(l.tiie) + num(l.spread);
     const checks = [];
     try {
       if (mCash && r.cash_price != null) checks.push(["contado", priceFromMargin({ landed, finance: 0, margin: mCash }), num(r.cash_price)]);
-      if (mCredit && r.credit_price != null) checks.push(["crédito", priceFromMargin({ landed, finance: fin, margin: mCredit }), num(r.credit_price)]);
+      if (mCredit && r.credit_price != null) {
+        if (lineal) {
+          checks.push(["crédito (lineal)", linealPriceFromMargin({ landed, margin: mCredit, rate, days: l.dias }).price, num(r.credit_price)]);
+        } else {
+          let fin;
+          if (r.finance_unit != null) fin = num(r.finance_unit);
+          else if (l.dias <= 0) fin = 0;
+          else if (com == null) {
+            noRecalculable += 1;
+            continue;
+          } else fin = financeUnit({ cost: landed, days: l.dias, tiie: num(l.tiie), costSpread: num(l.spread), commissionRate: com });
+          checks.push(["crédito", priceFromMargin({ landed, finance: fin, margin: mCredit }), num(r.credit_price)]);
+        }
+      }
     } catch (e) {
       difs.push(`${l.cot} ${l.producto}: ${e.message}`);
       continue;
@@ -236,7 +271,7 @@ try {
     for (const [cual, implicito, guardado] of checks) {
       if (Math.abs(implicito - guardado) > 0.00501) {
         bien = false;
-        difs.push(`${l.cot} ${l.producto} ${cual}: guardado ${fmt(guardado)} · implícito ${fmt(implicito)} (costo puesto ${fmt(landed)}, fin ${fmt(fin)}, plazo ${l.dias} d)`);
+        difs.push(`${l.cot} ${l.producto} ${cual}: guardado ${fmt(guardado)} · implícito ${fmt(implicito)} (costo puesto ${fmt(landed)}, plazo ${l.dias} d, comisión ${com == null ? "—" : com})`);
       }
     }
     // El precio del documento es el de la oferta: contado, o crédito (contado si no hay).
@@ -247,16 +282,21 @@ try {
     }
     if (bien) ok += 1;
   }
-  console.log(`  Partidas cotizadas: ${lineas.length} · coinciden: ${ok} · sin margen (no se recalculan): ${sinMargen} · sin comisión en Ajustes ni financiamiento guardado: ${noRecalculable} · DIFERENCIAS: ${difs.length}`);
+  console.log(`  Partidas cotizadas: ${lineas.length} · coinciden: ${ok} · sin margen (no se recalculan): ${sinMargen} · sin comisión ni financiamiento guardado: ${noRecalculable} · DIFERENCIAS: ${difs.length}`);
   for (const d of difs) console.log(`  ≠ ${d}`);
   diferenciasPrecio += difs.length;
+  if (congelada) {
+    const sinCong = await q(`select count(*)::int as n from quotes where commission_rate is null`);
+    const conCong = await q(`select count(*)::int as n from quotes where commission_rate is not null`);
+    console.log(`\n== 3b. Comisión congelada (0026) == cotizaciones con comisión congelada: ${conCong[0].n} · sin congelar: ${sinCong[0].n} (esperado 0; partidas a crédito afectadas: ${sinCongelar})`);
+  }
 
   // -------------------------------------------------------------------------
   // 4. Instantánea antes/después (precios y totales guardados, folio por folio).
   // -------------------------------------------------------------------------
   const foto = {
     quote_lines: await q(`select id, cash_price::text as cash_price, credit_price::text as credit_price, unit_price::text as unit_price, finance_unit::text as finance_unit from quote_lines order by id`),
-    quotes: await q(`select id, name, total::text as total, coalesce(credit_days,0)::int as credit_days from quotes order by id`),
+    quotes: await q(`select id, name, total::text as total, coalesce(credit_days,0)::int as credit_days${congelada ? ", commission_rate::text as commission_rate, cost_rate::text as cost_rate, collection_rate::text as collection_rate" : ""} from quotes order by id`),
     sales_lines: await q(`select id, so_id, product_id, qty::text as qty, unit_price::text as unit_price from sales_lines order by id`),
     sales_orders: await q(`select id, name, total::text as total, coalesce(credit_days,0)::int as credit_days from sales_orders order by id`),
     invoices: await q(`select id, name, amount::text as amount, residual::text as residual, coalesce(credit_days,0)::int as credit_days from invoices order by id`),
@@ -277,7 +317,10 @@ try {
           // Documento nuevo después de la instantánea: no es diferencia del paso 1.
           continue;
         }
+        // Solo las columnas que la instantánea vieja conocía: una columna nueva
+        // (p. ej. commission_rate de la 0026) no es una diferencia de precio.
         for (const k of Object.keys(r)) {
+          if (!(k in p)) continue;
           if (String(r[k] ?? "") !== String(p[k] ?? "")) {
             cambios += 1;
             if (cambios <= 40) console.log(`  ≠ ${tabla} id ${r.id}${r.name ? ` (${r.name})` : ""} ${k}: ${p[k]} → ${r[k]}`);

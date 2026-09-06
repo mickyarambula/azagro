@@ -228,7 +228,8 @@ test("parámetros de cartera: editables, solo admin, con bitácora anterior → 
   assert.ok(save.includes("→"), "la bitácora debe llevar valor anterior → nuevo");
   assert.ok(save.includes("early_pay_days"), "el umbral de pronto pago se guarda en Ajustes");
   const policyFn = ops.slice(ops.indexOf("export async function readPolicy"), ops.indexOf("export const getSettings"));
-  for (const col of ["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_commission", "asr_spread", "early_pay_days"]) {
+  // La comisión de apertura ya no es de Ajustes: vive en el catálogo de circuitos (paso 3).
+  for (const col of ["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_spread", "early_pay_days"]) {
     assert.ok(policyFn.includes(col), `la política debe leer ${col} de Ajustes (no constantes)`);
   }
   // Y si el renglón no está, se detiene: no hay DEFAULT_POLICY ni `?? número`.

@@ -268,13 +268,13 @@ test("sin margen la pantalla lo dice y no deja cotizar; nunca propone un número
 test("quoteFromRequest arma los dos precios: contado sin financiamiento, crédito con financiamiento, y guarda márgenes + finance_unit", () => {
   const req = src("src/lib/erp/requests.ts");
   const body = fnBody(req, "quoteFromRequest");
-  assert.ok(body.includes("commissionRate: pol.asrCommission"), "comisión de Ajustes (fórmula intacta)");
+  assert.ok(body.includes("commissionRate: terms.commissionRate,"), "comisión del circuito, congelada en la cotización (fórmula intacta)");
   assert.ok(body.includes("days: 0,"), "contado con 0 días");
   assert.ok(body.includes("normalizeMargin({ mode: mCash.mode, pct: mCash.pct, nominal: mCash.nominal }, landed, 0)"), "el margen contado se sincroniza sin financiamiento");
-  assert.ok(body.includes("landed, creditCalc.financeUnit)"), "y el de crédito con el financiamiento de su columna (el % es del precio)");
+  assert.ok(body.includes('terms.financingBase === "costo_margen" ? 0 : creditCalc.financeUnit,'), "y el de crédito con el financiamiento de su columna en ASR (el % es del precio); en el lineal sin él (el % es de la factura a Santa Rosa)");
   assert.ok(body.includes("Corrige el margen antes de cotizar."), "un margen ≥ 100% se detiene con mensaje");
   assert.ok(body.includes("margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,"), "inserta el margen de contado con su origen");
-  assert.ok(body.includes("margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit)"), "y el de crédito con el financiamiento por unidad");
+  assert.ok(body.includes("margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)"), "y el de crédito con el financiamiento por unidad y lo desembolsado (paso 3)");
   assert.ok(body.includes("throw new Error(`Captura el margen antes de cotizar:"), "sin margen no se cotiza: se dice qué falta");
   assert.ok(!body.includes("resolveCost"), "el costo sigue siendo el del proveedor ganador (RFQ intacto)");
 });
@@ -342,7 +342,7 @@ test("changeOrderTerm: solo borrador, rehace precios con el margen de crédito g
   const orders = src("src/lib/erp/orders.ts");
   const body = fnBody(orders, "changeOrderTerm");
   assert.ok(body.includes(`if (so[0].state !== "draft") throw new Error("Pedido confirmado: el plazo ya no se cambia.`), "confirmado no cambia");
-  assert.ok(body.includes("financeUnit({ cost: landed, days, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: pol.asrCommission })"), "financiamiento con la misma fórmula y TIIE/spread de la COT");
+  assert.ok(body.includes("financeUnit({ cost: landed, days, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: frozenCommission })"), "financiamiento con la misma fórmula y TIIE/spread/comisión de la COT");
   assert.ok(body.includes("priceFromMargin({ landed, finance: fin, margin: mCredit })"), "precio = (costo + financiamiento) ÷ (1 − margen crédito): la columna de la escalera del plazo nuevo");
   assert.ok(body.includes('cambios.push(`${l.code} ${landed > 0.0001 ? "sin margen" : "sin costo"}: precio sin recalcular`)'), "sin margen no se inventa uno para recalcular");
   assert.ok(body.includes("price = Number(l.cash_price);"), "a 0 días vuelve al precio de contado");

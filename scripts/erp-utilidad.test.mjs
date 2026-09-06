@@ -99,7 +99,8 @@ test("cableado: el P&L por pedido usa TIIE de emisión y parámetros de Ajustes"
   assert.ok(rep.includes("financeCost({"), "computeDealPnl debe usar financeCost (comisión + Capa 1 + Capa 2)");
   assert.ok(rep.includes("issueDate"), "la TIIE de costo se toma de la fecha de emisión de la factura");
   // Primero la foto guardada en la factura; si no hay, los Ajustes de hoy.
-  assert.ok(rep.includes("snap.commissionRate ?? pol.asrCommission"), "la comisión sale de la foto de la factura o de Ajustes, no quemada");
+  assert.ok(rep.includes("snap.commissionRate ?? (so[0].q_commission != null ? Number(so[0].q_commission) : null)"), "la comisión sale de la foto de la factura, si no de la cotización congelada, si no del catálogo del circuito — nunca quemada");
+  assert.ok(rep.includes("(await circuitTerms(sql, companyId, circuitCode)).commissionRate"), "…y el catálogo solo si de verdad hace falta (crédito o días excedidos)");
   assert.ok(rep.includes("snap.costSpread ?? pol.asrSpread"), "el spread de costo sale de la foto de la factura o de Ajustes");
   assert.ok(
     rep.includes("snap.financialDays ?? (fv[0] ? fv[0].credit_days : so[0].credit_days)"),

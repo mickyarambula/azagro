@@ -455,15 +455,25 @@ function Ficha() {
       {pnl && (
         <div className="mt-4">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-            <PnlKpi label="Venta" value={money(pnl.revenue)} />
+            <PnlKpi
+              label={pnl.financingBase === "costo_margen" ? "Factura a Santa Rosa" : "Venta"}
+              value={money(pnl.revenue)}
+              hint={pnl.financingBase === "costo_margen" ? `Costo + margen (lo que Santa Rosa desembolsa). Precio al cliente ${money(pnl.clientPrice)}.` : undefined}
+            />
             <PnlKpi label="Costo mercancía" value={money(pnl.cogs)} hint="OC, si no cotización, si no catálogo" />
             <PnlKpi label="Flete / sobre pedido" value={money(pnl.freight)} />
-            <PnlKpi label="Margen operación" value={money(pnl.margin)} hint={`${pnl.marginPct.toFixed(1)}% sobre venta`} />
             <PnlKpi
-              label="Costo financiero"
-              value={money(pnl.finance)}
+              label="Margen operación"
+              value={money(pnl.margin)}
+              hint={pnl.financingBase === "costo_margen" ? `${pnl.marginPct.toFixed(1)}% sobre la factura a Santa Rosa` : `${pnl.marginPct.toFixed(1)}% sobre venta`}
+            />
+            <PnlKpi
+              label={pnl.financingBase === "costo_margen" ? "Financiamiento de Santa Rosa" : "Costo financiero"}
+              value={money(pnl.financingBase === "costo_margen" ? pnl.financierFinance : pnl.finance)}
               hint={
-                pnl.tiieIssue == null
+                pnl.financingBase === "costo_margen"
+                  ? `Lo que Santa Rosa le agrega al cliente sobre la factura de Azagro (${money(pnl.disbursed)}) a la tasa de cobro + spread por ${pnl.financialDays} d. No es costo de Azagro: el precio al cliente lo lleva, la factura a Santa Rosa no.`
+                  : pnl.tiieIssue == null
                   ? `Sin TIIE en la tabla para la emisión (${pnl.tiieDate ?? "sin fecha"}): el costo financiero no se calcula ni se estima.`
                   : `Sobre el costo puesto ${money(pnl.financeBase)} (mercancía + flete), la misma base que el precio. Comisión ${money(pnl.commission)} + Capa 1 (${pnl.financialDays} d del pedido) ${money(pnl.layer1)} + Capa 2 (${pnl.daysExceeded} d exc.) ${money(pnl.layer2)} · TIIE emisión ${(pnl.tiieIssue * 100).toFixed(2)}% (tabla${pnl.tiieDate ? `, ${dateDMY(pnl.tiieDate)}` : ""}) + spread. Comisión y Capa 1 van cobradas al cliente dentro del precio.`
               }

@@ -7,6 +7,8 @@ import { dateDMY, todayMx } from "@/lib/utils";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
+import { circuitTerms, financingCircuit } from "@/lib/erp/circuits";
+import { linealMarginFromPrice, type FinancingBase } from "@/lib/erp/pricing";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -14,6 +16,13 @@ async function cid(sql: Sql, userId: string) {
   const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
+}
+
+/** Días excedidos de la FV (o 0 si no hay): se necesita antes de decidir si hace falta la comisión. */
+function daysExceededPreview(fv: { credit_due: string | null; due_date: string; paid_date: string | null } | undefined, today: string) {
+  if (!fv) return 0;
+  const end = fv.paid_date && fv.paid_date < today ? fv.paid_date : today;
+  return Math.max(0, daysBetween(fv.credit_due || fv.due_date, end));
 }
 
 export async function computeDealPnl(sql: Sql, companyId: number, soId: number) {
@@ -28,9 +37,12 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     date: string;
     credit_days: number;
     quote_id: number | null;
+    circuit_code: string | null;
+    q_commission: string | null;
   }>`
-    select name, currency, date::text, coalesce(credit_days,0)::int as credit_days, quote_id
-    from sales_orders where id = ${soId} and company_id = ${companyId}
+    select so.name, so.currency, so.date::text, coalesce(so.credit_days,0)::int as credit_days, so.quote_id, so.circuit_code,
+      (select q.commission_rate::text from quotes q where q.id = so.quote_id) as q_commission
+    from sales_orders so where so.id = ${soId} and so.company_id = ${companyId}
   `;
   if (!so[0]) throw new Error("Pedido no encontrado");
   const pol = await policy(sql, companyId);
@@ -61,7 +73,18 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   // Si la factura guardó su foto de parámetros al emitirse, la utilidad se
   // calcula con ESOS valores: cambiar Ajustes o la tabla TIIE después no
   // reescribe la historia de operaciones ya facturadas.
-  let snap: { tiieIssue?: number; tiieDate?: string; costSpread?: number; commissionRate?: number; financialDays?: number; earlyPayDays?: number } = {};
+  let snap: {
+    tiieIssue?: number;
+    tiieDate?: string;
+    costSpread?: number;
+    commissionRate?: number | null;
+    financialDays?: number;
+    earlyPayDays?: number;
+    circuit?: string | null;
+    financingBase?: FinancingBase | null;
+    costRate?: number | null;
+    collectionRate?: number | null;
+  } = {};
   try {
     if (fv[0]?.params_snap) snap = JSON.parse(fv[0].params_snap) as typeof snap;
   } catch {
@@ -78,10 +101,20 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     ? { rate: snap.tiieIssue, date: snap.tiieDate ?? issueDate }
     : nearestRate(tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })), issueDate);
   const costSpread = snap.costSpread ?? pol.asrSpread;
-  const commissionRate = snap.commissionRate ?? pol.asrCommission;
   // Los días financiados son los de ESTE pedido (los mismos que se cobraron
   // dentro del precio), no un plazo fijo. Al contado no hay circuito.
   const financialDays = snap.financialDays ?? (fv[0] ? fv[0].credit_days : so[0].credit_days);
+  // Paso 3: comisión y base son DEL CIRCUITO. Orden: la foto de la factura;
+  // si no, lo congelado en la cotización; si no, el catálogo del circuito que
+  // financia. Solo se resuelve si hace falta (crédito o días excedidos): un
+  // pedido de contado no se detiene por un catálogo incompleto.
+  const circuitCode = snap.circuit ?? so[0].circuit_code;
+  const financingBase: FinancingBase = snap.financingBase ?? (financingCircuit(circuitCode) === "SANTA_ROSA" ? "costo_margen" : "costo_comision");
+  let commissionRate = snap.commissionRate ?? (so[0].q_commission != null ? Number(so[0].q_commission) : null);
+  if (commissionRate == null && (financialDays > 0 || daysExceededPreview(fv[0], today) > 0)) {
+    commissionRate = (await circuitTerms(sql, companyId, circuitCode)).commissionRate;
+  }
+  const commissionOrZero = commissionRate ?? 0;
   const exceededEnd = fv[0]?.paid_date && fv[0].paid_date < today ? fv[0].paid_date : today;
   const daysExceeded = fv[0]
     ? Math.max(0, daysBetween(fv[0].credit_due || fv[0].due_date, exceededEnd))
@@ -106,6 +139,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     quote_cost: string | null;
     quote_freight: string;
     quote_other: string;
+    quote_disbursed: string | null;
   }>`
     select sl.product_id, p.code, p.name, sl.qty::text, coalesce(sl.uom, p.uom) as uom, sl.unit_price::text,
       p.cost::text as catalog_cost,
@@ -118,7 +152,8 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       ) as po_cost,
       ql.cost::text as quote_cost,
       coalesce(ql.freight,0)::text as quote_freight,
-      coalesce(ql.other_cost,0)::text as quote_other
+      coalesce(ql.other_cost,0)::text as quote_other,
+      ql.disbursed_unit::text as quote_disbursed
     from sales_lines sl
     join products p on p.id = sl.product_id
     left join quote_lines ql on ql.quote_id = ${so[0].quote_id} and ql.product_id = sl.product_id
@@ -158,12 +193,13 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     // Costo financiero del circuito hermana: comisión + Capa 1 con los días
     // de crédito del pedido (los mismos cobrados al cliente en el precio) +
     // Capa 2 (días excedidos, no previstos). Al contado no hay circuito.
+    const asr = financingBase === "costo_comision";
     const fin =
-      !excluded && tiieIssue != null && (financialDays > 0 || daysExceeded > 0)
+      asr && !excluded && tiieIssue != null && (financialDays > 0 || daysExceeded > 0)
         ? financeCost({
             supplierCost: financialDays > 0 ? landed : 0,
             saleCapital: sale,
-            commissionRate,
+            commissionRate: commissionOrZero,
             costSpread,
             tiieAtIssue: tiieIssue,
             financialDays: Math.max(0, financialDays),
@@ -171,7 +207,25 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
           })
         : { commission: 0, layer1: 0, layer2: 0, total: 0 };
     const finance = fin.total;
-    const margin = excluded ? 0 : sale - cogs - freight - other;
+    // LINEAL: Azagro le factura a Santa Rosa costo + margen (lo desembolsado,
+    // congelado por partida al cotizar) y Santa Rosa le agrega al cliente el
+    // financiamiento. La venta de Azagro es esa factura; el financiamiento es
+    // de Santa Rosa, no un costo de Azagro. Así la partición queda como en
+    // DISENO § 5 (margen 6,951.87 · financiamiento 4,924.24), no como la del
+    // motor ASR (320.08 mal atribuidos).
+    let disbursed = 0;
+    if (!asr && !excluded) {
+      const perUnit =
+        l.quote_disbursed != null
+          ? Number(l.quote_disbursed)
+          : financialDays > 0 && tiieIssue != null
+            ? linealMarginFromPrice({ price: saleUnit, landed: costUnit + freightUnit + otherUnit, rate: tiieIssue + costSpread, days: financialDays, mode: "pct" }).disbursed
+            : saleUnit;
+      disbursed = qty * perUnit;
+    }
+    const financierFinance = !asr && !excluded ? Math.round((sale - disbursed) * 100) / 100 : 0;
+    const revenueLine = asr ? sale : excluded ? 0 : disbursed;
+    const margin = excluded ? 0 : revenueLine - cogs - freight - other;
     return {
       productId: l.product_id,
       code: l.code,
@@ -192,7 +246,12 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       layer1: fin.layer1,
       layer2: fin.layer2,
       margin,
-      marginPct: !excluded && sale > 0 ? (margin / sale) * 100 : 0,
+      marginPct: !excluded && revenueLine > 0 ? (margin / revenueLine) * 100 : 0,
+      /** Lineal: factura de Azagro a Santa Rosa (costo + margen). ASR: 0. */
+      disbursed,
+      /** Lineal: lo que Santa Rosa le cobra al cliente por financiar (venta − factura a Santa Rosa). ASR: 0. */
+      financierFinance,
+      revenueLine,
       excluded,
       excludeReason,
     };
@@ -230,7 +289,12 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   }
   // Solo las partidas con costo (y con TIIE cuando hace falta) entran al
   // cálculo; las excluidas se reportan aparte.
-  const revenue = included.reduce((s, l) => s + l.sale, 0);
+  // ASR: la venta es al cliente. Lineal: la venta de Azagro es la factura a
+  // Santa Rosa (costo + margen); el precio al cliente se reporta aparte.
+  const revenue = included.reduce((s, l) => s + l.revenueLine, 0);
+  const clientPrice = included.reduce((s, l) => s + l.sale, 0);
+  const disbursed = included.reduce((s, l) => s + l.disbursed, 0);
+  const financierFinance = Math.round(included.reduce((s, l) => s + l.financierFinance, 0) * 100) / 100;
   const cogs = included.reduce((s, l) => s + l.cogs, 0);
   const freightQuote = included.reduce((s, l) => s + l.freight, 0);
   const otherQuote = included.reduce((s, l) => s + l.other, 0);
@@ -280,6 +344,15 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     name: so[0].name,
     currency: so[0].currency,
     creditDays: so[0].credit_days,
+    // Paso 3: por dónde corrió el financiamiento y su partición.
+    circuit: circuitCode,
+    financingBase,
+    clientPrice,
+    disbursed,
+    financierFinance,
+    commissionRate,
+    costRate: snap.costRate ?? null,
+    collectionRate: snap.collectionRate ?? null,
     financeRate: tiieIssue != null ? tiieIssue + costSpread : null,
     tiieIssue,
     tiieDate: tiiePick?.date ?? null,

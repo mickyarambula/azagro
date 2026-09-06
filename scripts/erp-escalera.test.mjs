@@ -233,7 +233,7 @@ test("servidor: listQuotes arma la escalera por partida con el costo real y las 
   assert.ok(fn.includes("terms: pol.quoteTerms,"), "plazos de Ajustes");
   assert.ok(fn.includes("agreed: l.q_days,"), "más el acordado");
   assert.ok(fn.includes('marginCash: marginOf(l, "cash"),') && fn.includes('marginCredit: marginOf(l, "credit"),'), "dos márgenes");
-  assert.ok(fn.includes("days === l.q_days ? stored : financeUnit({ cost: landed, days, tiie: Number(l.q_tiie), costSpread: Number(l.q_spread), commissionRate: pol.asrCommission })"), "financiamiento por columna con TIIE/spread de la COT; el acordado usa el guardado");
+  assert.ok(fn.includes("days === l.q_days ? stored : financeUnit({ cost: landed, days, tiie: Number(l.q_tiie), costSpread: Number(l.q_spread), commissionRate: frozenCommission(l) })"), "financiamiento por columna con TIIE/spread/comisión de la COT; el acordado usa el guardado");
   assert.ok(fn.includes("ladder: l.ladder.map((s) => ({ ...s, utility: null, pct: null }))"), "a quien no ve márgenes se le esconde utilidad y %, no el precio");
   assert.ok(fn.indexOf("...ladderOf(l)") < fn.indexOf("if (!canSeeCosts(me.role))"), "se calcula antes de esconder el costo");
   assert.ok(fn.includes("terms: pol.quoteTerms }"), "la pantalla recibe la lista de plazos");
@@ -254,7 +254,7 @@ test("pantalla de la cotización: escalera interna en vivo, plazo acordado edita
   assert.ok(q.includes("Crédito {agreedDays} d"), "la columna de crédito es la del plazo en edición");
   assert.ok(q.includes("const daysDirty = revDays != null && revDays !== qrow.credit_days;"), "cambiar el plazo cuenta como cambio");
   // En vivo cuando se ve el costo; si no, la escalera del servidor.
-  assert.ok(q.includes("marginCredit: marginFromPrice({ price: rp.credit, landed, finance: finAt(agreed), mode: creditMode }),"), "el margen de crédito sale del precio capturado y aplica a todas las columnas");
+  assert.ok(q.includes("marginFromPrice({ price: rp.credit, landed, finance: finAt(agreed), mode: creditMode })"), "el margen de crédito sale del precio capturado y aplica a todas las columnas (ASR)");
   assert.ok(q.includes("price: st.days === 0 ? rp.cash : st.days === agreed ? rp.credit : st.price,"), "sin costo visible: escalera del servidor");
 });
 
@@ -274,7 +274,8 @@ test("documento al cliente: SOLO contado y el plazo acordado; la escalera no sal
 
 test("solicitud: la escalera se ve por partida con precio, financiamiento y utilidad, y el margen de crédito aplica a todos los plazos", () => {
   const sol = src("src/routes/solicitudes.$solicitudId.tsx");
-  assert.ok(sol.includes("const steps = ladderFor({ terms, agreed: days, landed, marginCash: mCash, marginCredit: mCredit, financeAt: finAt });"), "escalera por partida");
+  assert.ok(sol.includes("const steps = ladderFor({\n                  terms,\n                  agreed: days,\n                  landed,\n                  marginCash: mCash,"), "escalera por partida");
+  assert.ok(sol.includes("financingBase,\n                  rateAt: () => ratePct / 100 + spreadPct / 100,"), "…con la base y la tasa del circuito (paso 3)");
   assert.ok(sol.includes("setTerms(s.quoteTerms);"), "plazos de Ajustes");
   assert.ok(sol.includes("{st.days > 0 ? `fin ${money(st.finance)} · ` : \"\"}util {money(st.utility ?? 0)} ({(st.pct ?? 0).toFixed(1)}%)"), "cada columna con financiamiento y utilidad");
   assert.ok(sol.includes("Precio = (costo puesto + financiamiento) ÷ (1 − margen %)"), "la fórmula a la vista");

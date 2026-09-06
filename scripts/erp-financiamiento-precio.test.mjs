@@ -229,12 +229,12 @@ test("cableado: priceSale cobra $0 al contado, comisión incluida, y el cotizado
 
   const ui = src("src/routes/solicitudes.$solicitudId.tsx");
   assert.ok(ui.includes("setSpreadPct(Number((s.asrSpread * 100).toFixed(2)))"), "Financiero /u parte del spread ASR de Ajustes");
-  assert.ok(ui.includes("setCommissionPct(Number((s.asrCommission * 100).toFixed(2)))"), "y de la comisión ASR de Ajustes");
+  assert.ok(ui.includes("const commissionRate = finCircuit?.commissionRate ?? null;"), "y de la comisión del circuito que financia (catálogo, paso 3)");
   assert.ok(ui.includes("costSpread: spreadPct / 100,") && ui.includes("commissionRate: commissionPct / 100,"), "y los pasa a priceSale");
   assert.ok(ui.includes("Financiero /u"), "la columna sigue existiendo");
 
   const req = src("src/lib/erp/requests.ts");
-  assert.ok(req.includes("commissionRate: pol.asrCommission"), "la cotización guardada usa la comisión ASR");
+  assert.ok(req.includes("commissionRate: terms.commissionRate,"), "la cotización guardada usa la comisión del circuito y la congela");
 });
 
 test("cableado: el 4.5% (spread de línea) ya no existe en Ajustes, política ni pantallas", () => {
@@ -274,9 +274,9 @@ test("cableado: el 4.5% (spread de línea) ya no existe en Ajustes, política ni
 test("cableado: el servidor calcula el financiamiento con el costo real ANTES de escondérselo a ventas", () => {
   const ops = src("src/lib/erp/ops.ts");
   const fn = ops.slice(ops.indexOf("export const listQuotes"), ops.indexOf("export const createQuote"));
-  assert.ok(fn.includes("financeBase({ cost, tiie: tiieToday.rate, costSpread: pol.asrSpread, commissionRate: pol.asrCommission })"), "la base sale del costo resuelto, la TIIE de la tabla (hoy) y el spread/comisión de Ajustes");
+  assert.ok(fn.includes("financeBase({ cost, tiie: tiieToday.rate, costSpread: pol.asrSpread, commissionRate: asrCatalogCommission })"), "la base sale del costo resuelto, la TIIE de la tabla (hoy), el spread de Ajustes y la comisión del catálogo (paso 3)");
   assert.ok(fn.includes("const tiieToday = nearestRate(await tiieTableOf(sql, cid), todayMx());"), "la TIIE es el renglón vigente de la tabla, con fecha");
-  assert.ok(fn.includes("fin: tiieToday ? financeBase(") && fn.includes(": null"), "sin renglón de TIIE no hay base de financiamiento (null), no un número");
+  assert.ok(fn.includes("tiieToday && asrCatalogCommission != null\n            ? financeBase(") && fn.includes(": null"), "sin renglón de TIIE o sin comisión en el catálogo no hay base de financiamiento (null), no un número");
   assert.ok(fn.includes("resolveCost({ avgCost: row.cost, refCost: row.ref_cost })"), "y el costo sale del orden único (kardex → referencia)");
   assert.ok(fn.indexOf("const pricedProducts") < fn.indexOf("if (!canSeeCosts(me.role))"), "primero se calcula, después se esconde el costo");
   assert.ok(fn.includes("pricedLines.map((l) => ({ ...l, cost: \"0\", ref_cost: \"0\", freight: \"0\" }))"), "a ventas se le esconde costo y flete, no el precio");
@@ -286,7 +286,7 @@ test("cableado: el servidor calcula el financiamiento con el costo real ANTES de
   assert.ok(!q.includes("num(p.cost)") && !q.includes("num(prod?.cost)"), "la pantalla ya no calcula con el costo");
   assert.ok(!q.includes("cost: num(l.cost), days"), "ni en la revisión");
   assert.ok(q.includes("creditFromCash({ cash: l.cashPrice, fin: l.fin, days })"), "el crédito sale de la base que mandó el servidor");
-  assert.ok((q.match(/creditFromCash\(\{/g) ?? []).length >= 6, "todas las llamadas usan la firma nueva (con fin)");
+  assert.ok((q.match(/creditPriceOf\(/g) ?? []).length >= 6, "todas las partidas pasan por creditPriceOf (ASR: la base del servidor; lineal: la tasa de cobro)");
   const pricing = src("src/lib/erp/pricing.ts");
   assert.ok(pricing.includes("export function financeBase("), "la base vive en pricing.ts");
   assert.ok(!pricing.includes("const base = i.cost > 0 ? i.cost : cash;"), "ya no se financia sobre el precio de contado cuando falta el costo");

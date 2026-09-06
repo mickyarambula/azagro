@@ -42,11 +42,17 @@ function inheritCircuit(upstream, days) {
   return circuitForTerm(days);
 }
 
-test("circuits.ts: dos server functions, ambas GET (solo lectura), scoped por empresa", () => {
+test("circuits.ts: lecturas GET scoped por empresa; las dos escrituras del paso 3 son de administrador con bitácora", () => {
   const c = src("src/lib/erp/circuits.ts");
   assert.ok(c.includes('export const listCreditCircuits = createServerFn({ method: "GET" })'), "GET, no POST: no escribe nada");
   assert.ok(c.includes('export const listFundingRates = createServerFn({ method: "GET" })'), "GET, no POST: no escribe nada");
-  assert.ok(!c.includes("insert into") && !c.includes("update ") && !c.includes("delete from"), "el módulo no escribe nada en la base");
+  // Paso 3: el catálogo no se crea ni se borra desde aquí; solo se captura la
+  // comisión de un circuito y los renglones de la tabla de tasas, y las dos
+  // exigen administrador y dejan bitácora.
+  assert.ok(!c.includes("delete from"), "nada se borra desde aquí");
+  assert.ok(!c.includes("insert into credit_circuits"), "el catálogo nace con la migración, no desde pantalla");
+  assert.equal(c.match(/await assertAdmin\(sql, context\.userId\);/g)?.length, 2, "saveFundingRate y saveCircuitCommission: solo administrador");
+  assert.equal(c.match(/await writeAudit\(sql, \{/g)?.length, 2, "…con bitácora las dos");
   assert.ok(c.includes("where company_id = ${companyId}"), "cada consulta filtra por la empresa del usuario");
   const body = sinComentarios(c);
   // Ningún número de negocio en el código: ni comisión, ni spread.
@@ -59,42 +65,44 @@ test("circuits.ts: cuatro códigos fijos, sin catálogo editable desde aquí", (
   assert.ok(!c.includes("saveCreditCircuit") && !c.includes("createCircuit"), "no hay forma de crear ni editar un circuito todavía");
 });
 
-test("Ajustes: el panel de circuitos es de solo lectura y dice que nadie más lo usa", () => {
+test("Ajustes: el panel de circuitos dice que el precio lee de ahí, captura la comisión del circuito y los renglones de la tabla de tasas", () => {
   const st = src("src/routes/settings.tsx");
-  assert.ok(st.includes("Circuitos de financiamiento (solo lectura)"), "el panel existe y se anuncia como solo lectura");
-  assert.ok(st.includes("await listCreditCircuits().catch(() => []))"), "se carga con la función de solo lectura");
-  assert.ok(st.includes("await listFundingRates().catch(() => []))"), "y la tabla de tasas también");
-  assert.ok(
-    st.includes("este catálogo todavía no lo lee nadie: ni el precio, ni la mora, ni los reportes"),
-    "el texto de pantalla deja explícito que esto todavía no hace nada",
-  );
-  assert.ok(!st.includes("saveCreditCircuit") && !st.includes("saveFundingRate"), "no hay botón de guardar circuitos ni tasas");
+  assert.ok(st.includes('<h2 className="text-sm font-semibold">Circuitos de financiamiento</h2>'), "el panel existe (ya no es solo lectura)");
+  assert.ok(st.includes("await listCreditCircuits().catch(() => [])"), "se carga con la función de lectura");
+  assert.ok(st.includes("await listFundingRates().catch(() => [])"), "y la tabla de tasas también");
+  assert.ok(st.includes("El precio lee de aquí la comisión y la") && st.includes("base del circuito del documento (paso 3)"), "el texto dice quién lo lee y desde cuándo");
+  assert.ok(!st.includes("saveCreditCircuit"), "el catálogo no se crea ni se edita entero desde pantalla");
+  assert.ok(st.includes("saveFundingRate(") && st.includes("saveCircuitCommission("), "sí se capturan tasas y la comisión del circuito");
   // Nace vacía a propósito: el panel lo dice, no oculta el estado real.
   assert.ok(st.includes("Sin renglones capturados todavía."), "la tabla de tasas dice que está vacía, no inventa un renglón");
 });
 
-test("cableado: nada de negocio lee todavía credit_circuits ni funding_rates", () => {
-  // El paso 1 solo agrega la ETIQUETA (circuit_code) y sus ayudantes puros.
-  // Las tablas del catálogo siguen sin lector fuera de circuits.ts y su
-  // prueba de migración: si aparecen en pricing.ts, margins.ts, credit.ts,
-  // reports.ts, ops.ts, orders.ts o requests.ts, ya no es "nadie lo lee".
-  const archivosDeNegocio = [
+test("cableado: las tablas del catálogo solo las lee circuits.ts; el motor puro (pricing, margins, ladder, credit) recibe los números", () => {
+  // Paso 3: el servidor (ops, orders, requests, azagro, reports) llega al
+  // catálogo SOLO a través de circuits.ts (circuitTerms / priceRateFor /
+  // readCircuits). Ningún otro archivo escribe el nombre de la tabla, y el
+  // motor puro sigue sin importar circuits.ts: recibe comisión y base por
+  // parámetro.
+  for (const f of [
     "src/lib/erp/pricing.ts",
     "src/lib/erp/margins.ts",
     "src/lib/erp/credit.ts",
+    "src/lib/erp/ladder.ts",
     "src/lib/erp/reports.ts",
     "src/lib/erp/ops.ts",
     "src/lib/erp/orders.ts",
     "src/lib/erp/requests.ts",
-    "src/lib/erp/ladder.ts",
     "src/lib/azagro.ts",
     "src/lib/erp/cpo.ts",
     "src/lib/erp/cutover.ts",
-  ];
-  for (const f of archivosDeNegocio) {
-    const body = src(f);
-    assert.ok(!body.includes("credit_circuits"), `${f} no debe leer credit_circuits todavía (paso 3)`);
-    assert.ok(!body.includes("funding_rates"), `${f} no debe leer funding_rates todavía (paso 3)`);
+  ]) {
+    // Se miran solo las líneas de código: un comentario puede nombrar la tabla.
+    const body = sinComentarios(src(f));
+    assert.ok(!body.includes("credit_circuits"), `${f} no lee credit_circuits directo: pasa por circuits.ts`);
+    assert.ok(!body.includes("funding_rates"), `${f} no lee funding_rates directo: pasa por circuits.ts`);
+  }
+  for (const f of ["src/lib/erp/pricing.ts", "src/lib/erp/margins.ts", "src/lib/erp/ladder.ts", "src/lib/erp/credit.ts"]) {
+    assert.ok(!src(f).includes("erp/circuits") && !src(f).includes("./circuits"), `${f}: el motor puro no importa circuits.ts`);
   }
 });
 
@@ -152,7 +160,7 @@ test("paso 1: el circuito se guarda y se hereda en cada alta de la cadena (SOL �
   assert.ok(req.includes('cambios.push(`circuito ${circuitLabel(before[0].circuit_code)} → ${circuitLabel(circuit)}${elegido ? " (elegido)" : ""}`)'), "y lo deja en bitácora, marcado si lo eligió a mano");
   // SOL → COT.
   assert.ok(req.includes("inheritCircuit(req[0].circuit_code, data.creditDays)"), "quoteFromRequest hereda de la solicitud");
-  assert.ok(/insert into quotes \([^)]*request_id, circuit_code\)/.test(req), "…y lo escribe en la cotización");
+  assert.ok(/insert into quotes \([^)]*request_id, circuit_code,\s*commission_rate, cost_rate, collection_rate\)/.test(req), "…y lo escribe en la cotización (junto a lo congelado del paso 3)");
   // COT directa (sin solicitud) y revisión.
   assert.ok(ops.includes("circuitForTerm(data.creditDays ?? 0)"), "createQuote: regla por plazo (default cuando no se elige a mano)");
   assert.ok(ops.includes("let circuitRev = inheritCircuit(q[0].circuit_code, data.creditDays ?? q[0].credit_days);"), "reviseQuote sigue al plazo nuevo (o lo elige a mano el administrador)");
@@ -201,12 +209,15 @@ test("paso 1: la etiqueta se muestra en las cuatro pantallas y en el estado de c
   assert.ok(!/circuit/i.test(src("src/lib/erp/doc-text.ts")), "el documento que sale al cliente no menciona el circuito");
 });
 
-test("paso 1: el motor sigue leyendo Ajustes — precio, márgenes, mora, escalera y reportes no conocen el circuito", () => {
-  const motor = ["src/lib/erp/pricing.ts", "src/lib/erp/margins.ts", "src/lib/erp/credit.ts", "src/lib/erp/ladder.ts", "src/lib/erp/reports.ts"];
+test("paso 3: el motor puro recibe el circuito por parámetro — pricing, margins, ladder y credit no conocen la etiqueta ni el catálogo", () => {
+  // Hasta el paso 2 esto incluía reports.ts; en el paso 3 el P&L SÍ lee el
+  // circuito del documento (es parte del motor que lo recibe). Lo que sigue
+  // prohibido es que el motor puro lea la etiqueta o el catálogo.
+  const motor = ["src/lib/erp/pricing.ts", "src/lib/erp/margins.ts", "src/lib/erp/credit.ts", "src/lib/erp/ladder.ts"];
   for (const f of motor) {
     const body = src(f);
     for (const palabra of ["circuit_code", "circuitCode", "credit_circuits", "funding_rates", "erp/circuits", "./circuits"]) {
-      assert.ok(!body.includes(palabra), `${f} no debe mencionar ${palabra} (el motor lee el circuito en el paso 3)`);
+      assert.ok(!body.includes(palabra), `${f} no debe mencionar ${palabra}: recibe comisión y base por parámetro`);
     }
   }
 });
@@ -298,8 +309,8 @@ test("paso 2: las tres pantallas de origen — solicitud, cotización directa, p
   // Solicitud: ya cubierto arriba (CircuitSelect con inheritCircuit en vivo).
   const quotes = src("src/routes/quotes.tsx");
   assert.ok(quotes.includes('const isAdmin = useAccess().role === "admin";'), "cotizaciones: sabe si el usuario es administrador");
-  assert.ok(quotes.includes('const [circuitCode, setCircuitCode] = useState<"CONTADO" | "ASR">("CONTADO");'), "cotización directa nueva: propone con la regla");
-  assert.ok(quotes.includes("circuitCode: circuitTouched ? circuitCode : undefined,"), "…y solo manda el pick si lo tocó (si no, el servidor propone igual)");
+  assert.ok(quotes.includes('const [circuitCode, setCircuitCode] = useState<CircuitCode>("CONTADO");'), "cotización directa nueva: propone con la regla");
+  assert.ok(quotes.includes("circuitCode: circuitTouched && isSelectableCircuit(circuitCode) ? circuitCode : undefined,"), "…y solo manda el pick si lo tocó (si no, el servidor propone igual)");
   assert.ok(quotes.includes("{!qrow.request_name && revisable ? ("), "revisión: el selector solo aparece en una cotización DIRECTA (sin solicitud) y todavía abierta");
   assert.ok(
     quotes.includes('value={circuitOverride ?? (inheritCircuit(qrow.circuit_code, agreedDays) as "CONTADO" | "ASR")}'),
@@ -349,21 +360,23 @@ test("paso 2: el motor sigue sin leer el circuito ni el catálogo (mismo barrido
   // vigiló arriba; aquí solo se confirma que no lee el catálogo.
 });
 
-test("hallazgo anotado: la comisión de la cotización no se congela (pendiente para el paso 3)", () => {
-  // Este paso no lo corrige — solo confirma que el hallazgo sigue siendo
-  // cierto hoy, para que la corrección del paso 3 sepa exactamente qué
-  // arreglar. TIIE y spread SÍ están congelados en la cotización; la
-  // comisión se relee en vivo de Ajustes en cada camino que reprecia.
+test("hallazgo CERRADO (paso 3): la comisión se congela en la cotización junto a la TIIE y el spread", () => {
+  // ESTADO.md § 6: changeOrderTerm y reviseQuote releían pol.asrCommission
+  // en vivo, así que una cotización vieja cambiaba de precio al revisarla si
+  // alguien movía la comisión en Ajustes. Ahora los dos leen
+  // quotes.commission_rate, escrita al cotizar, y se detienen si falta.
   const orders = src("src/lib/erp/orders.ts");
   const ops = src("src/lib/erp/ops.ts");
-  assert.ok(orders.includes("commissionRate: pol.asrCommission"), "changeOrderTerm relee la comisión de Ajustes, no la de la cotización");
-  assert.ok(orders.includes("tiie: Number(q[0].tiie)") && orders.includes("costSpread: Number(q[0].spread)"), "TIIE y spread sí salen de la cotización congelada");
-  const revise = ops.slice(ops.indexOf("const marginUpdates = new Map"), ops.indexOf("const marginUpdates = new Map") + 1200);
-  assert.ok(revise.includes("commissionRate: pol.asrCommission"), "reviseQuote también relee la comisión en vivo");
-  assert.ok(ESTADO_TIENE_EL_HALLAZGO(), "ESTADO.md debe registrar este hallazgo con archivo y línea");
+  assert.ok(!orders.includes("pol.asrCommission") && !ops.includes("pol.asrCommission"), "nadie relee la comisión de Ajustes");
+  assert.ok(orders.includes("commissionRate: frozenCommission })"), "changeOrderTerm reprecia con la comisión congelada");
+  assert.ok(orders.includes("tiie: Number(q[0].tiie)") && orders.includes("costSpread: Number(q[0].spread)"), "TIIE y spread siguen saliendo de la cotización congelada");
+  const revise = ops.slice(ops.indexOf("export const reviseQuote"), ops.indexOf("export const decideQuote"));
+  assert.ok(revise.includes("const frozenCommission = Number(q[0].commission_rate);") && revise.includes("commissionRate: frozenCommission })"), "reviseQuote también");
+  assert.ok(ESTADO_CERRO_EL_HALLAZGO(), "ESTADO.md § 6 debe decir que quedó cerrado en el paso 3");
 });
 
-function ESTADO_TIENE_EL_HALLAZGO() {
+function ESTADO_CERRO_EL_HALLAZGO() {
   const estado = src("ESTADO.md");
-  return estado.includes("orders.ts:435") && estado.includes("ops.ts:1050") && /comisi[oó]n.*no se congela/i.test(estado);
+  const seis = estado.slice(estado.indexOf("## 6. Hallazgo"), estado.indexOf("## 7."));
+  return /CERRADO/.test(seis) && seis.includes("quotes.commission_rate") && seis.includes("0026");
 }

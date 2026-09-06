@@ -34,12 +34,11 @@ export function QtyField({
    */
   zeroIsBlank?: boolean;
 }) {
-  const shown = (v: number) => (zeroIsBlank ? (v ? String(v) : "") : String(v));
-  const [raw, setRaw] = useState(shown(value));
+  const [raw, setRaw] = useState(shownQty(value, zeroIsBlank));
   const [focus, setFocus] = useState(false);
 
   useEffect(() => {
-    if (!focus) setRaw(shown(value));
+    if (!focus) setRaw(shownQty(value, zeroIsBlank));
   }, [value, focus, zeroIsBlank]);
 
   function parsed() {
@@ -65,10 +64,15 @@ export function QtyField({
       onBlur={() => {
         setFocus(false);
         onCommit?.(parsed());
-        setRaw(shown(value));
+        setRaw(shownQty(value, zeroIsBlank));
       }}
     />
   );
+}
+
+/** Texto del campo: con zeroIsBlank un 0 se ve en blanco (como siempre); sin él, "0". */
+function shownQty(v: number, zeroIsBlank: boolean) {
+  return zeroIsBlank ? (v ? String(v) : "") : String(v);
 }
 
 export function MoneyField({

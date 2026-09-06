@@ -41,9 +41,13 @@ test("todas las migraciones aplican en orden sobre una base vacía", async () =>
   assert.ok(!cs.includes("default_tiie"), "la TIIE por omisión ya no existe: siempre sale de la tabla");
   const defaults = (await db.query(
     `select column_name, column_default, is_nullable from information_schema.columns where table_name = 'company_settings' and column_name = any($1)`,
-    [["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_commission", "asr_spread", "early_pay_days"]],
+    [["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_spread", "early_pay_days"]],
   )).rows;
-  assert.equal(defaults.length, 8);
+  // asr_commission ya no existe: la 0026 la tiró (la comisión vive en el catálogo de circuitos).
+  assert.equal(defaults.length, 7);
+  assert.ok(!cs.includes("asr_commission"), "company_settings.asr_commission se tiró en la 0026");
+  for (const c of ["commission_rate", "cost_rate", "collection_rate"]) assert.ok((await cols("quotes")).includes(c), `quotes.${c} (0026)`);
+  assert.ok((await cols("quote_lines")).includes("disbursed_unit"), "quote_lines.disbursed_unit (0026)");
   for (const d of defaults) {
     assert.equal(d.column_default, null, `${d.column_name} no debe traer default`);
     assert.equal(d.is_nullable, "YES", `${d.column_name} nace vacío hasta que Ajustes lo capture`);
@@ -352,5 +356,48 @@ test("0025 etiqueta lo existente: plazo 0 → Contado, lo demás y el corte → 
   await db.exec(m25);
   assert.equal((await por("quotes"))["COT-0002"], "SANTA_ROSA", "un circuito ya guardado no se reescribe");
   assert.deepEqual(await por("sales_orders"), { "PV-0001": "CONTADO", "PV-0002": "ASR" }, "segunda corrida: sin cambios");
+  await db.close();
+});
+
+test("0026 congela la comisión en las cotizaciones existentes con la del Circuito ASR (nada cambia de precio), escribe 0 en Santa Rosa y tira asr_commission de Ajustes", async () => {
+  const db = new PGlite();
+  const files = pendingMigrations(readdirSync(dir), []);
+  // Las empresas tienen que existir ANTES de la 0024: es la que siembra el
+  // catálogo por empresa (copiando la comisión de Ajustes).
+  for (const { path } of files.filter((f) => f.name < "0024")) await db.exec(readFileSync(join(dir, path), "utf8"));
+  await db.exec(`
+    insert into companies (id, name, join_code, created_by) values (1, 'AZ', 'AZ1', 'u1'), (2, 'Sin comisión', 'SC1', 'u1'), (3, 'Catálogo vacío', 'CV1', 'u1');
+    insert into company_settings (company_id, asr_commission) values (1, 0.0123);
+    insert into company_settings (company_id) values (2), (3);
+    insert into partners (id, company_id, code, name, payment_days) values (10, 1, 'CL1', 'Cliente', 90), (20, 2, 'CL2', 'Cliente 2', 90), (30, 3, 'CL3', 'Cliente 3', 90);
+    insert into quotes (id, company_id, name, partner_id, credit_days) values
+      (1, 1, 'COT-0001', 10, 0), (2, 1, 'COT-0002', 10, 90), (3, 2, 'COT-0003', 20, 90), (4, 3, 'COT-0004', 30, 60);
+  `);
+  for (const { path } of files.filter((f) => f.name >= "0024" && f.name < "0026")) await db.exec(readFileSync(join(dir, path), "utf8"));
+  // La empresa 3 capturó la comisión en Ajustes DESPUÉS de la 0024: su catálogo
+  // nació sin ella. La 0026 la vuelve a copiar antes de tirar la columna.
+  await db.exec(`update company_settings set asr_commission = 0.02 where company_id = 3`);
+  await db.exec(readFileSync(join(dir, "0026_motor_por_circuito.sql"), "utf8"));
+
+  const q = Object.fromEntries((await db.query(`select name, commission_rate::text as c from quotes order by id`)).rows.map((r) => [r.name, r.c == null ? null : Number(r.c)]));
+  assert.equal(q["COT-0001"], 0.0123, "una cotización de contado también congela la comisión con la que se repreciaría (la del ASR)");
+  assert.equal(q["COT-0002"], 0.0123, "la cotización a crédito congela la comisión que la lectura en vivo habría dado: la del catálogo (copiada de Ajustes)");
+  assert.equal(q["COT-0003"], null, "empresa sin comisión capturada: nada que congelar, nada que inventar (el motor se detiene al repreciar)");
+  assert.equal(q["COT-0004"], 0.02, "catálogo sin comisión pero Ajustes con ella: se vuelve a copiar antes de congelar y de tirar la columna");
+
+  const circ = Object.fromEntries(
+    (await db.query(`select company_id || ':' || code as k, commission_rate::text as c from credit_circuits order by company_id, sort_order`)).rows.map((r) => [r.k, r.c == null ? null : Number(r.c)]),
+  );
+  assert.equal(circ["1:SANTA_ROSA"], 0, "Línea Santa Rosa: 0 escrito (no cobra, Decisión 6), no \"sin capturar\"");
+  assert.equal(circ["1:CONTADO"], null, "Contado: no aplica, sigue nulo");
+  assert.equal(circ["1:PROPIA"], null, "Línea propia: sin construir, sigue nulo");
+  assert.equal(circ["3:ASR"], 0.02, "el catálogo recuperó la comisión de Ajustes antes de que la columna desapareciera");
+
+  const cols = (await db.query(`select column_name from information_schema.columns where table_name = 'company_settings'`)).rows.map((r) => r.column_name);
+  assert.ok(!cols.includes("asr_commission"), "\"Comisión ASR\" ya no está en Ajustes: un solo lugar decide cada número");
+  const ql = (await db.query(`select column_name from information_schema.columns where table_name = 'quote_lines'`)).rows.map((r) => r.column_name);
+  assert.ok(ql.includes("disbursed_unit"), "disbursed_unit por partida, nulo en lo existente");
+  const nulos = (await db.query(`select count(*)::int as n from quote_lines where disbursed_unit is not null`)).rows[0];
+  assert.equal(nulos.n, 0, "la migración no inventa lo desembolsado de partidas viejas: se escribe al cotizar de aquí en adelante");
   await db.close();
 });

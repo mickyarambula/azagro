@@ -127,7 +127,7 @@ test("la TIIE siempre sale de la tabla: nearestRate no acepta respaldo y require
 test("Ajustes es obligatorio: sin renglón completo el servidor y la pantalla se detienen", () => {
   const ops = sinComentarios(src("src/lib/erp/ops.ts"));
   const lectura = ops.slice(ops.indexOf("export async function readPolicy"), ops.indexOf("export const getSettings"));
-  for (const col of ["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_commission", "asr_spread", "early_pay_days", "quote_terms"]) {
+  for (const col of ["credit_days", "invoice_days", "fega_rate", "fega_commission", "collection_spread", "asr_spread", "early_pay_days", "quote_terms"]) {
     assert.ok(lectura.includes(col), `readPolicy lee ${col}`);
     assert.ok(!new RegExp(`${col}\\s*\\?\\?\\s*[\\d.]`).test(lectura), `${col} sin respaldo numérico`);
   }
@@ -200,7 +200,7 @@ test("TIIE 6.9% en la tabla → $558.71 a 150 días; $565.44 solo sale con el 7.
   assert.ok(sol.includes("nearestRate(") && sol.includes("setTiieFrom("), "Solicitud: tabla, hoy, con fecha");
   assert.ok(!sol.includes("s.tiie[0]"), "Solicitud ya no toma el primer renglón a ciegas");
   const crear = ops.slice(ops.indexOf("export const createQuote"), ops.indexOf("\nexport const", ops.indexOf("export const createQuote") + 10));
-  assert.ok(crear.includes('const pick = requireRate(await tiieTableOf(sql, cid), today, "cotización a crédito");'), "crear la cotización a crédito exige renglón de TIIE (se detiene sin él)");
+  assert.ok(crear.includes("const pick = await priceRateFor(sql, cid, terms, today);") && crear.includes('if (!pick) throw new Error(missingPriceRateMessage(terms, today, "cotización a crédito"));'), "crear la cotización a crédito exige renglón de tasa de la tabla del circuito (se detiene sin él)");
   assert.ok(crear.includes("Math.abs(pick.rate - data.tiie) > 0.000001"), "y no acepta una TIIE distinta a la de la tabla");
   assert.ok(!crear.includes("data.tiie ?? 0"), "la TIIE guardada es la de la tabla, no la que mandó la pantalla");
 });

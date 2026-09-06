@@ -14,7 +14,7 @@ import { ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, se
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { todayMx } from "@/lib/utils";
-import { inheritCircuit } from "@/lib/erp/circuits";
+import { circuitTerms, inheritCircuit } from "@/lib/erp/circuits";
 
 export type Role = AppRole;
 
@@ -1451,12 +1451,32 @@ export const deliverSale = createServerFn({ method: "POST" })
     // no, la foto queda sin TIIE (el reporte lo marca, no lo estima).
     const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
     const financedDays = so[0].credit_days ?? 0;
-    const tiiePick = financedDays > 0 ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`) : nearestRate(tiieTable, today);
+    // Paso 3: comisión, base y las dos tasas son del circuito del documento.
+    // Si el pedido vino de cotización, lo congelado ahí manda; si no, el
+    // catálogo del circuito que financia. En el lineal la tasa que entra al
+    // precio es la de cobro congelada, no la TIIE.
+    const circuitOfSale = inheritCircuit(so[0].circuit_code, financedDays);
+    const qFrozen = await sql<{ commission_rate: string | null; cost_rate: string | null; collection_rate: string | null; tiie: string | null }>`
+      select commission_rate::text, cost_rate::text, collection_rate::text, tiie::text
+      from quotes q join sales_orders o on o.quote_id = q.id where o.id = ${so[0].id}
+    `;
+    const terms = financedDays > 0 ? await circuitTerms(sql, m.company_id, circuitOfSale) : null;
+    const lineal = terms?.financingBase === "costo_margen";
+    const tiiePick =
+      financedDays > 0 && !lineal
+        ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`)
+        : lineal
+          ? { rate: Number(qFrozen[0]?.collection_rate ?? qFrozen[0]?.tiie ?? 0), date: today }
+          : nearestRate(tiieTable, today);
     const snap = JSON.stringify({
       tiieIssue: tiiePick?.rate ?? null,
       tiieDate: tiiePick?.date ?? null,
       costSpread: pol.asrSpread,
-      commissionRate: pol.asrCommission,
+      commissionRate: qFrozen[0]?.commission_rate != null ? Number(qFrozen[0].commission_rate) : (terms?.commissionRate ?? null),
+      circuit: circuitOfSale,
+      financingBase: terms?.financingBase ?? null,
+      costRate: qFrozen[0]?.cost_rate != null ? Number(qFrozen[0].cost_rate) : null,
+      collectionRate: qFrozen[0]?.collection_rate != null ? Number(qFrozen[0].collection_rate) : null,
       // Los días financiados de ESTE pedido: los mismos que fueron cobrados
       // al cliente dentro del precio (0 = contado, sin circuito).
       financialDays: financedDays,

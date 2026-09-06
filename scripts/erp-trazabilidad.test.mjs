@@ -52,9 +52,12 @@ test("la FV congela sus parámetros al emitirse (foto contra cambios futuros de 
   }
   assert.ok(deliver.includes("params_snap"), "la foto se guarda en la factura");
   assert.ok(
-    deliver.includes("const tiiePick = financedDays > 0 ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`) : nearestRate(tiieTable, today);"),
-    "a crédito la FV exige renglón de TIIE (se detiene sin él); de contado guarda el que haya o nada, nunca un número del código",
+    deliver.includes("financedDays > 0 && !lineal\n        ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`)") && deliver.includes(": nearestRate(tiieTable, today);"),
+    "a crédito por ASR la FV exige renglón de TIIE (se detiene sin él); de contado guarda el que haya o nada, nunca un número del código",
   );
+  for (const campo of ["circuit: circuitOfSale", "financingBase: terms?.financingBase ?? null", "costRate:", "collectionRate:"]) {
+    assert.ok(deliver.includes(campo), `paso 3: la foto de la FV incluye ${campo}`);
+  }
   const rep = src("src/lib/erp/reports.ts");
   assert.ok(rep.includes("JSON.parse(fv[0].params_snap)"), "el P&L usa la foto guardada, no los Ajustes de hoy");
   assert.ok(rep.includes("snap.tiieIssue != null"), "la TIIE de emisión sale de la foto; si no hay foto, de la tabla (con fecha), nunca de un número del código");

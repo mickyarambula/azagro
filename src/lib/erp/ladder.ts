@@ -1,4 +1,5 @@
-import { marginValid, priceFromMargin, type MarginSpec } from "@/lib/erp/margins";
+import { marginValid, marginUnit, priceFromMargin, type MarginSpec } from "@/lib/erp/margins";
+import { linealFinanceUnit, type FinancingBase } from "@/lib/erp/pricing";
 
 /**
  * Escalera de plazos (herramienta interna para decidir). La hoja real de
@@ -70,6 +71,11 @@ export type LadderStep = {
  * La escalera de una partida. `financeAt(días)` es el financiamiento por
  * unidad de esa columna (lo calcula quien tiene el costo real: el servidor, o
  * la pantalla de la solicitud que sí ve costos).
+ *
+ * La escalera RECIBE la base del circuito (paso 3): con "costo_comision"
+ * (ASR, o sin decir nada) es exactamente la de siempre; con "costo_margen"
+ * (lineal) cada columna a plazo financia costo + margen a la tasa anual de
+ * `rateAt(días)` y el % es sobre la factura a Santa Rosa. No lee el catálogo.
  */
 export function ladderFor(i: {
   terms: number[];
@@ -78,7 +84,11 @@ export function ladderFor(i: {
   marginCash: MarginSpec | null;
   marginCredit: MarginSpec | null;
   financeAt: (days: number) => number;
+  financingBase?: FinancingBase;
+  /** Solo lineal: tasa anual que entra al precio (tasa de cobro + spread de línea) para esa columna. */
+  rateAt?: (days: number) => number;
 }): LadderStep[] {
+  if (i.financingBase === "costo_margen") return ladderForLineal(i);
   return ladderTerms(i.terms, i.agreed).map((days) => {
     const margin = days <= 0 ? i.marginCash : i.marginCredit;
     const finance = days <= 0 ? 0 : Math.max(0, i.financeAt(days));
@@ -91,6 +101,31 @@ export function ladderFor(i: {
       price,
       utility,
       pct: price > 0 ? Math.round((utility / price) * 100 * 10000) / 10000 : null,
+      agreed: days === i.agreed,
+    };
+  });
+}
+
+/**
+ * Escalera del lineal: la factura a Santa Rosa (costo + margen) es la misma en
+ * todas las columnas a plazo; lo que cambia es el financiamiento que Santa
+ * Rosa le agrega al cliente. Contado: costo + margen contado, sin financiar.
+ */
+function ladderForLineal(i: Parameters<typeof ladderFor>[0]): LadderStep[] {
+  const round4 = (n: number) => Math.round(n * 10000) / 10000;
+  return ladderTerms(i.terms, i.agreed).map((days) => {
+    const margin = days <= 0 ? i.marginCash : i.marginCredit;
+    if (!marginValid(margin)) return { days, finance: 0, price: null, utility: null, pct: null, agreed: days === i.agreed };
+    const disbursed = round4(i.landed + marginUnit(margin, i.landed, 0));
+    const finance = days <= 0 ? 0 : linealFinanceUnit({ disbursed, rate: i.rateAt ? i.rateAt(days) : 0, days });
+    const price = round4(disbursed + finance);
+    const utility = round4(price - i.landed - finance);
+    return {
+      days,
+      finance,
+      price,
+      utility,
+      pct: disbursed > 0 ? round4((utility / disbursed) * 100) : null,
       agreed: days === i.agreed,
     };
   });

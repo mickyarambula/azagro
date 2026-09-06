@@ -989,7 +989,16 @@ construir el paso 10 ("espejo").
 
 ---
 
-## 6. Hallazgo de construcción (5-sep-2026): la comisión no se congela en la cotización
+## 6. Hallazgo de construcción (5-sep-2026): la comisión no se congela en la cotización — CERRADO en el paso 3
+
+> **CERRADO (paso 3, mismo día).** La migración 0026 agrega `quotes.commission_rate`
+> (y `cost_rate` / `collection_rate`, las dos tasas del lineal) y la congela al
+> cotizar; `reviseQuote` (`ops.ts`) y `changeOrderTerm` (`orders.ts`) leen
+> `q[0].commission_rate` y se detienen si falta, nunca releen Ajustes. Lo
+> existente se congeló con la comisión del Circuito ASR del catálogo — la
+> misma que la lectura en vivo habría dado — así que ningún precio se movió
+> (`scripts/erp-circuito-lineal.test.mjs`, identidad). Lo de abajo queda como
+> historia de por qué hizo falta.
 
 Encontrado al revisar el código para el plan de construcción del catálogo de
 circuitos (§ 5, paso 3). Es un defecto real contra el principio "congelar al
@@ -1030,4 +1039,8 @@ columna congelada (`quotes.commission_rate`) igual que ya tiene `tiie` y
 
 **Pendiente — falta pantalla para capturar la tabla de tasas.** `funding_rates` (dos columnas, tasa de costo / tasa de cobro, migración 0024) existe y se lee de solo lectura en Ajustes, pero no hay ninguna pantalla ni servidor para CAPTURAR un renglón — nace vacía y se queda vacía. Tiene que existir antes de encender el circuito lineal (paso 5): sin eso, "Línea Santa Rosa" no tiene de dónde sacar su tasa el día que se construya.
 
-**Pendiente (en orden):** paso 3 = el motor lee el circuito (base de financiamiento, comisión congelada en la cotización — § 6 —, "Comisión ASR" sale de Ajustes); paso 4 = reportes por circuito; paso 5 = encender la Línea Santa Rosa (necesita antes la pantalla de captura de `funding_rates`, arriba).
+**Paso 3 (hecho; visto bueno del dueño el 5-sep-2026).** El motor lee el circuito. (1) **Pantalla de captura de la tabla de tasas** en Ajustes: dos columnas por fecha (tasa de costo / tasa de cobro), la de cobro precargada igual a la de costo hasta que alguien la toque, solo administrador, bitácora (`saveFundingRate`); la protección se muestra como diferencia. (2) **El motor recibe el circuito**: `priceSale` exige `financingBase` y `commissionRate` (parámetros, nunca lee tablas); `ladderFor` recibe la base y `rateAt`; `margins.ts` no cambió (el lineal usa `marginUnit(m, landed, 0)`). Los siete caminos del servidor (`quoteFromRequest` ×2, `listQuotes` ×3, `createQuote`, `reviseQuote`, `changeOrderTerm`) y las tres pantallas (solicitud, cotización directa, escalera de la revisión) reciben comisión y base de `circuitTerms(sql, cid, circuito)` y la tasa de `priceRateFor` (TIIE en ASR, tasa de cobro en el lineal). (3) **La comisión se congela** en `quotes.commission_rate` junto a `cost_rate` / `collection_rate` (migración 0026); `reviseQuote` y `changeOrderTerm` leen la congelada y se detienen si falta — § 6 CERRADO. Lo existente se congeló con la del Circuito ASR del catálogo (la que la lectura en vivo daba). (4) **Camino lineal**: `linealPriceFromMargin` / `linealMarginFromPrice` / `creditFromCashLineal` (base = costo + margen, margen % sobre la factura a Santa Rosa, sin comisión ni × 1.01); `quote_lines.disbursed_unit` por partida; `computeDealPnl` parte margen (factura a Santa Rosa − costo) de financiamiento de Santa Rosa (precio al cliente − factura) — con esto los 320.08 quedan donde van. (5) **"Comisión ASR" desapareció de Ajustes** (`POLICY_FIELDS`, `readPolicy`, `saveSettings`, pantalla, columna tirada por la 0026); se captura en el renglón del Circuito ASR del catálogo (`saveCircuitCommission`, admin, bitácora). **Prueba central:** `scripts/erp-circuito-lineal.test.mjs` congela una copia del `priceSale` / `ladderFor` de antes del paso 3 y la compara contra el de ahora con base `costo_comision` en más de 2,000 casos (y los del dueño, y PV-0003): cero diferencias; el lineal contra DISENO § 5 (4,924.24 · 111,876.11 · 6,951.87) en % y $ fijo, captura inversa incluida; y la partición del P&L. **Contado no cambia; Línea propia sigue apagada; Línea Santa Rosa NO se enciende en el selector** (`SELECTABLE_CIRCUITS` sigue en Contado/ASR): el camino existe, ningún documento puede tomarlo hasta el paso 5.
+
+**Dos decisiones de construcción del paso 3, APROBADAS por el dueño (Decisiones 7 y 8 en `DECISIONES.md`):** (a) la comisión del Circuito ASR se captura en el catálogo (consecuencia obligada de sacarla de Ajustes); (b) Línea Santa Rosa lleva comisión 0 ESCRITA por la 0026 — vacío = "nadie lo capturó", el sistema se detiene; cero = "no cobra", el sistema calcula (la misma distinción que ya usa el plazo). **Instantánea de producción previa al despliegue:** cero diferencias (13 partidas de cotización, 7 cotizaciones, 13 renglones de pedido, 7 pedidos, 12 facturas); falta correr `--comparar antes.json` después del despliegue.
+
+**Pendiente (en orden):** paso 4 = reportes por circuito (costo real vs. protección con `cost_rate` / `collection_rate` congeladas; reparto de mora); paso 5 = encender la Línea Santa Rosa en el selector (la tabla de tasas ya se captura; falta la FV a Santa Rosa, la instrucción y la factura espejo — Fase 3 del diseño).

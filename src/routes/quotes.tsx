@@ -13,13 +13,13 @@ import { getDealTrail } from "@/lib/erp/deal";
 import { marginFromPrice, OFFER_LABEL, type MarginMode } from "@/lib/erp/margins";
 import { ladderFor, termLabel, type LadderStep } from "@/lib/erp/ladder";
 import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
-import { creditFromCash, type FinanceBase } from "@/lib/erp/pricing";
+import { creditFromCash, creditFromCashLineal, linealMarginFromPrice, type FinanceBase } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, quoteNotes } from "@/lib/erp/doc-text";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
-import { circuitForTerm, circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
+import { circuitForTerm, circuitLabel, inheritCircuit, isSelectableCircuit, type CircuitCode } from "@/lib/erp/circuits";
 import { CircuitSelect } from "@/components/circuit-select";
 import { useAccess } from "@/lib/access";
 
@@ -32,7 +32,8 @@ export const Route = createFileRoute("/quotes")({
 });
 
 /** fin = base del financiamiento que manda el servidor (calculada con el costo real, igual para todos los roles). */
-type Line = { productId: number; qty: number; cashPrice: number; creditPrice: number; uom: string; fin: FinanceBase };
+/** finLineal = tasa anual del lineal (tasa de cobro + spread) que mandó el servidor; null si la tabla no cubre hoy. */
+type Line = { productId: number; qty: number; cashPrice: number; creditPrice: number; uom: string; fin: FinanceBase; finLineal: { rate: number } | null };
 const SIN_FIN: FinanceBase = { commission: 0, interestYear: 0 };
 type Offer = "cash" | "credit" | "both";
 
@@ -142,7 +143,9 @@ function Page() {
   // el plazo; el administrador puede tocarlo. circuitTouched distingue "lo
   // eligió" (se manda al guardar) de "lo dejó como venía" (el servidor sigue
   // proponiendo solo, sin pedir permiso de administrador).
-  const [circuitCode, setCircuitCode] = useState<"CONTADO" | "ASR">("CONTADO");
+  // Tipo ancho a propósito (paso 3): el precio ya sabe calcular el lineal;
+  // el selector sigue ofreciendo solo Contado y Circuito ASR hasta el paso 5.
+  const [circuitCode, setCircuitCode] = useState<CircuitCode>("CONTADO");
   const [circuitTouched, setCircuitTouched] = useState(false);
   const [tiie, setTiie] = useState(0);
   const [tiieFrom, setTiieFrom] = useState<string | null>(null);
@@ -168,8 +171,18 @@ function Page() {
 
   // El financiamiento lo calcula el servidor sobre el costo real (línea.fin):
   // el precio a crédito es el mismo para cualquier rol, vea o no el costo.
+  // Paso 3: la base la dice el circuito de la cotización nueva. ASR: contado +
+  // comisión + Capa 1 sobre el costo. Lineal: contado (= costo + margen = lo
+  // desembolsado) × (1 + k) a la tasa de cobro; sin renglón de tasa no hay
+  // crédito (queda igual al contado y el candado no deja guardar).
+  const creditPriceOf = (l: Pick<Line, "cashPrice" | "fin" | "finLineal">, days: number) =>
+    circuitCode === "SANTA_ROSA"
+      ? l.finLineal
+        ? creditFromCashLineal({ cash: l.cashPrice, rate: l.finLineal.rate, days })
+        : l.cashPrice
+      : creditFromCash({ cash: l.cashPrice, fin: l.fin, days });
   function syncCredit(ls: Line[], days = creditDays) {
-    return ls.map((l) => ({ ...l, creditPrice: creditFromCash({ cash: l.cashPrice, fin: l.fin, days }) }));
+    return ls.map((l) => ({ ...l, creditPrice: creditPriceOf(l, days) }));
   }
 
   /**
@@ -186,13 +199,26 @@ function Page() {
     if (landed > 0.009) {
       const cashMode: MarginMode = l.margin_cash_mode === "nominal" ? "nominal" : "pct";
       const creditMode: MarginMode = l.margin_credit_mode === "nominal" ? "nominal" : "pct";
+      // Paso 3: la base la dice el circuito de la cotización abierta. En el
+      // lineal el margen de crédito se despeja de la factura a Santa Rosa
+      // (precio ÷ (1 + k)), no del precio menos el financiamiento.
+      const lineal = l.q_circuit === "SANTA_ROSA";
+      const rateQ = Number(l.q_tiie) + Number(l.q_spread);
+      const marginCredit = lineal
+        ? (() => {
+            const inv = linealMarginFromPrice({ price: rp.credit, landed, rate: rateQ, days: agreed, mode: creditMode });
+            return { mode: inv.mode, pct: inv.pct, nominal: inv.nominal };
+          })()
+        : marginFromPrice({ price: rp.credit, landed, finance: finAt(agreed), mode: creditMode });
       return ladderFor({
         terms: data?.terms ?? [],
         agreed,
         landed,
         marginCash: marginFromPrice({ price: rp.cash, landed, finance: 0, mode: cashMode }),
-        marginCredit: marginFromPrice({ price: rp.credit, landed, finance: finAt(agreed), mode: creditMode }),
+        marginCredit,
         financeAt: finAt,
+        financingBase: lineal ? "costo_margen" : "costo_comision",
+        rateAt: () => rateQ,
       });
     }
     return l.ladder.map((st) => ({
@@ -231,7 +257,8 @@ function Page() {
       const cash = Number(p.list_price);
       const days = s.creditDays;
       const f = p.fin ?? SIN_FIN;
-      setLines([{ productId: p.id, qty: 1, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days }), uom: p.uom || "TM" }]);
+      const fl = p.fin_lineal ?? null;
+      setLines([{ productId: p.id, qty: 1, cashPrice: cash, fin: f, finLineal: fl, creditPrice: creditPriceOf({ cashPrice: cash, fin: f, finLineal: fl }, days), uom: p.uom || "TM" }]);
     }
   }
   useEffect(() => {
@@ -275,7 +302,13 @@ function Page() {
       if (currency === "USD" && !(fxRate > 0)) {
         throw new Error("Sin tipo de cambio: la tabla está vacía. Captúralo en Ajustes → Tipo de cambio o escribe el pactado.");
       }
-      if (priceOffer !== "cash" && creditDays > 0 && !(tiie > 0)) throw new Error(missingRateMessage(todayMx(), "cotización a crédito"));
+      if (priceOffer !== "cash" && creditDays > 0 && !(rateForCircuit > 0)) {
+        throw new Error(
+          circuitCode === "SANTA_ROSA"
+            ? "No hay tasa de costo / tasa de cobro en la tabla para hoy (cotización a crédito por Línea Santa Rosa). Captúrala en Ajustes → Tabla de tasas."
+            : missingRateMessage(todayMx(), "cotización a crédito"),
+        );
+      }
       const priced = lines.filter((l) => l.productId && l.qty > 0);
       await createQuote({
         data: {
@@ -284,11 +317,12 @@ function Page() {
           fxRate,
           validUntil,
           deliveryTo,
-          tiie,
+          // La tasa que entra al precio: TIIE (ASR) o tasa de cobro (lineal), la de la tabla de hoy.
+          tiie: rateForCircuit,
           spread,
           creditDays: priceOffer === "cash" ? 0 : creditDays,
           priceOffer,
-          circuitCode: circuitTouched ? circuitCode : undefined,
+          circuitCode: circuitTouched && isSelectableCircuit(circuitCode) ? circuitCode : undefined,
           lines: priced.map((l) => ({
             productId: l.productId,
             qty: l.qty,
@@ -302,7 +336,8 @@ function Page() {
       const p = data?.products[0];
       const cash = Number(p?.list_price ?? 0);
       const f = p?.fin ?? SIN_FIN;
-      setLines(p ? [{ productId: p.id, qty: 1, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days: creditDays }), uom: p.uom || "TM" }] : []);
+      const fl = p?.fin_lineal ?? null;
+      setLines(p ? [{ productId: p.id, qty: 1, cashPrice: cash, fin: f, finLineal: fl, creditPrice: creditPriceOf({ cashPrice: cash, fin: f, finLineal: fl }, creditDays), uom: p.uom || "TM" }] : []);
       await load();
     } catch (err) {
       setError(humanError(err));
@@ -314,6 +349,9 @@ function Page() {
   // A crédito cada partida necesita costo (kardex o de referencia): sin él el
   // financiamiento sale en cero y el servidor no deja guardar.
   const sinCosto = priceOffer !== "cash" && creditDays > 0;
+  // Paso 3: la tasa que entra al precio según el circuito de la cotización nueva.
+  const rateForCircuit = circuitCode === "SANTA_ROSA" ? (data?.fundingToday?.collectionRate ?? 0) : tiie;
+  const rateFromForCircuit = circuitCode === "SANTA_ROSA" ? (data?.fundingToday?.date ?? null) : tiieFrom;
   const cashTotal = lines.reduce((s, l) => s + l.qty * l.cashPrice, 0);
   const creditTotal = lines.reduce((s, l) => s + l.qty * l.creditPrice, 0);
 
@@ -421,7 +459,7 @@ function Page() {
                   className={priceOffer === o ? "erp-btn-primary h-8 text-[12px]" : "erp-btn h-8 text-[12px]"}
                   onClick={() => {
                     setPriceOffer(o);
-                    if (!circuitTouched) setCircuitCode(inheritCircuit(circuitCode, o === "cash" ? 0 : creditDays) as "CONTADO" | "ASR");
+                    if (!circuitTouched) setCircuitCode(inheritCircuit(circuitCode, o === "cash" ? 0 : creditDays));
                   }}
                 >
                   {offerLabel(o)}
@@ -439,7 +477,7 @@ function Page() {
                   const d = Number(e.target.value) || 0;
                   setCreditDays(d);
                   setLines((ls) => syncCredit(ls, d));
-                  if (!circuitTouched) setCircuitCode(inheritCircuit(circuitCode, d) as "CONTADO" | "ASR");
+                  if (!circuitTouched) setCircuitCode(inheritCircuit(circuitCode, d));
                 }}
               />
             </HeadBox>
@@ -460,12 +498,18 @@ function Page() {
           </HeadBox>
           {priceOffer !== "cash" ? (
             <HeadBox label="Financiamiento">
-              {tiieFrom ? (
+              {rateFromForCircuit ? (
                 <p className="text-[12px] tabular-nums">
-                  TIIE {(tiie * 100).toFixed(2)}% (tabla, {tiieFrom}) + spread ASR {(spread * 100).toFixed(2)}% (Ajustes)
+                  {circuitCode === "SANTA_ROSA" ? "Tasa de cobro" : "TIIE"} {(rateForCircuit * 100).toFixed(2)}% (tabla, {rateFromForCircuit}) + spread{" "}
+                  {(spread * 100).toFixed(2)}% (Ajustes)
+                  {circuitCode === "SANTA_ROSA" ? " · sobre costo + margen, sin comisión" : " · comisión del circuito sobre el costo"}
                 </p>
               ) : (
-                <p className="text-[11px] text-danger">{missingRateMessage(todayMx(), "cotización a crédito")}</p>
+                <p className="text-[11px] text-danger">
+                  {circuitCode === "SANTA_ROSA"
+                    ? "Sin tasa de costo / tasa de cobro en la tabla para hoy. Captúrala en Ajustes → Tabla de tasas."
+                    : missingRateMessage(todayMx(), "cotización a crédito")}
+                </p>
               )}
             </HeadBox>
           ) : null}
@@ -483,7 +527,8 @@ function Page() {
             const p = data?.products[0];
             const cash = Number(p?.list_price ?? 0);
             const f = p?.fin ?? SIN_FIN;
-            setLines((ls) => [...ls, { productId: p?.id ?? 0, qty: 1, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days: creditDays }), uom: p?.uom || "TM" }]);
+            const fl = p?.fin_lineal ?? null;
+            setLines((ls) => [...ls, { productId: p?.id ?? 0, qty: 1, cashPrice: cash, fin: f, finLineal: fl, creditPrice: creditPriceOf({ cashPrice: cash, fin: f, finLineal: fl }, creditDays), uom: p?.uom || "TM" }]);
           }}
         >
           <Plus className="mr-1 inline size-3.5" />
@@ -519,7 +564,8 @@ function Page() {
                           const prod = data?.products.find((x) => x.id === id);
                           const cash = Number(prod?.list_price ?? line.cashPrice);
                           const f = prod?.fin ?? SIN_FIN;
-                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, cashPrice: cash, fin: f, creditPrice: creditFromCash({ cash, fin: f, days: creditDays }) } : x)));
+                          const fl = prod?.fin_lineal ?? null;
+                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, cashPrice: cash, fin: f, finLineal: fl, creditPrice: creditPriceOf({ cashPrice: cash, fin: f, finLineal: fl }, creditDays) } : x)));
                         }}
                       />
                       {/* El servidor rechaza guardar esto a crédito: se avisa antes de capturar todo. */}
@@ -538,7 +584,7 @@ function Page() {
                       <MoneyField
                         value={line.cashPrice}
                         onChange={(cashPrice) =>
-                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, cashPrice, creditPrice: creditFromCash({ cash: cashPrice, fin: x.fin, days: creditDays }) } : x)))
+                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, cashPrice, creditPrice: creditPriceOf({ cashPrice, fin: x.fin, finLineal: x.finLineal }, creditDays) } : x)))
                         }
                       />
                     </td>
@@ -831,7 +877,11 @@ function Page() {
                                     setRevPrices((prev) => {
                                       const base = { ...(prev[al.productId] ?? rp), [which]: p };
                                       const credit =
-                                        which === "cash" && prod ? creditFromCash({ cash: p, fin: prod.fin ?? SIN_FIN, days: qrow.credit_days }) : base.credit;
+                                        which === "cash" && prod
+                                          ? qrow.circuit_code === "SANTA_ROSA"
+                                            ? creditFromCashLineal({ cash: p, rate: Number(qrow.tiie) + Number(qrow.spread), days: qrow.credit_days })
+                                            : creditFromCash({ cash: p, fin: prod.fin ?? SIN_FIN, days: qrow.credit_days })
+                                          : base.credit;
                                       return { ...prev, [al.productId]: { ...base, credit, qty: al.qty } };
                                     });
                                   return (

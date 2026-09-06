@@ -1,6 +1,21 @@
 import { financeCost } from "@/lib/erp/credit";
-import { marginUnit as marginUnitOf } from "@/lib/erp/margins";
+import { marginUnit as marginUnitOf, type MarginMode, type MarginSpec } from "@/lib/erp/margins";
 import { YEAR_DAYS } from "@/lib/erp/rules";
+
+/**
+ * Base del financiamiento: PARÁMETRO DEL CIRCUITO (Decisión 4, 5-sep-2026).
+ * Es lo que el financiador realmente desembolsa:
+ *   "costo_comision" — doble facturación (ASR): costo puesto × (1 + comisión).
+ *                      Es exactamente el motor de siempre (columna AN del
+ *                      Excel). NO se toca: todo lo que corre por ASR sale
+ *                      idéntico al centavo.
+ *   "costo_margen"   — lineal (Línea Santa Rosa): costo puesto + margen, la
+ *                      factura de Azagro a Santa Rosa. Sin comisión ni × 1.01
+ *                      (Decisión 6). El margen se entiende SOBRE ESA FACTURA,
+ *                      no sobre el precio al cliente.
+ * El motor la RECIBE (paso 3): pricing.ts no lee el catálogo ni la base.
+ */
+export type FinancingBase = "costo_comision" | "costo_margen";
 
 /**
  * Precio Azagro — el costo financiero NO lo absorbe Azagro: se le pasa al
@@ -27,9 +42,13 @@ export type PriceInput = {
   freight: number;
   other: number;
   days: number;
+  /** La tasa que entra al precio: TIIE de la tabla (ASR) o tasa de cobro (lineal). */
   tiie: number;
   costSpread: number;
+  /** Comisión de apertura DEL CIRCUITO (congelada en la cotización). En el lineal es 0. */
   commissionRate: number;
+  /** Sobre qué corre el financiamiento: parámetro del circuito. Obligatorio: nadie decide por omisión. */
+  financingBase: FinancingBase;
   marginMode: "pct" | "nominal";
   marginPct: number;
   marginNominal: number;
@@ -43,8 +62,11 @@ export type PriceResult = {
   layer1Unit: number;
   financeUnit: number;
   priceUnit: number;
+  /** ASR: margen como % del precio al cliente. Lineal: como % de la factura a Santa Rosa (lo desembolsado). */
   marginPct: number;
   marginNominal: number;
+  /** Lo que el financiador desembolsa por unidad (ASR: costo × (1 + comisión); lineal: costo + margen). 0 al contado. */
+  disbursedUnit: number;
   landed: number;
   margin: number;
   finance: number;
@@ -53,6 +75,8 @@ export type PriceResult = {
 };
 
 export function priceSale(i: PriceInput): PriceResult {
+  if (i.financingBase === "costo_margen") return priceSaleLineal(i);
+  // Circuito de doble facturación (ASR): el motor de siempre, sin tocar.
   const qty = i.qty || 0;
   const landedUnit = Math.max(0, i.cost) + Math.max(0, i.freight) + Math.max(0, i.other);
   const fin =
@@ -84,11 +108,110 @@ export function priceSale(i: PriceInput): PriceResult {
     priceUnit,
     marginPct: priceUnit > 0 ? (marginUnit / priceUnit) * 100 : 0,
     marginNominal: marginUnit,
+    // Lo que ASR adelanta: costo + comisión (la base de la Capa 1). Al contado nada.
+    disbursedUnit: i.days > 0 ? landedUnit * (1 + Math.max(0, i.commissionRate)) : 0,
     landed: landedUnit * qty,
     margin: marginUnit * qty,
     finance: financeUnit * qty,
     price: priceUnit * qty,
     rate: fin.rate,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// CAMINO LINEAL (Línea Santa Rosa). DISENO_FINANCIAMIENTO.md § 5, recalculado
+// el 5-sep-2026 con las Decisiones 1, 4 y 6:
+//
+//   Azagro paga al proveedor                 100,000.00   (costo puesto)
+//   Azagro factura a Santa Rosa              106,951.87   margen 6,951.87 (6.5 % DE ESTA FACTURA)
+//   Santa Rosa agrega el costo financiero      4,924.24   (tasa de cobro 7.05 % + spread 4.00 %) × 150/360, sobre 106,951.87
+//   Santa Rosa factura al cliente            111,876.11
+//
+// Lo que se financia es lo que Santa Rosa desembolsa: costo + margen. Sin
+// comisión de apertura, sin × 1.01. El margen % es sobre la factura de Azagro
+// a Santa Rosa (lo desembolsado), no sobre el precio al cliente; con margen en
+// $ fijo la factura es costo + monto. Por eso con % el precio al cliente
+// coincide con el motor ASR pero la partición no (320.08 que el ASR le
+// atribuye a Azagro aquí son financiamiento de Santa Rosa), y con $ fijo el
+// motor ASR cobraba 320.08 de menos (ESTADO.md § 3.d). Estas funciones son
+// NUEVAS: no reescriben las de arriba.
+// ---------------------------------------------------------------------------
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+const round4 = (n: number) => Math.round(n * 10000) / 10000;
+
+/** Lo que Santa Rosa desembolsa por unidad: costo puesto + margen (el margen % es de esta cifra). */
+export function linealDisbursedUnit(landed: number, margin: MarginSpec) {
+  return Math.max(0, landed) + marginUnitOf(margin, Math.max(0, landed), 0);
+}
+
+/** Costo financiero por unidad del lineal: lo desembolsado × (tasa de cobro + spread) × días / 360. Contado → 0. */
+export function linealFinanceUnit(i: { disbursed: number; rate: number; days: number }) {
+  if (i.days <= 0) return 0;
+  return round2((Math.max(0, i.disbursed) * Math.max(0, i.rate) * Math.max(0, i.days)) / YEAR_DAYS);
+}
+
+/**
+ * Directo (lineal): margen → factura a Santa Rosa → financiamiento → precio al cliente.
+ *   disbursed = costo puesto + margen       (% → costo ÷ (1 − margen); $ → costo + monto)
+ *   finance   = disbursed × tasa × días / 360
+ *   price     = disbursed + finance
+ */
+export function linealPriceFromMargin(i: { landed: number; margin: MarginSpec; rate: number; days: number }) {
+  const disbursed = round4(linealDisbursedUnit(i.landed, i.margin));
+  const finance = linealFinanceUnit({ disbursed, rate: i.rate, days: i.days });
+  return { disbursed, finance, price: round4(disbursed + finance) };
+}
+
+/**
+ * Inverso (lineal): del precio al cliente se despeja la factura a Santa Rosa
+ * y de ahí el margen. price = disbursed × (1 + k) con k = tasa × días / 360:
+ *   disbursed = price ÷ (1 + k) · utilidad = disbursed − costo puesto ·
+ *   margen % = utilidad / disbursed × 100 (sobre la factura, no sobre el precio).
+ */
+export function linealMarginFromPrice(i: { price: number; landed: number; rate: number; days: number; mode: MarginMode }): MarginSpec & { disbursed: number; finance: number } {
+  const k = i.days > 0 ? (Math.max(0, i.rate) * i.days) / YEAR_DAYS : 0;
+  const disbursed = round4(Math.max(0, i.price) / (1 + k));
+  const nominal = round4(disbursed - Math.max(0, i.landed));
+  const pct = disbursed > 0 ? round4((nominal / disbursed) * 100) : 0;
+  return { mode: i.mode, pct, nominal, disbursed, finance: round4(Math.max(0, i.price) - disbursed) };
+}
+
+/** Precio a crédito del lineal a partir del de contado (cotización directa): contado = costo + margen = lo desembolsado. */
+export function creditFromCashLineal(i: { cash: number; rate: number; days: number }) {
+  const cash = Math.max(0, i.cash);
+  if (i.days <= 0) return cash;
+  return round4(cash + linealFinanceUnit({ disbursed: cash, rate: i.rate, days: i.days }));
+}
+
+function priceSaleLineal(i: PriceInput): PriceResult {
+  const qty = i.qty || 0;
+  const landedUnit = Math.max(0, i.cost) + Math.max(0, i.freight) + Math.max(0, i.other);
+  const rate = Math.max(0, i.tiie) + Math.max(0, i.costSpread);
+  const margin: MarginSpec =
+    i.marginMode === "nominal"
+      ? { mode: "nominal", pct: 0, nominal: Math.max(0, i.marginNominal) }
+      : { mode: "pct", pct: Math.max(0, i.marginPct), nominal: 0 };
+  const marginUnit = marginUnitOf(margin, landedUnit, 0);
+  const disbursedUnit = i.days > 0 ? landedUnit + marginUnit : 0;
+  const financeUnit = linealFinanceUnit({ disbursed: landedUnit + marginUnit, rate, days: i.days });
+  const priceUnit = landedUnit + marginUnit + financeUnit;
+  const invoice = landedUnit + marginUnit;
+  return {
+    landedUnit,
+    marginUnit,
+    commissionUnit: 0,
+    layer1Unit: financeUnit,
+    financeUnit,
+    priceUnit,
+    marginPct: invoice > 0 ? (marginUnit / invoice) * 100 : 0,
+    marginNominal: marginUnit,
+    disbursedUnit,
+    landed: landedUnit * qty,
+    margin: marginUnit * qty,
+    finance: financeUnit * qty,
+    price: priceUnit * qty,
+    rate,
   };
 }
 

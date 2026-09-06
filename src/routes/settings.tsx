@@ -4,7 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { Field, PageHead, Panel } from "@/components/erp";
 import { useAccess } from "@/lib/access";
 import { creditPolicyUsage, getSettingsForm, listCreditPolicies, POLICY_FIELDS, QUOTE_TERMS_LABEL, saveCreditPolicy, saveFx, saveSettings, saveTiie, type CreditPolicyRow, type PolicyField } from "@/lib/erp/ops";
-import { FINANCING_BASE_LABEL, listCreditCircuits, listFundingRates, WHO_LABEL, type CreditCircuit, type FundingRateRow } from "@/lib/erp/circuits";
+import { FINANCING_BASE_LABEL, listCreditCircuits, listFundingRates, saveCircuitCommission, saveFundingRate, WHO_LABEL, type CreditCircuit, type FundingRateRow } from "@/lib/erp/circuits";
 import { formatTerms, parseTerms } from "@/lib/erp/ladder";
 import { BUSINESS_RULES, YEAR_DAYS } from "@/lib/erp/rules";
 import { dbStatus, exportBackup } from "@/lib/erp/cutover";
@@ -46,7 +46,6 @@ function SettingsBody() {
     fegaRate: null,
     fegaCommission: null,
     collectionSpread: null,
-    asrCommission: null,
     asrSpread: null,
     earlyPayDays: null,
   });
@@ -71,6 +70,16 @@ function SettingsBody() {
   // sistema lo lee todavía (ni el precio, ni la mora, ni los reportes).
   const [circuits, setCircuits] = useState<CreditCircuit[] | null>(null);
   const [fundingRates, setFundingRates] = useState<FundingRateRow[] | null>(null);
+  // Captura de la tabla de tasas (paso 3): dos columnas por fecha. La de cobro
+  // se precarga igual a la de costo mientras nadie la toque; el dueño la sube
+  // si quiere. La protección es la diferencia y se calcula.
+  const [frDate, setFrDate] = useState(() => todayMx());
+  const [frCost, setFrCost] = useState<number | null>(null);
+  const [frColl, setFrColl] = useState<number | null>(null);
+  const [frCollTouched, setFrCollTouched] = useState(false);
+  // Comisión de apertura por circuito (paso 3): "Comisión ASR" salió de
+  // Ajustes; se captura aquí, en el renglón del circuito.
+  const [commEdit, setCommEdit] = useState<Record<string, string>>({});
   const [tDate, setTDate] = useState(() => todayMx());
   const [tRate, setTRate] = useState<number | null>(null);
   const [fDate, setFDate] = useState(() => todayMx());
@@ -105,8 +114,43 @@ function SettingsBody() {
     setPolicies(cps);
     const yn = (v: boolean | null) => (v == null ? "" : v ? "si" : "no");
     setPolEdit(Object.fromEntries(cps.map((c) => [c.code, { commission: yn(c.commission), fega: yn(c.fega) }])));
-    setCircuits(await listCreditCircuits().catch(() => []));
+    const cc = await listCreditCircuits().catch(() => []);
+    setCircuits(cc);
+    setCommEdit(Object.fromEntries(cc.map((c) => [c.code, c.commissionRate == null ? "" : String(c.commissionRate)])));
     setFundingRates(await listFundingRates().catch(() => []));
+  }
+
+  async function onSaveFunding() {
+    if (frCost == null) return;
+    setError(null);
+    setMsg(null);
+    try {
+      await saveFundingRate({ data: { date: frDate, costRate: frCost, collectionRate: frColl ?? frCost } });
+      setMsg(`Tasas del ${frDate} guardadas`);
+      setFrCost(null);
+      setFrColl(null);
+      setFrCollTouched(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo guardar la tasa");
+    }
+  }
+
+  async function onSaveCommission(code: "ASR" | "PROPIA") {
+    const raw = (commEdit[code] ?? "").trim();
+    if (raw === "") {
+      setError("Escribe la comisión de apertura (fracción, p. ej. 0.01) antes de guardar.");
+      return;
+    }
+    setError(null);
+    setMsg(null);
+    try {
+      await saveCircuitCommission({ data: { code, commissionRate: Number(raw) } });
+      setMsg(`Comisión del circuito ${code} guardada`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo guardar la comisión");
+    }
   }
 
   async function loadUsage() {
@@ -346,8 +390,7 @@ function SettingsBody() {
         <Field label="Comisión + FEGA (única vez, fracción)">{numInput("fegaRate", "0.0001")}</Field>
         <Field label="Comisión dentro de «comisión + FEGA» (fracción)">{numInput("fegaCommission", "0.0001")}</Field>
         <Field label="Spread mora (factura de intereses, fracción)">{numInput("collectionSpread", "0.0001")}</Field>
-        <Field label="Comisión ASR (en precio, una sola vez, fracción)">{numInput("asrCommission", "0.0001")}</Field>
-        <Field label="Spread ASR (en precio, TIIE +, fracción)">{numInput("asrSpread", "0.0001")}</Field>
+        <Field label="Spread ASR / de línea (en precio, tasa +, fracción)">{numInput("asrSpread", "0.0001")}</Field>
         <Field label="Escalera de plazos de la cotización (días separados por coma; 0 = contado)">
           <input
             className={quoteTerms.trim() && !parseTerms(quoteTerms)?.length ? "erp-input border-danger" : "erp-input"}
@@ -360,7 +403,7 @@ function SettingsBody() {
           </p>
         </Field>
         <p className="md:col-span-3 text-sm text-muted">
-          Precio de venta por unidad = (costo puesto + financiamiento) ÷ (1 − margen %): el margen es sobre el precio de venta, no sobre el costo; con margen en pesos, precio = costo puesto + financiamiento + monto. La TIIE no se captura aquí: siempre sale de la tabla de abajo (renglón vigente en la fecha que toque, con su fecha a la vista). Financiamiento dentro del precio de venta (por unidad) = costo × {pct(policy.asrCommission)} + costo × {policy.asrCommission == null ? "—" : (1 + policy.asrCommission).toFixed(2)} × (TIIE + {pct(policy.asrSpread)}) × días de crédito / {YEAR_DAYS}. La comisión se cobra una sola vez, no depende de los días, y además genera interés porque la línea adelanta costo + comisión. De contado (0 días) el financiamiento es $0, comisión incluida.
+          Precio de venta por unidad = (costo puesto + financiamiento) ÷ (1 − margen %): el margen es sobre el precio de venta, no sobre el costo; con margen en pesos, precio = costo puesto + financiamiento + monto. La TIIE no se captura aquí: siempre sale de la tabla de abajo (renglón vigente en la fecha que toque, con su fecha a la vista). Financiamiento dentro del precio de venta (por unidad) = costo × comisión del circuito + costo × (1 + comisión) × (TIIE + {pct(policy.asrSpread)}) × días de crédito / {YEAR_DAYS} en el Circuito ASR; en la Línea Santa Rosa = (costo + margen) × (tasa de cobro + {pct(policy.asrSpread)}) × días / {YEAR_DAYS}, sin comisión. La comisión de apertura ya no se captura aquí: es parámetro de cada circuito (catálogo de abajo) y se congela en la cotización. De contado (0 días) el financiamiento es $0, comisión incluida.
           Mora (solo factura FI si ya venció) = Cargo × (TIIE + {pct(policy.collectionSpread, 1)}) × días exactos / {YEAR_DAYS}. En el estado de cuenta, comisión {pct(policy.fegaCommission)} + FEGA {policy.fegaRate == null || policy.fegaCommission == null ? "—" : ((policy.fegaRate - policy.fegaCommission) * 100).toFixed(2) + "%"} = {pct(policy.fegaRate)} sobre el cargo (columna «Comisión + FEGA»); no se mete al precio del producto.
         </p>
         {editable && <button className="erp-btn-primary">Guardar política</button>}
@@ -626,12 +669,13 @@ function SettingsBody() {
       </div>
 
       <Panel className="mt-5">
-        <h2 className="text-sm font-semibold">Circuitos de financiamiento (solo lectura)</h2>
+        <h2 className="text-sm font-semibold">Circuitos de financiamiento</h2>
         <p className="mt-0.5 text-sm text-muted">
-          Cada pedido va a declarar por dónde corre su financiamiento: quién pone el capital, quién le factura al
-          cliente, sobre qué base corre el financiamiento y qué comisión de apertura cobra. Es el paso 0 de esa
-          construcción — este catálogo todavía no lo lee nadie: ni el precio, ni la mora, ni los reportes. El motor de
-          hoy sigue usando la comisión y el spread de Ajustes.
+          Cada documento declara por dónde corre su financiamiento: quién pone el capital, quién le factura al cliente,
+          sobre qué base corre el financiamiento y qué comisión de apertura cobra. El precio lee de aquí la comisión y la
+          base del circuito del documento (paso 3), y los congela en la cotización: cambiar la comisión aquí no mueve
+          ninguna cotización ya hecha. La comisión de apertura se captura en el renglón del circuito — es el único lugar
+          donde vive. Línea Santa Rosa no cobra comisión (0 escrito, no "sin capturar").
         </p>
         {circuits == null ? (
           <p className="mt-3 text-[12px] text-muted">Leyendo…</p>
@@ -656,10 +700,24 @@ function SettingsBody() {
                       <span className="ml-2 font-mono text-[11px] text-muted">{c.code}</span>
                     </td>
                     <td className="py-2 pr-3">
-                      {c.commissionRate == null ? (
-                        <span className="text-muted">
-                          {c.code === "PROPIA" ? "sin construir" : "no cobra"}
+                      {c.code === "ASR" && role === "admin" ? (
+                        <span className="inline-flex items-center gap-1">
+                          <input
+                            className={`erp-input w-24 ${c.commissionRate == null ? "border-danger" : ""}`}
+                            type="number"
+                            step="0.0001"
+                            placeholder="sin capturar"
+                            value={commEdit[c.code] ?? ""}
+                            onChange={(e) => setCommEdit({ ...commEdit, [c.code]: e.target.value })}
+                          />
+                          <button type="button" className="erp-btn h-8 text-[12px]" onClick={() => void onSaveCommission("ASR")}>
+                            Guardar
+                          </button>
                         </span>
+                      ) : c.code === "CONTADO" ? (
+                        <span className="text-muted">no aplica</span>
+                      ) : c.commissionRate == null ? (
+                        <span className={c.code === "PROPIA" ? "text-muted" : "text-danger"}>{c.code === "PROPIA" ? "sin construir" : "sin capturar"}</span>
                       ) : (
                         `${(c.commissionRate * 100).toFixed(2)}%`
                       )}
@@ -690,9 +748,51 @@ function SettingsBody() {
         <p className="mt-1 text-[12px] text-muted">
           Dos columnas, capturadas directamente por el dueño: la tasa de costo (lo que de verdad cuesta la línea) y la
           tasa de cobro (la que entra al precio y a la mora del cliente); pueden ser iguales. La protección es la
-          diferencia entre ambas y se calcula, no se captura aparte. Nace vacía a propósito: no se deriva de la tabla
-          de TIIE de arriba. Todavía no hay dónde capturarla.
+          diferencia entre ambas y se calcula, no se captura aparte. No se deriva de la tabla de TIIE de arriba. Es la
+          tasa de la Línea Santa Rosa: sin renglón vigente no se cotiza a crédito por ese circuito.
         </p>
+        {role === "admin" ? (
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <input className="erp-input" type="date" value={frDate} onChange={(e) => setFrDate(e.target.value)} />
+            <label className="text-[11px] uppercase tracking-wide text-muted">
+              Tasa de costo
+              <input
+                className="erp-input mt-1 w-28"
+                type="number"
+                step="0.0001"
+                placeholder="fracción"
+                value={frCost ?? ""}
+                onChange={(e) => {
+                  const v = e.target.value.trim() === "" ? null : Number(e.target.value);
+                  setFrCost(v);
+                  if (!frCollTouched) setFrColl(v);
+                }}
+              />
+            </label>
+            <label className="text-[11px] uppercase tracking-wide text-muted">
+              Tasa de cobro
+              <input
+                className="erp-input mt-1 w-28"
+                type="number"
+                step="0.0001"
+                placeholder="= costo"
+                value={frColl ?? ""}
+                onChange={(e) => {
+                  setFrCollTouched(true);
+                  setFrColl(e.target.value.trim() === "" ? null : Number(e.target.value));
+                }}
+              />
+            </label>
+            <button type="button" className="erp-btn" disabled={frCost == null} onClick={() => void onSaveFunding()}>
+              Agregar
+            </button>
+            {frCost != null && frColl != null ? (
+              <span className="text-[11px] text-muted">protección {((frColl - frCost) * 100).toFixed(2)} puntos</span>
+            ) : null}
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-muted">Solo un administrador puede capturar las tasas.</p>
+        )}
         {fundingRates == null ? (
           <p className="mt-3 text-[12px] text-muted">Leyendo…</p>
         ) : fundingRates.length === 0 ? (
@@ -703,7 +803,8 @@ function SettingsBody() {
               <li key={r.date} className="flex justify-between border-b border-line py-1.5">
                 <span>{r.date}</span>
                 <span className="tabular-nums">
-                  costo {(r.costRate * 100).toFixed(2)}% · cobro {(r.collectionRate * 100).toFixed(2)}%
+                  costo {(r.costRate * 100).toFixed(2)}% · cobro {(r.collectionRate * 100).toFixed(2)}% · protección{" "}
+                  {((r.collectionRate - r.costRate) * 100).toFixed(2)}
                 </span>
               </li>
             ))}

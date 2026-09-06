@@ -1,6 +1,12 @@
 import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
 import { getSql, type Sql } from "@/lib/db";
 import { authMiddleware } from "@/lib/auth/middleware";
+import { assertAdmin } from "@/lib/erp/acl";
+import { writeAudit } from "@/lib/erp/audit";
+import { nearestRate } from "@/lib/erp/credit";
+import type { FinancingBase } from "@/lib/erp/pricing";
+import { dateDMY } from "@/lib/utils";
 
 /**
  * Catálogo de circuitos de financiamiento (PASO 0, 5-sep-2026). Ver
@@ -8,9 +14,9 @@ import { authMiddleware } from "@/lib/auth/middleware";
  *
  * Cada pedido va a declarar por dónde corre su financiamiento: quién pone el
  * capital, quién le factura al cliente, sobre qué base corre el
- * financiamiento y qué comisión de apertura cobra. Hoy esos cuatro datos son
- * una sola fila de Ajustes (`company_settings.asr_commission/asr_spread`),
- * como si todo el negocio corriera por un solo circuito. No es así: el
+ * financiamiento y qué comisión de apertura cobra. Hasta el paso 3 esos datos
+ * eran una sola fila de Ajustes (`company_settings.asr_commission`, ya
+ * tirada por la 0026), como si todo corriera por un solo circuito. No es así: el
  * circuito de doble facturación (ASR) sigue vigente y es distinto del
  * circuito lineal (Línea Santa Rosa) que se va a construir.
  *
@@ -18,9 +24,11 @@ import { authMiddleware } from "@/lib/auth/middleware";
  * ni los reportes lo consulta todavía — eso es el paso 3.
  *
  * PASO 1 (etiqueta): cada documento guarda `circuit_code`, lo hereda por la
- * cadena y lo muestra; los ayudantes puros de abajo (circuitForTerm,
- * inheritCircuit, circuitLabel) son lo único que usan el servidor y las
- * pantallas. Todavía no hay selector (paso 2) y el motor no lo lee (paso 3).
+ * cadena y lo muestra. PASO 2: selector (solo administrador). PASO 3: el
+ * motor RECIBE la comisión y la base del circuito (`circuitTerms`) y la tasa
+ * que entra al precio (`priceRateFor`): TIIE de la tabla en ASR, tasa de
+ * cobro de `funding_rates` en el lineal. pricing.ts, margins.ts y ladder.ts
+ * siguen sin leer la base: reciben los números por parámetro.
  */
 
 export type CircuitCode = "CONTADO" | "ASR" | "SANTA_ROSA" | "PROPIA";
@@ -44,10 +52,14 @@ export function isSelectableCircuit(code: unknown): code is "CONTADO" | "ASR" {
 export type CreditCircuit = {
   code: CircuitCode;
   name: string;
-  /** Comisión de apertura. Null = no cobra, o no capturada todavía. */
+  /**
+   * Comisión de apertura. En un circuito que financia, null = SIN CAPTURAR
+   * (el motor se detiene); "no cobra" se escribe como 0 (Línea Santa Rosa,
+   * Decisión 6, migración 0026). En Contado no aplica.
+   */
   commissionRate: number | null;
   /** 'costo_comision' | 'costo_margen' | null (no financia, o sin construir). */
-  financingBase: "costo_comision" | "costo_margen" | null;
+  financingBase: FinancingBase | null;
   /** 'azagro' | 'santa_rosa' | null. */
   invoicesClient: "azagro" | "santa_rosa" | null;
   /** 'azagro' | 'santa_rosa' | null (null = nadie, circuito Contado). */
@@ -74,6 +86,12 @@ export const listCreditCircuits = createServerFn({ method: "GET" })
   .handler(async ({ context }): Promise<CreditCircuit[]> => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    return readCircuits(sql, companyId);
+  });
+
+/** El catálogo de la empresa, tal cual (lectura tolerante: no se detiene por nada). */
+export async function readCircuits(sql: Sql, companyId: number): Promise<CreditCircuit[]> {
+  {
     const rows = await sql<{
       code: string;
       name: string;
@@ -102,7 +120,8 @@ export const listCreditCircuits = createServerFn({ method: "GET" })
       moraShareFinancier: r.mora_share_financier == null ? null : Number(r.mora_share_financier),
       enabled: r.enabled,
     }));
-  });
+  }
+}
 
 export type FundingRateRow = { date: string; costRate: number; collectionRate: number };
 
@@ -197,3 +216,165 @@ export function inheritCircuit(upstream: string | null | undefined, days: number
  * operó todo lo que viene de Compaq.
  */
 export const CUTOVER_CIRCUIT: CircuitCode = "ASR";
+
+// ---------------------------------------------------------------------------
+// PASO 3 — lo que el motor recibe del circuito, y la tabla de tasas.
+// ---------------------------------------------------------------------------
+
+/**
+ * Qué circuito FINANCIA un documento: el suyo si es de crédito; si es Contado
+ * (o no tiene), el que la regla propone para crédito (`circuitForTerm`). Sirve
+ * para congelar la comisión también en una cotización de contado: si después
+ * le cambian el plazo, se reprecia con la comisión que tenía congelada, no con
+ * la de Ajustes de ese día.
+ */
+export function financingCircuit(code: string | null | undefined): CircuitCode {
+  return isCircuitCode(code) && code !== "CONTADO" ? code : circuitForTerm(1);
+}
+
+/** Los tres números del circuito que el motor recibe por parámetro. */
+export type CircuitTerms = {
+  code: CircuitCode;
+  name: string;
+  commissionRate: number;
+  financingBase: FinancingBase;
+};
+
+/**
+ * Comisión y base del circuito que financia, leídas del catálogo. Se detiene
+ * si el circuito no financia, está por construir, o no tiene comisión
+ * capturada (nunca se inventa un 0 ni un 1 %).
+ */
+export async function circuitTerms(sql: Sql, companyId: number, code: string | null | undefined): Promise<CircuitTerms> {
+  const fin = financingCircuit(code);
+  const rows = await sql<{ code: string; name: string; commission_rate: string | null; financing_base: string | null; enabled: boolean }>`
+    select code, name, commission_rate::text, financing_base, enabled from credit_circuits
+    where company_id = ${companyId} and code = ${fin}
+  `;
+  const c = rows[0];
+  if (!c) throw new Error(`El circuito ${circuitLabel(fin)} no está en el catálogo (Ajustes → Circuitos de financiamiento).`);
+  if (c.financing_base !== "costo_comision" && c.financing_base !== "costo_margen") {
+    throw new Error(`${c.name}: circuito por construir, todavía no financia. Elige otro circuito.`);
+  }
+  if (c.commission_rate == null) {
+    throw new Error(`${c.name}: sin comisión de apertura capturada. Captúrala en Ajustes → Circuitos de financiamiento antes de cotizar a crédito.`);
+  }
+  return { code: c.code as CircuitCode, name: c.name, commissionRate: Number(c.commission_rate), financingBase: c.financing_base };
+}
+
+export type FundingPick = { date: string; costRate: number; collectionRate: number };
+
+/** Tabla de tasas de dos columnas, como números, ordenada por fecha. */
+export async function fundingTableOf(sql: Sql, companyId: number): Promise<FundingPick[]> {
+  const rows = await sql<{ date: string; cost_rate: string; collection_rate: string }>`
+    select date::text, cost_rate::text, collection_rate::text from funding_rates where company_id = ${companyId} order by date
+  `;
+  return rows.map((r) => ({ date: r.date, costRate: Number(r.cost_rate), collectionRate: Number(r.collection_rate) }));
+}
+
+/** Renglón vigente de la tabla de tasas en una fecha (misma regla que la TIIE: el más reciente igual o anterior). */
+export function nearestFunding(table: FundingPick[], asOf: string): FundingPick | null {
+  const pick = nearestRate(table.map((r) => ({ date: r.date, rate: r.collectionRate })), asOf);
+  return pick ? (table.find((r) => r.date === pick.date) ?? null) : null;
+}
+
+export function missingFundingMessage(asOf: string, what: string) {
+  return `No hay tasa de costo / tasa de cobro en la tabla con fecha igual o anterior al ${dateDMY(asOf)} (${what}). Captúrala en Ajustes → Tabla de tasas antes de continuar.`;
+}
+
+/**
+ * La tasa que entra al precio para un circuito en una fecha, con las dos
+ * columnas del lineal para congelarlas:
+ *   ASR    → TIIE de la tabla (`rate`); costRate/collectionRate nulos.
+ *   lineal → tasa de cobro (`rate` = collectionRate) y tasa de costo.
+ * null si la tabla no cubre la fecha: el llamador decide cómo detenerse.
+ */
+export type PriceRate = { rate: number; date: string; costRate: number | null; collectionRate: number | null; source: "tiie" | "tasas" };
+
+export async function priceRateFor(sql: Sql, companyId: number, terms: CircuitTerms, asOf: string): Promise<PriceRate | null> {
+  if (terms.financingBase === "costo_margen") {
+    const pick = nearestFunding(await fundingTableOf(sql, companyId), asOf);
+    return pick ? { rate: pick.collectionRate, date: pick.date, costRate: pick.costRate, collectionRate: pick.collectionRate, source: "tasas" } : null;
+  }
+  const rows = await sql<{ date: string; rate: string }>`
+    select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
+  `;
+  const pick = nearestRate(rows.map((r) => ({ date: r.date, rate: Number(r.rate) })), asOf);
+  return pick ? { rate: pick.rate, date: pick.date, costRate: null, collectionRate: null, source: "tiie" } : null;
+}
+
+/** Mensaje de "no hay tasa" según de qué tabla la esperaba el circuito. */
+export function missingPriceRateMessage(terms: CircuitTerms, asOf: string, what: string) {
+  return terms.financingBase === "costo_margen" ? missingFundingMessage(asOf, what) : missingTiieMessage(asOf, what);
+}
+
+// Mismo texto que credit.ts (missingRateMessage), sin importarlo en el tipo:
+// se repite aquí para que el mensaje del lineal y el de ASR vivan juntos.
+function missingTiieMessage(asOf: string, what: string) {
+  return `No hay TIIE en la tabla con fecha igual o anterior al ${dateDMY(asOf)} (${what}). Captúrala en Ajustes → Tabla TIIE antes de continuar.`;
+}
+
+/**
+ * Captura de un renglón de la tabla de tasas (paso 3). Dos columnas por
+ * fecha; la pantalla precarga la de cobro igual a la de costo y el dueño la
+ * sube si quiere. Solo administrador, con bitácora anterior → nuevo.
+ */
+export const saveFundingRate = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ date: z.string(), costRate: z.number().positive(), collectionRate: z.number().positive() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    await assertAdmin(sql, context.userId);
+    if (data.collectionRate + 1e-9 < data.costRate) {
+      throw new Error("La tasa de cobro no puede ser menor que la tasa de costo: la protección es la diferencia y no puede ser negativa.");
+    }
+    const prev = await sql<{ cost_rate: string; collection_rate: string }>`
+      select cost_rate::text, collection_rate::text from funding_rates where company_id = ${companyId} and date = ${data.date}
+    `;
+    await sql`
+      insert into funding_rates (company_id, date, cost_rate, collection_rate)
+      values (${companyId}, ${data.date}, ${data.costRate}, ${data.collectionRate})
+      on conflict (company_id, date) do update set cost_rate = excluded.cost_rate, collection_rate = excluded.collection_rate
+    `;
+    const antes = prev[0] ? `costo ${Number(prev[0].cost_rate)} / cobro ${Number(prev[0].collection_rate)}` : "sin valor";
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "tasas",
+      entity: "settings",
+      name: data.date,
+      detail: `${antes} → costo ${data.costRate} / cobro ${data.collectionRate}`,
+    });
+    return { ok: true };
+  });
+
+/**
+ * Captura de la comisión de apertura de un circuito (paso 3): "Comisión ASR"
+ * salió de Ajustes y este es el único lugar donde vive. Solo administrador,
+ * con bitácora. Solo circuitos que financian con comisión (hoy, el ASR).
+ */
+export const saveCircuitCommission = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ code: z.enum(["ASR", "PROPIA"]), commissionRate: z.number().nonnegative() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    await assertAdmin(sql, context.userId);
+    const prev = await sql<{ name: string; commission_rate: string | null }>`
+      select name, commission_rate::text from credit_circuits where company_id = ${companyId} and code = ${data.code}
+    `;
+    if (!prev[0]) throw new Error("El circuito no está en el catálogo.");
+    await sql`
+      update credit_circuits set commission_rate = ${data.commissionRate} where company_id = ${companyId} and code = ${data.code}
+    `;
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "circuito",
+      entity: "settings",
+      name: data.code,
+      detail: `${prev[0].name}: comisión de apertura ${prev[0].commission_rate == null ? "sin capturar" : Number(prev[0].commission_rate)} → ${data.commissionRate}`,
+    });
+    return { ok: true };
+  });

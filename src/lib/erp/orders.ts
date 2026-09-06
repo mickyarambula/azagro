@@ -10,7 +10,7 @@ import { computeDealPnl } from "@/lib/erp/reports";
 import { assertDueOk, validateDueDates } from "@/lib/erp/credit";
 import { rememberTrade } from "@/lib/erp/links";
 import { policy } from "@/lib/erp/ops";
-import { financeUnit } from "@/lib/erp/pricing";
+import { financeUnit, linealPriceFromMargin } from "@/lib/erp/pricing";
 import { marginOf, priceFromMargin, type Offer } from "@/lib/erp/margins";
 import { circuitForTerm, circuitLabel, inheritCircuit, isSelectableCircuit } from "@/lib/erp/circuits";
 
@@ -389,11 +389,18 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
     if (!so[0].quote_id) throw new Error("Este pedido no viene de una cotización: el plazo se cambia al guardar.");
     if (so[0].state !== "draft") throw new Error("Pedido confirmado: el plazo ya no se cambia. Si es un error, cancélalo y captura uno nuevo.");
     if (data.creditDays === so[0].credit_days) throw new Error("Sin cambios: el plazo es el mismo.");
-    const q = await sql<{ name: string; tiie: string; spread: string; credit_days: number }>`
-      select name, coalesce(tiie,0)::text as tiie, coalesce(spread,0)::text as spread, coalesce(credit_days,0)::int as credit_days
+    const q = await sql<{ name: string; tiie: string; spread: string; credit_days: number; commission_rate: string | null; circuit_code: string | null }>`
+      select name, coalesce(tiie,0)::text as tiie, coalesce(spread,0)::text as spread, coalesce(credit_days,0)::int as credit_days,
+        commission_rate::text as commission_rate, circuit_code
       from quotes where id = ${so[0].quote_id} and company_id = ${companyId}
     `;
     if (!q[0]) throw new Error("Cotización de origen no encontrada");
+    // Paso 3: la comisión es la CONGELADA en la cotización, junto a la TIIE
+    // y el spread (cierra el hallazgo de ESTADO.md § 6). La base la dice el
+    // circuito de la cotización.
+    if (q[0].commission_rate == null) throw new Error(`${q[0].name}: sin comisión congelada en la cotización (migración 0026 pendiente).`);
+    const frozenCommission = Number(q[0].commission_rate);
+    const lineal = q[0].circuit_code === "SANTA_ROSA";
     const pol = await policy(sql, companyId);
     const lines = await sql<{
       id: number;
@@ -439,9 +446,14 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
         // La columna de la escalera para el plazo nuevo: (costo puesto +
         // financiamiento a esos días) ÷ (1 − margen crédito). Mismo margen de
         // crédito para cualquier plazo; solo cambia el financiamiento.
-        const fin = financeUnit({ cost: landed, days, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: pol.asrCommission });
         try {
-          price = priceFromMargin({ landed, finance: fin, margin: mCredit });
+          if (lineal) {
+            // Lineal: la factura a Santa Rosa (costo + margen) × (1 + k) a los días nuevos.
+            price = linealPriceFromMargin({ landed, margin: mCredit, rate: Number(q[0].tiie) + Number(q[0].spread), days }).price;
+          } else {
+            const fin = financeUnit({ cost: landed, days, tiie: Number(q[0].tiie), costSpread: Number(q[0].spread), commissionRate: frozenCommission });
+            price = priceFromMargin({ landed, finance: fin, margin: mCredit });
+          }
         } catch (e) {
           throw new Error(`${l.code}: ${e instanceof Error ? e.message : String(e)}`);
         }

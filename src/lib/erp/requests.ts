@@ -7,11 +7,10 @@ import { writeAudit } from "@/lib/erp/audit";
 import { addDays, missingRateMessage } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
-import { policy } from "@/lib/erp/ops";
 import { rememberTrade } from "@/lib/erp/links";
 import { marginInvalidMessage, marginOf, marginText, marginValid, normalizeMargin, OFFER_LABEL, type StoredMargin } from "@/lib/erp/margins";
 import { assertRequestOpen } from "@/lib/erp/request-lock";
-import { circuitLabel, inheritCircuit, isSelectableCircuit } from "@/lib/erp/circuits";
+import { circuitLabel, circuitTerms, inheritCircuit, isSelectableCircuit, missingPriceRateMessage, priceRateFor } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 async function cid(sql: Sql, userId: string) {
@@ -838,12 +837,32 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     if (data.currency === "USD" && !(data.fxRate > 0)) {
       throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de cotizar en dólares.");
     }
-    if (data.creditDays > 0 && !(data.tiie > 0)) throw new Error(missingRateMessage(todayMx(), "cotización a crédito"));
     const req = await sql<{ id: number; name: string; partner_id: number; delivery_to: string; delivery_mode: string; quote_id: number | null; circuit_code: string | null }>`
       select id, name, partner_id, delivery_to, delivery_mode, quote_id, circuit_code from customer_requests
       where id = ${data.requestId} and company_id = ${companyId}
     `;
     if (!req[0]) throw new Error("Solicitud no encontrada");
+    // Paso 3: el circuito de la cotización (heredado de la solicitud, igual
+    // que el plazo) decide comisión, base y de qué tabla sale la tasa; los
+    // tres se congelan en la cotización. En ASR la tasa es la TIIE que la
+    // pantalla ya validó contra la tabla (data.tiie); en el lineal la tabla
+    // de dos columnas manda y se exige que la pantalla haya calculado con
+    // ese mismo renglón.
+    const circuitOfQuote = inheritCircuit(req[0].circuit_code, data.creditDays);
+    const terms = await circuitTerms(sql, companyId, circuitOfQuote);
+    let frozenRates: { costRate: number | null; collectionRate: number | null } = { costRate: null, collectionRate: null };
+    if (data.creditDays > 0) {
+      if (terms.financingBase === "costo_margen") {
+        const pick = await priceRateFor(sql, companyId, terms, todayMx());
+        if (!pick) throw new Error(missingPriceRateMessage(terms, todayMx(), "cotización a crédito"));
+        if (Math.abs(pick.rate - data.tiie) > 0.000001) {
+          throw new Error(`La tasa de cobro de la tabla cambió desde que abriste la pantalla (ahora ${(pick.rate * 100).toFixed(2)}% del ${pick.date}). Vuelve a cargar y cotiza de nuevo.`);
+        }
+        frozenRates = { costRate: pick.costRate, collectionRate: pick.collectionRate };
+      } else if (!(data.tiie > 0)) {
+        throw new Error(missingRateMessage(todayMx(), "cotización a crédito"));
+      }
+    }
     if (req[0].quote_id) {
       const ex = await sql<{ name: string }>`select name from quotes where id = ${req[0].quote_id}`;
       throw new Error(`Esta solicitud ya tiene ${ex[0]?.name ?? "una cotización"}. Ábrela en Cotizaciones; no se duplica.`);
@@ -899,8 +918,9 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     // puesto ÷ (1 − margen contado), sin financiamiento; crédito = (costo
     // puesto + financiamiento) ÷ (1 − margen crédito), con el financiamiento
     // DENTRO del precio (comisión + Capa 1 con los días de este pedido, misma
-    // fórmula de siempre). La comisión sale de Ajustes.
-    const pol = await policy(sql, companyId);
+    // fórmula de siempre). La comisión y la base son DEL CIRCUITO (paso 3);
+    // en el lineal el margen es sobre la factura a Santa Rosa (costo + margen)
+    // y esa factura es lo que se financia.
     const priced = lines.map((l) => {
       // Ya se validó arriba: contado siempre tiene margen, y crédito lo tiene
       // siempre que la cotización lleve plazo. A 0 días no hay precio a crédito.
@@ -913,7 +933,8 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         days: 0,
         tiie: Math.max(0, data.tiie),
         costSpread: Math.max(0, data.spread),
-        commissionRate: pol.asrCommission,
+        commissionRate: terms.commissionRate,
+        financingBase: terms.financingBase,
         marginMode: mCash.mode,
         marginPct: mCash.pct,
         marginNominal: mCash.nominal,
@@ -927,7 +948,8 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
             days: data.creditDays,
             tiie: Math.max(0, data.tiie),
             costSpread: Math.max(0, data.spread),
-            commissionRate: pol.asrCommission,
+            commissionRate: terms.commissionRate,
+            financingBase: terms.financingBase,
             marginMode: mCredit.mode,
             marginPct: mCredit.pct,
             marginNominal: mCredit.nominal,
@@ -952,11 +974,19 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         // con su financiamiento), y el financiamiento por unidad que quedó
         // dentro del crédito.
         marginCash: normalizeMargin({ mode: mCash.mode, pct: mCash.pct, nominal: mCash.nominal }, landed, 0),
+        // En ASR el % del crédito es sobre el precio (lleva el financiamiento en
+        // la base); en el lineal es sobre la factura a Santa Rosa (sin él).
         marginCredit:
           mCredit && creditCalc
-            ? normalizeMargin({ mode: mCredit.mode, pct: mCredit.pct, nominal: mCredit.nominal }, landed, creditCalc.financeUnit)
+            ? normalizeMargin(
+                { mode: mCredit.mode, pct: mCredit.pct, nominal: mCredit.nominal },
+                landed,
+                terms.financingBase === "costo_margen" ? 0 : creditCalc.financeUnit,
+              )
             : null,
         financeUnit: creditCalc ? Number(creditCalc.financeUnit.toFixed(4)) : 0,
+        // Lo que el financiador desembolsa por unidad (congelado por partida).
+        disbursedUnit: creditCalc && data.creditDays > 0 ? Number(creditCalc.disbursedUnit.toFixed(4)) : null,
       };
     });
     const total = priced.reduce((s, l) => s + l.qty * l.unitPrice, 0);
@@ -977,22 +1007,27 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     await sql`alter table quote_lines add column if not exists cash_price numeric(14,4) not null default 0`;
     await sql`alter table quote_lines add column if not exists credit_price numeric(14,4) not null default 0`;
     await sql`alter table quotes add column if not exists request_id integer`;
+    await sql`alter table quotes add column if not exists commission_rate numeric(8,6)`;
+    await sql`alter table quotes add column if not exists cost_rate numeric(8,6)`;
+    await sql`alter table quotes add column if not exists collection_rate numeric(8,6)`;
+    await sql`alter table quote_lines add column if not exists disbursed_unit numeric(14,4)`;
     const q = await sql<{ id: number }>`
-      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, request_id, circuit_code)
+      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, request_id, circuit_code,
+        commission_rate, cost_rate, collection_rate)
       values (${companyId}, ${name}, ${req[0].partner_id}, ${today}, ${until}, ${data.currency}, ${data.fxRate},
         ${data.send ? "sent" : "draft"}, ${notes}, ${req[0].delivery_to}, ${total}, ${context.userId}, ${data.tiie}, ${data.spread}, ${data.creditDays}, ${offer}, ${data.requestId},
-        ${inheritCircuit(req[0].circuit_code, data.creditDays)})
+        ${circuitOfQuote}, ${terms.commissionRate}, ${frozenRates.costRate}, ${frozenRates.collectionRate})
       returning id
     `;
     for (const line of priced) {
       await sql`
         insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
-          margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit)
+          margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
         values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.cash}, ${line.credit},
           ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
           ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
-          ${line.marginCredit ? "captura" : null}, ${line.financeUnit})
+          ${line.marginCredit ? "captura" : null}, ${line.financeUnit}, ${line.disbursedUnit})
       `;
     }
     // La solicitud queda con el plazo/moneda/TC con que se cotizó y se

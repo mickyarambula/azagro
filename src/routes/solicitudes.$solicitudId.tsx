@@ -29,7 +29,7 @@ import { destText, RequestFields, type RequestDraft } from "@/components/request
 import { Expediente } from "@/components/expediente";
 import { listDeliveryPoints } from "@/lib/erp/locations";
 import { money, num, qty, humanError, todayMx } from "@/lib/utils";
-import { circuitLabel, inheritCircuit, requestCircuitLabel } from "@/lib/erp/circuits";
+import { circuitLabel, financingCircuit, inheritCircuit, nearestFunding, requestCircuitLabel, type CreditCircuit, type FundingPick } from "@/lib/erp/circuits";
 import { CircuitSelect } from "@/components/circuit-select";
 
 export const Route = createFileRoute("/solicitudes/$solicitudId")({ component: Page });
@@ -146,7 +146,11 @@ function Page() {
   const [tiiePct, setTiiePct] = useState(0);
   const [tiieFrom, setTiieFrom] = useState<string | null>(null);
   const [spreadPct, setSpreadPct] = useState(0);
-  const [commissionPct, setCommissionPct] = useState(0);
+  // Paso 3: la comisión y la base son DEL CIRCUITO (catálogo), y la tasa que
+  // entra al precio sale de la tabla del circuito: TIIE en ASR, tasa de cobro
+  // (tabla de dos columnas) en la Línea Santa Rosa.
+  const [circuits, setCircuits] = useState<CreditCircuit[]>([]);
+  const [fundingRates, setFundingRates] = useState<FundingPick[]>([]);
   const [days, setDays] = useState(0);
   // true en cuanto la persona teclea el plazo esta sesión (antes de guardar):
   // sirve para que el circuito y el "0 capturado" se vean al mismo tiempo que
@@ -221,9 +225,10 @@ function Page() {
         const tiie = nearestRate(s.tiie.map((r) => ({ date: r.date, rate: Number(r.rate) })), hoy);
         setTiiePct(tiie ? Number((tiie.rate * 100).toFixed(2)) : 0);
         setTiieFrom(tiie?.date ?? null);
-        // El spread del precio es el de ASR (spread de costo), no el de mora.
+        // El spread del precio es el de ASR / de línea (spread de costo), no el de mora.
         setSpreadPct(Number((s.asrSpread * 100).toFixed(2)));
-        setCommissionPct(Number((s.asrCommission * 100).toFixed(2)));
+        setCircuits(s.circuits);
+        setFundingRates(s.fundingRates);
         setTerms(s.quoteTerms);
         // TC propuesto: el más reciente de la tabla, salvo que la solicitud ya
         // traiga uno pactado.
@@ -258,6 +263,20 @@ function Page() {
   // guardado antes, o ya cotizada). Antes de eso el circuito no existe
   // todavía — no es que sea Contado, es que nadie lo ha decidido.
   const plazoDecidido = daysTouched || request.credit_days != null || Boolean(quote);
+  // El circuito que financia las columnas a plazo: el de la cotización si ya
+  // existe; si no, el elegido/propuesto en vivo (Contado → el propuesto, ASR).
+  const liveCircuit = quote ? quote.circuit_code : plazoDecidido ? (circuitOverride ?? inheritCircuit(request.circuit_code, days)) : request.circuit_code;
+  const finCircuit = circuits.find((c) => c.code === financingCircuit(liveCircuit)) ?? null;
+  const financingBase = finCircuit?.financingBase ?? "costo_comision";
+  const lineal = financingBase === "costo_margen";
+  // Comisión del circuito: null = sin capturar (no se cotiza a crédito hasta capturarla en Ajustes).
+  const commissionRate = finCircuit?.commissionRate ?? null;
+  const commissionPct = commissionRate == null ? 0 : Number((commissionRate * 100).toFixed(2));
+  const sinComision = !lineal && commissionRate == null;
+  // La tasa que entra al precio, con su origen, según el circuito.
+  const fundingToday = nearestFunding(fundingRates, todayMx());
+  const rateFrom = lineal ? (fundingToday?.date ?? null) : tiieFrom;
+  const ratePct = lineal ? (fundingToday ? Number((fundingToday.collectionRate * 100).toFixed(2)) : 0) : tiiePct;
   const deliveryNote = `${MODE_LABEL[request.delivery_mode] ?? request.delivery_mode}${request.delivery_to ? ` · ${request.delivery_to}` : ""}`;
   const fail = (e: unknown) => setError(humanError(e));
   const saveTerms = (patch: { creditDays?: number; currency?: "USD" | "MXN"; fxRate?: number }) => {
@@ -702,14 +721,15 @@ function Page() {
               onCommit={(n) => saveTerms({ creditDays: Math.max(0, Math.floor(n)) })}
             />
           </HeadBox>
-          <HeadBox label={tiieFrom ? `TIIE % (tabla ${tiieFrom})` : "TIIE % (sin tabla)"}>
-            <p className="text-sm tabular-nums">{tiieFrom ? tiiePct.toFixed(2) : "—"}</p>
+          <HeadBox label={lineal ? (rateFrom ? `Tasa de cobro % (tabla ${rateFrom})` : "Tasa de cobro % (sin tabla)") : rateFrom ? `TIIE % (tabla ${rateFrom})` : "TIIE % (sin tabla)"}>
+            <p className="text-sm tabular-nums">{rateFrom ? ratePct.toFixed(2) : "—"}</p>
           </HeadBox>
-          <HeadBox label="Spread ASR % (Ajustes)">
+          <HeadBox label="Spread ASR / de línea % (Ajustes)">
             <QtyField className="w-full border-0 bg-transparent px-0" value={spreadPct} disabled={locked} onChange={setSpreadPct} />
           </HeadBox>
-          <HeadBox label="Comisión ASR % (Ajustes)">
-            <p className="text-sm tabular-nums">{commissionPct.toFixed(2)}</p>
+          <HeadBox label="Comisión de apertura % (circuito)">
+            <p className="text-sm tabular-nums">{finCircuit ? (commissionRate == null ? "—" : commissionPct.toFixed(2)) : "—"}</p>
+            {sinComision ? <p className="text-[11px] text-danger">Sin comisión capturada en el catálogo del circuito.</p> : null}
           </HeadBox>
           <HeadBox label="Circuito de financiamiento">
             {quote ? (
@@ -735,7 +755,18 @@ function Page() {
           </HeadBox>
         </div>
         {settingsError ? <p className="mb-3 text-[12px] text-danger">Ajustes no disponibles: {settingsError}</p> : null}
-        {!tiieFrom && days > 0 && !settingsError ? <p className="mb-3 text-[12px] text-danger">{missingRateMessage(todayMx(), "cotización a crédito")}</p> : null}
+        {!rateFrom && days > 0 && !settingsError ? (
+          <p className="mb-3 text-[12px] text-danger">
+            {lineal
+              ? `No hay tasa de costo / tasa de cobro en la tabla para hoy (cotización a crédito por ${circuitLabel("SANTA_ROSA")}). Captúrala en Ajustes → Tabla de tasas.`
+              : missingRateMessage(todayMx(), "cotización a crédito")}
+          </p>
+        ) : null}
+        {sinComision && days > 0 && !settingsError ? (
+          <p className="mb-3 text-[12px] text-danger">
+            {finCircuit?.name ?? "El circuito"}: sin comisión de apertura capturada. Captúrala en Ajustes → Circuitos de financiamiento antes de cotizar a crédito.
+          </p>
+        ) : null}
         <p className="mb-3 text-[13px] text-muted">
           Precio = (costo puesto + financiamiento) ÷ (1 − margen %): el margen es sobre el precio de venta, no sobre el costo. Financiamiento por unidad (solo a plazo): costo × comisión {commissionPct.toFixed(2)}% (una sola vez) + costo × {(1 + commissionPct / 100).toFixed(2)} × (TIIE {tiiePct.toFixed(2)}% + spread ASR {spreadPct.toFixed(2)}% = {(rate * 100).toFixed(2)}%) × días / 360.
           {days === 0 ? " Con 0 días solo se ofrece contado." : " El cliente paga el financiamiento dentro del precio; Azagro no lo absorbe."} El spread de mora NO va aquí: es factura de intereses al vencimiento.
@@ -766,16 +797,20 @@ function Page() {
                 const landed = num(l.cost) + num(l.freight);
                 // Financiamiento por unidad de cada columna, con las tasas de hoy
                 // (TIIE de la tabla, spread y comisión ASR de Ajustes).
-                const finAt = (plazo: number) => financeUnit({ cost: landed, days: plazo, tiie: tiiePct / 100, costSpread: spreadPct / 100, commissionRate: commissionPct / 100 });
-                // Desglose comisión + Capa 1 del plazo acordado (solo informativo).
+                // Paso 3: tasa, comisión y base son del circuito que financia.
+                // ASR: comisión + Capa 1 sobre el costo puesto. Lineal: la
+                // factura a Santa Rosa (costo + margen) a la tasa de cobro.
+                const finAt = (plazo: number) => financeUnit({ cost: landed, days: plazo, tiie: ratePct / 100, costSpread: spreadPct / 100, commissionRate: commissionPct / 100 });
+                // Desglose del plazo acordado (solo informativo).
                 const calc = priceSale({
                   cost: num(l.cost),
                   freight: num(l.freight),
                   other: 0,
                   days,
-                  tiie: tiiePct / 100,
+                  tiie: ratePct / 100,
                   costSpread: spreadPct / 100,
                   commissionRate: commissionPct / 100,
+                  financingBase,
                   marginMode: "nominal",
                   marginPct: 0,
                   marginNominal: 0,
@@ -783,8 +818,18 @@ function Page() {
                 });
                 // Escalera completa: contado con el margen de contado, cada plazo
                 // con el margen de crédito. Sin margen (o margen ≥ 100%) la
-                // columna queda en "—": no se inventa un número.
-                const steps = ladderFor({ terms, agreed: days, landed, marginCash: mCash, marginCredit: mCredit, financeAt: finAt });
+                // columna queda en "—": no se inventa un número. Sin comisión
+                // capturada tampoco hay columna a plazo.
+                const steps = ladderFor({
+                  terms,
+                  agreed: days,
+                  landed,
+                  marginCash: mCash,
+                  marginCredit: sinComision ? null : mCredit,
+                  financeAt: finAt,
+                  financingBase,
+                  rateAt: () => ratePct / 100 + spreadPct / 100,
+                });
                 const cash = steps.find((st) => st.days === 0);
                 const agreed = days > 0 ? steps.find((st) => st.days === days) : null;
                 const invalido = [mCash, days > 0 ? mCredit : null].find((m) => m && !marginValid(m));
@@ -876,7 +921,8 @@ function Page() {
             disabled={
               busy ||
               Boolean(settingsError) ||
-              (days > 0 && !tiieFrom) ||
+              (days > 0 && !rateFrom) ||
+              (days > 0 && sinComision) ||
               (currency === "USD" && !(fxRate > 0)) ||
               lines.some((l) => num(l.cost) <= 0 || !marginOf(l, "cash") || (days > 0 && !marginOf(l, "credit"))) ||
               lines.some((l) => [marginOf(l, "cash"), days > 0 ? marginOf(l, "credit") : null].some((m) => m && !marginValid(m)))
@@ -890,7 +936,7 @@ function Page() {
                     requestId: id,
                     currency,
                     fxRate: currency === "MXN" ? 1 : fxRate,
-                    tiie: tiiePct / 100,
+                    tiie: ratePct / 100,
                     spread: spreadPct / 100,
                     creditDays: days,
                     send: true,

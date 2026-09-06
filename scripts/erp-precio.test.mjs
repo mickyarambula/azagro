@@ -131,7 +131,7 @@ test("cableado: el cotizador y el P&L usan el mismo modelo", () => {
   assert.ok(pricing.includes("i.days > 0"), "al contado no hay financiamiento");
   assert.ok(!pricing.includes("annualRate: number") || !pricing.includes("landedUnit * Math.max(0, i.annualRate)"), "ya no existe el modelo viejo (financiar y luego marginar)");
   const req = src("src/lib/erp/requests.ts");
-  assert.ok(req.includes("commissionRate: pol.asrCommission"), "la comisión del precio sale de Ajustes");
+  assert.ok(req.includes("commissionRate: terms.commissionRate,") && req.includes("financingBase: terms.financingBase,"), "la comisión y la base del precio salen del circuito (paso 3), no de Ajustes");
   const az = src("src/lib/azagro.ts");
   assert.ok(az.includes("const financedDays = so[0].credit_days ?? 0;") && az.includes("financialDays: financedDays,"), "la FV congela los días de SU pedido, no un fijo");
   const rep = src("src/lib/erp/reports.ts");
