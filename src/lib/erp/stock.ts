@@ -36,6 +36,8 @@ export async function ensureInvoiceExtras(sql: Sql) {
   await sql`alter table invoices add column if not exists fega_part numeric(14,2) not null default 0`;
   // Explicación de la factura de intereses para el cliente (doc-text.ts).
   await sql`alter table invoices add column if not exists calc_client text not null default ''`;
+  // Paso 1 del catálogo de circuitos: etiqueta por documento (migración 0025).
+  await sql`alter table invoices add column if not exists circuit_code text`;
 }
 
 export async function ensureStock(sql: Sql) {

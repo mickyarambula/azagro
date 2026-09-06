@@ -8,6 +8,7 @@ import { SearchSelect, asOpts } from "@/components/search-select";
 import { computeDues, type TermKind } from "@/lib/erp/order-terms";
 import { validateDueDates } from "@/lib/erp/credit";
 import { cn, fmtDate, moneyIn, num } from "@/lib/utils";
+import { circuitLabel } from "@/lib/erp/circuits";
 
 export type RouteKind = "own" | "supplier" | "asr";
 export type PriceMode = "cash" | "financed" | "custom";
@@ -156,12 +157,15 @@ export function OrderFields({
   lookups,
   locked,
   inherited,
+  circuit,
 }: {
   form: OrderDraft;
   setForm: (f: OrderDraft) => void;
   lookups: OrderLookups;
   locked?: boolean;
   inherited?: InheritedTerm | null;
+  /** Circuito de financiamiento guardado en el pedido (solo lectura, paso 1). undefined = pedido nuevo, todavía sin guardar. */
+  circuit?: string | null;
 }) {
   const partner = lookups.customers.find((c) => c.id === form.partnerId);
   const preview = duesPreview(form);
@@ -223,6 +227,12 @@ export function OrderFields({
             ))}
           </select>
         </HeadBox>
+        {circuit !== undefined ? (
+          <HeadBox label="Circuito de financiamiento">
+            <p className="text-sm">{circuitLabel(circuit)}</p>
+            <p className="text-[11px] text-muted">Etiqueta: sigue al plazo. El precio y la mora siguen saliendo de Ajustes.</p>
+          </HeadBox>
+        ) : null}
         <HeadBox label="Fecha">
           <input
             className="erp-input w-full border-0 bg-transparent px-0"

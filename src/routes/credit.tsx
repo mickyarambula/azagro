@@ -11,6 +11,7 @@ import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest,
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, fxAdjustmentNote, interestInvoiceFallback, invoiceLineLabel, invoicePaperTitle } from "@/lib/erp/doc-text";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
+import { circuitLabel } from "@/lib/erp/circuits";
 
 export const Route = createFileRoute("/credit")({
   validateSearch: (raw: Record<string, unknown>) => ({
@@ -156,7 +157,10 @@ function Page() {
                       <p className="text-[11px] text-danger">Fecha inválida</p>
                     ) : null}
                   </td>
-                  <td className="px-3 py-3">{terms}</td>
+                  <td className="px-3 py-3">
+                    <p>{terms}</p>
+                    {r.kind === "customer" ? <p className="text-[11px] text-muted">{circuitLabel(r.circuit_code)}</p> : null}
+                  </td>
                   <td className="px-3 py-3 text-right tabular-nums">{moneyIn(r.amount, cur)}</td>
                   <td className="px-3 py-3 text-right tabular-nums">{moneyIn(paid, cur)}</td>
                   <td className="px-3 py-3 text-right tabular-nums">{moneyIn(r.residual, cur)}</td>

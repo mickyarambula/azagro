@@ -7,6 +7,7 @@ import { writeAudit } from "@/lib/erp/audit";
 import { todayMx } from "@/lib/utils";
 import { foldName } from "@/lib/erp/catalog";
 import { ensureInvoiceExtras, postStock } from "@/lib/erp/stock";
+import { CIRCUIT_LABEL, CUTOVER_CIRCUIT } from "@/lib/erp/circuits";
 
 async function cid(sql: Sql, userId: string) {
   const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
@@ -198,10 +199,11 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         // en adelante es cargo − abono de corte − pagos capturados en el sistema.
         const openingPaid = Math.max(0, cargo - r.saldo);
         await sql`
-          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by)
+          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by, circuit_code)
           values (
             ${companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}, ${r.date}, ${r.due}, 'open',
-            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${data.policyCode}, ${context.userId}
+            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${data.policyCode}, ${context.userId},
+            ${r.kind === "customer" ? CUTOVER_CIRCUIT : null}
           )
         `;
         inserted += 1;
@@ -212,7 +214,7 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         action: "corte",
         entity: "invoice",
         name: "Saldos abiertos Compaq",
-        detail: `entraron ${inserted}, ya estaban ${skipped} · política de cobro ${pol[0].name} (${pol[0].code})`,
+        detail: `entraron ${inserted}, ya estaban ${skipped} · política de cobro ${pol[0].name} (${pol[0].code}) · circuito ${CIRCUIT_LABEL[CUTOVER_CIRCUIT]}`,
       });
       return { inserted, skipped };
     });

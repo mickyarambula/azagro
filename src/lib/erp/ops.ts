@@ -15,6 +15,7 @@ import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
+import { circuitForTerm, circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -41,6 +42,9 @@ async function ensureTwoPrices(sql: Sql) {
   await sql`alter table quote_lines add column if not exists finance_unit numeric(14,4)`;
   await sql`alter table quotes add column if not exists accepted_offer text`;
   await sql`alter table sales_orders add column if not exists accepted_offer text`;
+  // Paso 1 del catálogo de circuitos: etiqueta por documento (migración 0025).
+  await sql`alter table quotes add column if not exists circuit_code text`;
+  await sql`alter table sales_orders add column if not exists circuit_code text`;
 }
 
 /**
@@ -610,6 +614,7 @@ export const listQuotes = createServerFn({ method: "GET" })
       order_name: string | null;
       order_id: number | null;
       order_state: string | null;
+      circuit_code: string | null;
     }>`
       select q.id, q.name, q.partner_id, p.name as partner, q.date::text, q.valid_until::text,
         q.currency, q.fx_rate::text, q.state, q.total::text, q.notes, q.delivery_to,
@@ -619,6 +624,7 @@ export const listQuotes = createServerFn({ method: "GET" })
         coalesce(q.tiie,0)::text as tiie,
         coalesce(q.spread,0)::text as spread,
         q.accepted_offer,
+        q.circuit_code,
         (select name from customer_requests r where r.quote_id = q.id limit 1) as request_name,
         (select name from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_name,
         (select id from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_id,
@@ -852,9 +858,10 @@ export const createQuote = createServerFn({ method: "POST" })
     const total = priced.reduce((s, l) => s + l.qty * l.unit, 0);
     const state = data.send ? "sent" : "draft";
     const q = await sql<{ id: number }>`
-      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer)
+      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, circuit_code)
       values (${cid}, ${name}, ${data.partnerId}, ${today}, ${data.validUntil}, ${data.currency}, ${data.fxRate}, ${state},
-        ${data.notes ?? ""}, ${data.deliveryTo ?? ""}, ${total}, ${context.userId}, ${tiie}, ${data.spread ?? 0}, ${data.creditDays ?? 0}, ${offer})
+        ${data.notes ?? ""}, ${data.deliveryTo ?? ""}, ${total}, ${context.userId}, ${tiie}, ${data.spread ?? 0}, ${data.creditDays ?? 0}, ${offer},
+        ${circuitForTerm(data.creditDays ?? 0)})
       returning id
     `;
     await sql`alter table quote_lines add column if not exists uom text not null default ''`;
@@ -929,9 +936,9 @@ export const reviseQuote = createServerFn({ method: "POST" })
     const cid = await companyOf(sql, context.userId);
     await assertCan(sql, context.userId, "quotes", "edit");
     await ensureTwoPrices(sql);
-    const q = await sql<{ id: number; state: string; name: string; revision: number; price_offer: string; credit_days: number; tiie: string; spread: string }>`
+    const q = await sql<{ id: number; state: string; name: string; revision: number; price_offer: string; credit_days: number; tiie: string; spread: string; circuit_code: string | null }>`
       select id, state, name, coalesce(revision,1) as revision, coalesce(price_offer,'both') as price_offer,
-        coalesce(credit_days,0)::int as credit_days, coalesce(tiie,0)::text as tiie, coalesce(spread,0)::text as spread
+        coalesce(credit_days,0)::int as credit_days, coalesce(tiie,0)::text as tiie, coalesce(spread,0)::text as spread, circuit_code
       from quotes where id = ${data.quoteId} and company_id = ${cid}
     `;
     if (!q[0]) throw new Error("Cotización no encontrada");
@@ -1000,6 +1007,9 @@ export const reviseQuote = createServerFn({ method: "POST" })
     if (data.creditDays !== undefined && data.creditDays !== q[0].credit_days) {
       cambios.push(`plazo ${q[0].credit_days} → ${data.creditDays} d`);
     }
+    // Paso 1: la etiqueta de circuito sigue al plazo de la cotización.
+    const circuitRev = inheritCircuit(q[0].circuit_code, data.creditDays ?? q[0].credit_days);
+    if (circuitRev !== q[0].circuit_code) cambios.push(`circuito ${circuitLabel(q[0].circuit_code)} → ${circuitLabel(circuitRev)}`);
     for (const line of data.lines) {
       const prev = oldLines.find((o) => o.product_id === line.productId);
       if (prev) {
@@ -1071,6 +1081,7 @@ export const reviseQuote = createServerFn({ method: "POST" })
           total = ${total},
           price_offer = ${offer},
           credit_days = coalesce(${data.creditDays ?? null}, credit_days),
+          circuit_code = ${circuitRev},
           notes = coalesce(${data.notes ?? null}, notes),
           state = 'sent'
       where id = ${q[0].id}
@@ -1197,11 +1208,12 @@ export const decideQuote = createServerFn({ method: "POST" })
       credit_days: number;
       price_offer: string;
       valid_until: string;
+      circuit_code: string | null;
     }>`
       select id, partner_id, currency, fx_rate::text, notes, delivery_to, total::text, state, name,
         coalesce(credit_days,0) as credit_days,
         coalesce(price_offer,'both') as price_offer,
-        valid_until::text
+        valid_until::text, circuit_code
       from quotes where id = ${data.quoteId} and company_id = ${cid}
     `;
     if (!q[0] || q[0].state === "accepted" || q[0].state === "rejected") {
@@ -1282,13 +1294,15 @@ export const decideQuote = createServerFn({ method: "POST" })
     const so = await sql<{ id: number }>`
       insert into sales_orders (
         company_id, name, partner_id, state, location_id, notes, total, currency, fx_rate, quote_id, delivery_to,
-        term_kind, invoice_days, credit_days, invoice_due, credit_due, route_kind, date, policy_code, price_mode, accepted_offer
+        term_kind, invoice_days, credit_days, invoice_due, credit_due, route_kind, date, policy_code, price_mode, accepted_offer,
+        circuit_code
       )
       values (
         ${cid}, ${name}, ${q[0].partner_id}, 'draft', ${data.locationId}, ${q[0].notes}, ${total},
         ${q[0].currency}, ${Number(q[0].fx_rate)}, ${q[0].id}, ${q[0].delivery_to},
         ${termKind}, ${dues.invoiceDays}, ${dues.creditDays}, ${dues.invoiceDue}, ${dues.creditDue}, ${routeKind}, ${today},
-        ${policyCode}, ${priceMode}, ${offer}
+        ${policyCode}, ${priceMode}, ${offer},
+        ${inheritCircuit(q[0].circuit_code, days)}
       )
       returning id
     `;
@@ -1505,10 +1519,11 @@ export async function applyInvoicePayment(
     due_date: string;
     order_id: number | null;
     credit_days: number;
+    circuit_code: string | null;
   }>`
     select id, kind, residual::text, amount::text, coalesce(inv_class,'product') as inv_class,
       coalesce(currency,'MXN') as currency, coalesce(amount_fx,0)::text as amount_fx, coalesce(fx_agreed,0)::text as fx_agreed,
-      partner_id, name, date::text, due_date::text, order_id, coalesce(credit_days,0)::int as credit_days from invoices
+      partner_id, name, date::text, due_date::text, order_id, coalesce(credit_days,0)::int as credit_days, circuit_code from invoices
     where id = ${opts.invoiceId} and company_id = ${opts.companyId}
     for update
   `;
@@ -1612,10 +1627,10 @@ export async function applyInvoicePayment(
       `;
       fxDoc = `ATC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
       await sql`
-        insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id, created_by, calc)
+        insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id, created_by, calc, circuit_code)
         values (
           ${opts.companyId}, 'customer', ${fxDoc}, ${inv[0].partner_id}, ${payDate}, ${payDate}, 'open',
-          ${-fxDiff}, ${-fxDiff}, ${"Ajuste TC " + inv[0].name}, 'fx', 'MXN', ${inv[0].order_id}, ${opts.userId}, ${calc}
+          ${-fxDiff}, ${-fxDiff}, ${"Ajuste TC " + inv[0].name}, 'fx', 'MXN', ${inv[0].order_id}, ${opts.userId}, ${calc}, ${inv[0].circuit_code}
         )
       `;
       fxNote = `${fxDiff < 0 ? "POR COBRAR" : "POR DEVOLVER"} ${fxDoc}: ${Math.abs(fxDiff).toFixed(2)}`;
@@ -1898,13 +1913,15 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         credit_days: number;
         opening_paid: string;
         policy_code: string;
+        circuit_code: string | null;
       }>`
         select id, name, kind, date::text, due_date::text, credit_due::text, amount::text, residual::text, state, origin,
           currency, amount_fx::text, fx_agreed::text, fx_paid::text, inv_class, fega_charged,
           interest_invoiced::text, fx_invoiced::text, paid_date::text,
           coalesce(credit_days, 0)::int as credit_days,
           coalesce(opening_paid, 0)::text as opening_paid,
-          coalesce(policy_code, '') as policy_code
+          coalesce(policy_code, '') as policy_code,
+          circuit_code
         from invoices
         where company_id = ${cid} and partner_id = ${partner.id}
         order by date, id
@@ -2113,6 +2130,9 @@ export const getLiveStatement = createServerFn({ method: "POST" })
             `Sin bonificación por pronto pago: al ${dateDMY(fechaBono)} ya pasaron ${bono.lived} d desde la emisión y el umbral es ${pol.earlyPayDays} d.`,
           );
         }
+        // Paso 1 del catálogo de circuitos: etiqueta de solo lectura, solo en
+        // pantalla. El cálculo de arriba sigue saliendo de Ajustes.
+        formula.lines.push(`Circuito de financiamiento: ${circuitLabel(inv.circuit_code)} (etiqueta; el cálculo sigue leyendo Ajustes).`);
         if (sinMora) {
           formula.lines.push(noMoraMessage(politica?.name));
           formula.lines.push(
@@ -2158,6 +2178,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           // Política de cobro del documento y sus dos interruptores.
           sinMora,
           politicaCode: inv.policy_code,
+          circuitCode: inv.circuit_code,
           politicaNombre: politica?.name ?? "",
           cobraComision: cobra?.commission ?? null,
           cobraFega: cobra?.fega ?? null,
@@ -2239,10 +2260,11 @@ export async function issueMoraInvoice(
     inv_class: string;
     order_id: number | null;
     policy_code: string;
+    circuit_code: string | null;
   }>`
     select id, partner_id, residual::text, amount::text, due_date::text, credit_due::text, paid_date::text,
       fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class, order_id,
-      coalesce(policy_code, '') as policy_code
+      coalesce(policy_code, '') as policy_code, circuit_code
     from invoices where id = ${invoiceId} and company_id = ${companyId}
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
@@ -2354,12 +2376,12 @@ export async function issueMoraInvoice(
   await sql`
     insert into invoices (
       company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id,
-      created_by, calc, calc_client, int_part, fega_part
+      created_by, calc, calc_client, int_part, fega_part, circuit_code
     )
     values (
       ${companyId}, 'customer', ${name}, ${inv[0].partner_id}, ${asOf}, ${asOf}, 'open',
       ${bill.charge}, ${bill.charge}, ${"Mora " + inv[0].name}, 'interest', 'MXN', ${inv[0].order_id},
-      ${opts?.userId ?? ""}, ${calc}, ${calcClient}, ${bill.interestNew}, ${bill.fegaNew}
+      ${opts?.userId ?? ""}, ${calc}, ${calcClient}, ${bill.interestNew}, ${bill.fegaNew}, ${inv[0].circuit_code}
     )
   `;
   // Acumulados por separado: el interés facturado no debe mezclarse con el

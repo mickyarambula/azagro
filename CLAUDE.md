@@ -10,7 +10,7 @@ Lee `HANDOFF.md` entero antes de tocar código. **Antes de tocar cualquier cosa 
 - Postgres: Neon si hay `DATABASE_URL`, si no PGLite embebido (`src/lib/db.ts`)
 - better-auth
 - Server functions: `createServerFn` + `authMiddleware`
-- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud; 0018 = copia marcada del margen viejo y muerte del 12% por omisión; 0019 = sin valores por omisión de negocio: `company_settings` sin defaults ni NOT NULL, `fega_commission`, `early_pay_days`, sin `default_tiie`, `partners.payment_days` sin default, el 12% de migración pasa a "sin margen"; 0020 = escalera de plazos `company_settings.quote_terms`, sembrada 0/30/60/90/120/150; 0021 = `credit_policies.charge_commission` / `charge_fega`, nacen sin capturar y no se tocan las políticas que ya existían; 0022 = la decisión del dueño capturada: GRUPO_SL sí/sí, ESTANDAR no/no, NONE no/no, sin pisar lo que ya se contestó a mano; 0023 = `invoices.calc_client`, la explicación de la FI para el cliente)
+- Schema: `migrations/*.sql` (0014 = bitácora, archivos, corte idempotente; 0016 = `products.ref_cost`; 0017 = dos márgenes/precios por partida, `accepted_offer`, plazo de la solicitud; 0018 = copia marcada del margen viejo y muerte del 12% por omisión; 0019 = sin valores por omisión de negocio: `company_settings` sin defaults ni NOT NULL, `fega_commission`, `early_pay_days`, sin `default_tiie`, `partners.payment_days` sin default, el 12% de migración pasa a "sin margen"; 0020 = escalera de plazos `company_settings.quote_terms`, sembrada 0/30/60/90/120/150; 0021 = `credit_policies.charge_commission` / `charge_fega`, nacen sin capturar y no se tocan las políticas que ya existían; 0022 = la decisión del dueño capturada: GRUPO_SL sí/sí, ESTANDAR no/no, NONE no/no, sin pisar lo que ya se contestó a mano; 0023 = `invoices.calc_client`, la explicación de la FI para el cliente; 0024 = catálogo `credit_circuits` (comisión ASR copiada de Ajustes) y tabla de tasas `funding_rates` de dos columnas, vacía; 0025 = **etiqueta** `circuit_code` en solicitudes/cotizaciones/pedidos/facturas, nula permitida, lo existente asignado por plazo — 0 → CONTADO, lo demás y el corte → ASR, FI/ATC/NC heredan de su origen, `route_kind` no cuenta)
 
 ## No romper
 
@@ -42,6 +42,7 @@ Lee `HANDOFF.md` entero antes de tocar código. **Antes de tocar cualquier cosa 
 | Escalera de plazos (Ajustes `quote_terms`), documento con dos precios | `src/lib/erp/ladder.ts`, `/quotes` panel "Ver" |
 | Candado de solicitud ya cotizada | `src/lib/erp/request-lock.ts` |
 | Interruptores de comisión / FEGA por política de cobro | `credit_policies`, `chargeRates` en `credit.ts`, panel en `/settings` |
+| Circuitos de financiamiento: catálogo (paso 0, solo lectura en Ajustes) y **etiqueta** `circuit_code` por documento (paso 1: se guarda, se hereda por la cadena y se muestra; **el motor no la lee** — precio, mora, escalera y reportes siguen en Ajustes hasta el paso 3) | `src/lib/erp/circuits.ts` (`circuitForTerm`, `inheritCircuit`, `circuitLabel`), migraciones 0024/0025 |
 | «Sin mora» apaga el interés | `NO_MORA_POLICY` / `policyChargesInterest` en `credit.ts` |
 | Quién está en cada política (panel de Ajustes, solo lectura, solo admin) | `src/lib/erp/policy-usage.ts`, `creditPolicyUsage` en `ops.ts` |
 | **Todo el texto que sale de la empresa** (notas de papeles, expediente filtrado, mensajes, explicación de la FI) | `src/lib/erp/doc-text.ts`; plantillas en `src/lib/print-doc.ts` |
@@ -55,6 +56,8 @@ Lee `HANDOFF.md` entero antes de tocar código. **Antes de tocar cualquier cosa 
 | Margen sobre precio + escalera (casos del dueño) | `scripts/erp-escalera.test.mjs` |
 | Estado de cuenta antes del vencimiento + pronto pago | `scripts/erp-estado-cuenta.test.mjs` |
 | Comisión / FEGA opcionales por política, «Sin mora», política del corte | `scripts/erp-politica-cobro.test.mjs` |
+| Circuitos: catálogo sin lectores, herencia de la etiqueta, motor intacto, migración 0025 | `scripts/erp-circuitos.test.mjs`, `scripts/migrations-apply.test.mjs` |
+| Verificar el paso 1 contra producción: conteo por circuito, etiquetas vs regla, precio implícito antes/después (solo lectura, `DATABASE_URL`, `--guardar`/`--comparar`) | `scripts/erp-circuitos-verificacion.mjs` |
 | "Por producto" cuadra con la tabla de arriba | `scripts/erp-por-producto.test.mjs` |
 | Documentos que salen sin palabras internas | `scripts/erp-documento-limpio.test.mjs` |
 | ¿Factura duplicada? (solo lectura, con `DATABASE_URL`) | `scripts/erp-facturas-repetidas.mjs` |

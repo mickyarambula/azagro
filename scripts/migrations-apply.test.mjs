@@ -33,6 +33,8 @@ test("todas las migraciones aplican en orden sobre una base vacía", async () =>
   for (const c of ["credit_days", "currency", "fx_rate"]) assert.ok((await cols("customer_requests")).includes(c), `customer_requests.${c}`);
   assert.ok((await cols("quotes")).includes("accepted_offer"), "quotes.accepted_offer");
   assert.ok((await cols("sales_orders")).includes("accepted_offer"), "sales_orders.accepted_offer");
+  // 0025 — el circuito como etiqueta por documento (nulo permitido).
+  for (const t of ["customer_requests", "quotes", "sales_orders", "invoices"]) assert.ok((await cols(t)).includes("circuit_code"), `${t}.circuit_code`);
   // 0019 — sin valores por omisión de negocio.
   const cs = await cols("company_settings");
   for (const c of ["early_pay_days", "fega_commission"]) assert.ok(cs.includes(c), `company_settings.${c}`);
@@ -298,5 +300,57 @@ test("0024 siembra el catálogo de circuitos copiando la comisión de Ajustes (n
   const fr = (await db.query(`select count(*)::int as n from funding_rates`)).rows[0];
   assert.equal(fr.n, 0, "nace vacía: no se deriva de tiie_rates + spread");
 
+  await db.close();
+});
+
+test("0025 etiqueta lo existente: plazo 0 → Contado, lo demás y el corte → ASR, FI/ATC/NC heredan de su origen; route_kind no cuenta; idempotente", async () => {
+  const db = new PGlite();
+  const files = pendingMigrations(readdirSync(dir), []);
+  for (const { path } of files.filter((f) => f.name < "0025")) await db.exec(readFileSync(join(dir, path), "utf8"));
+  await db.exec(`
+    insert into companies (id, name, join_code, created_by) values (1, 'AZ', 'AZ1', 'u1');
+    insert into partners (id, company_id, code, name, payment_days) values (10, 1, 'CL1', 'Cliente', 90), (11, 1, 'PV1', 'Proveedor', 0);
+    insert into locations (id, company_id, code, name) values (5, 1, 'BOD', 'Bodega');
+    insert into customer_requests (id, company_id, name, partner_id, credit_days) values (1, 1, 'SOL-0001', 10, null), (2, 1, 'SOL-0002', 10, 0), (3, 1, 'SOL-0003', 10, 90);
+    insert into quotes (id, company_id, name, partner_id, credit_days) values (1, 1, 'COT-0001', 10, 0), (2, 1, 'COT-0002', 10, 60);
+    -- El pedido de contado va por "entrega vía ASR" (route_kind = asr): es
+    -- logística, no financiamiento. Sigue siendo Contado.
+    insert into sales_orders (id, company_id, name, partner_id, location_id, credit_days, route_kind) values (1, 1, 'PV-0001', 10, 5, 0, 'asr'), (2, 1, 'PV-0002', 10, 5, 120, 'own');
+    insert into invoices (id, company_id, kind, name, partner_id, due_date, amount, residual, origin, inv_class, order_id, credit_days) values
+      (1, 1, 'customer', 'FV-0001', 10, '2026-01-31', 1000, 1000, 'PV-0001', 'product', 1, 0),
+      (2, 1, 'customer', 'FV-0002', 10, '2026-04-30', 2000, 2000, 'PV-0002', 'product', 2, 120),
+      (3, 1, 'customer', 'A-77', 10, '2026-03-01', 500, 500, 'Corte Compaq', 'product', null, 0),
+      (4, 1, 'customer', 'FI-0003', 10, '2026-05-31', 33, 33, 'Mora FV-0002', 'interest', 2, null),
+      (5, 1, 'customer', 'ATC-0001', 10, '2026-02-15', -12, -12, 'Ajuste TC FV-0001', 'fx', 1, null),
+      (6, 1, 'customer', 'NC-0001', 10, '2026-03-10', -300, -300, 'PV-0002', 'product', 2, null),
+      (7, 1, 'supplier', 'FP-0001', 11, '2026-03-10', 800, 800, 'OC-0001', 'product', null, null);
+  `);
+  const m25 = readFileSync(join(dir, "0025_circuito_etiqueta.sql"), "utf8");
+  await db.exec(m25);
+  const por = async (t, col = "name") => Object.fromEntries((await db.query(`select ${col} as k, circuit_code from ${t} order by id`)).rows.map((r) => [r.k, r.circuit_code]));
+
+  assert.deepEqual(await por("customer_requests"), { "SOL-0001": "CONTADO", "SOL-0002": "CONTADO", "SOL-0003": "ASR" }, "solicitud: sin plazo o plazo 0 → Contado; con plazo → ASR");
+  assert.deepEqual(await por("quotes"), { "COT-0001": "CONTADO", "COT-0002": "ASR" });
+  assert.deepEqual(await por("sales_orders"), { "PV-0001": "CONTADO", "PV-0002": "ASR" }, "route_kind = asr no vuelve ASR un pedido de contado");
+  assert.deepEqual(
+    await por("invoices"),
+    {
+      "FV-0001": "CONTADO",
+      "FV-0002": "ASR",
+      "A-77": "ASR", // corte de Compaq: siempre ASR, aunque su plazo sea 0
+      "FI-0003": "ASR", // hereda de FV-0002
+      "ATC-0001": "CONTADO", // hereda de FV-0001
+      "NC-0001": "ASR", // hereda de su pedido PV-0002
+      "FP-0001": null, // factura de proveedor: sin circuito
+    },
+    "facturas: por plazo, corte a ASR, derivados heredan, proveedor sin circuito",
+  );
+
+  // Idempotente y respetuosa: lo ya etiquetado (p. ej. un circuito elegido a
+  // mano en el paso 2) no se pisa al volver a correr.
+  await db.exec(`update quotes set circuit_code = 'SANTA_ROSA' where name = 'COT-0002'`);
+  await db.exec(m25);
+  assert.equal((await por("quotes"))["COT-0002"], "SANTA_ROSA", "un circuito ya guardado no se reescribe");
+  assert.deepEqual(await por("sales_orders"), { "PV-0001": "CONTADO", "PV-0002": "ASR" }, "segunda corrida: sin cambios");
   await db.close();
 });

@@ -19,6 +19,7 @@ import { expedienteFor, quoteNotes } from "@/lib/erp/doc-text";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
+import { circuitLabel } from "@/lib/erp/circuits";
 
 export const Route = createFileRoute("/quotes")({
   // ?ver=<id> abre esa cotización al entrar (ligas desde la solicitud y el pedido).
@@ -663,6 +664,9 @@ function Page() {
                       <div className="mb-1 flex flex-wrap items-center gap-2">
                         <p className="text-sm font-semibold">Documento al cliente</p>
                         <span className="erp-chip">Revisión {qrow.revision}</span>
+                        <span className="erp-chip" title="Circuito de financiamiento (etiqueta: sigue al plazo; el precio sigue saliendo de Ajustes)">
+                          {circuitLabel(qrow.circuit_code)}
+                        </span>
                         {qrow.accepted_offer === "cash" || qrow.accepted_offer === "credit" ? (
                           <span className="erp-chip border-ok">El cliente aceptó el precio de {OFFER_LABEL[qrow.accepted_offer]}</span>
                         ) : null}

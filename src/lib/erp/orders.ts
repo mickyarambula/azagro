@@ -12,6 +12,7 @@ import { rememberTrade } from "@/lib/erp/links";
 import { policy } from "@/lib/erp/ops";
 import { financeUnit } from "@/lib/erp/pricing";
 import { marginOf, priceFromMargin, type Offer } from "@/lib/erp/margins";
+import { circuitForTerm, circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -204,6 +205,7 @@ export const getOrder = createServerFn({ method: "POST" })
       guia_obs: string;
       quote_id: number | null;
       accepted_offer: string | null;
+      circuit_code: string | null;
     }>`
       select id, name, partner_id, date::text, state, location_id, notes, total::text, currency, fx_rate::text,
         delivery_to, term_kind, invoice_days, credit_days, invoice_due::text, credit_due::text,
@@ -215,7 +217,7 @@ export const getOrder = createServerFn({ method: "POST" })
         coalesce(guia_sign,'') as guia_sign,
         coalesce(guia_sign_name,'') as guia_sign_name,
         coalesce(guia_obs,'') as guia_obs,
-        quote_id, accepted_offer
+        quote_id, accepted_offer, circuit_code
       from sales_orders where id = ${data.id} and company_id = ${companyId}
     `;
     if (!rows[0]) throw new Error("Pedido no encontrado");
@@ -373,9 +375,10 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
       credit_due: string | null;
       total: string;
       accepted_offer: string | null;
+      circuit_code: string | null;
     }>`
       select id, name, state, date::text, quote_id, coalesce(credit_days,0)::int as credit_days,
-        coalesce(invoice_days,0)::int as invoice_days, invoice_due::text, credit_due::text, total::text, accepted_offer
+        coalesce(invoice_days,0)::int as invoice_days, invoice_due::text, credit_due::text, total::text, accepted_offer, circuit_code
       from sales_orders where id = ${data.id} and company_id = ${companyId}
     `;
     if (!so[0]) throw new Error("Pedido no encontrado");
@@ -456,6 +459,9 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
     if (Math.abs(Number(so[0].total) - total) > 0.009) cambios.push(`total ${Number(so[0].total)} → ${Math.round(total * 100) / 100}`);
     if ((so[0].invoice_due ?? "") !== dues.invoiceDue) cambios.push(`vencimiento ${so[0].invoice_due ?? "—"} → ${dues.invoiceDue}`);
     if ((so[0].credit_due ?? "") !== dues.creditDue) cambios.push(`plazo financiero ${so[0].credit_due ?? "—"} → ${dues.creditDue}`);
+    // Paso 1: la etiqueta de circuito sigue al plazo del pedido.
+    const circuit = inheritCircuit(so[0].circuit_code, dues.creditDays);
+    if (circuit !== so[0].circuit_code) cambios.push(`circuito ${circuitLabel(so[0].circuit_code)} → ${circuitLabel(circuit)}`);
     for (const n of nuevos) {
       await sql`update sales_lines set unit_price = ${n.price} where id = ${n.id}`;
     }
@@ -467,6 +473,7 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
         invoice_due = ${dues.invoiceDue},
         credit_due = ${dues.creditDue},
         price_mode = ${days > 0 ? "financed" : "cash"},
+        circuit_code = ${circuit},
         total = ${total}
       where id = ${so[0].id} and company_id = ${companyId}
     `;
@@ -562,9 +569,10 @@ export const saveOrder = createServerFn({ method: "POST" })
         credit_due: string | null;
         invoice_due: string | null;
         delivery_to: string;
+        circuit_code: string | null;
       }>`
         select state, name, partner_id, date::text, total::text, currency, fx_rate::text,
-          credit_due::text, invoice_due::text, coalesce(delivery_to,'') as delivery_to
+          credit_due::text, invoice_due::text, coalesce(delivery_to,'') as delivery_to, circuit_code
         from sales_orders where id = ${id} and company_id = ${companyId}
       `;
       if (!current[0]) throw new Error("Pedido no encontrado");
@@ -601,6 +609,9 @@ export const saveOrder = createServerFn({ method: "POST" })
       if (Number(current[0].fx_rate) !== data.fxRate) cambios.push(`TC ${Number(current[0].fx_rate)} → ${data.fxRate}`);
       if ((current[0].credit_due ?? "") !== dues.creditDue) cambios.push(`plazo financiero ${current[0].credit_due ?? "—"} → ${dues.creditDue}`);
       if ((current[0].invoice_due ?? "") !== dues.invoiceDue) cambios.push(`vencimiento ${current[0].invoice_due ?? "—"} → ${dues.invoiceDue}`);
+      // Paso 1: la etiqueta de circuito sigue al plazo del pedido.
+      const circuit = inheritCircuit(current[0].circuit_code, dues.creditDays);
+      if (circuit !== current[0].circuit_code) cambios.push(`circuito ${circuitLabel(current[0].circuit_code)} → ${circuitLabel(circuit)}`);
       for (const nl of data.lines) {
         const ol = oldLines.find((o) => o.product_id === nl.productId);
         if (!ol) {
@@ -642,6 +653,7 @@ export const saveOrder = createServerFn({ method: "POST" })
           policy_code = ${data.policyCode},
           oc_cliente = ${data.ocCliente ?? ""},
           price_mode = ${data.priceMode},
+          circuit_code = ${circuit},
           state = ${data.confirm ? "confirmed" : current[0].state}
         where id = ${id} and company_id = ${companyId}
       `;
@@ -653,14 +665,14 @@ export const saveOrder = createServerFn({ method: "POST" })
           company_id, name, partner_id, date, state, location_id, notes, total,
           currency, fx_rate, delivery_to, owner_id,
           term_kind, invoice_days, credit_days, invoice_due, credit_due,
-          route_kind, asr_partner_id, policy_code, oc_cliente, price_mode
+          route_kind, asr_partner_id, policy_code, oc_cliente, price_mode, circuit_code
         )
         values (
           ${companyId}, ${name}, ${data.partnerId}, ${data.date}, ${state}, ${data.locationId},
           ${data.notes ?? ""}, ${total}, ${data.currency}, ${data.fxRate}, ${data.deliveryTo ?? ""},
           ${context.userId}, ${data.termKind}, ${dues.invoiceDays}, ${dues.creditDays},
           ${dues.invoiceDue}, ${dues.creditDue}, ${data.routeKind}, ${asrId}, ${data.policyCode},
-          ${data.ocCliente ?? ""}, ${data.priceMode}
+          ${data.ocCliente ?? ""}, ${data.priceMode}, ${circuitForTerm(dues.creditDays)}
         )
         returning id
       `;

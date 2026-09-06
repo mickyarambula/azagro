@@ -28,6 +28,7 @@ import { destText, RequestFields, type RequestDraft } from "@/components/request
 import { Expediente } from "@/components/expediente";
 import { listDeliveryPoints } from "@/lib/erp/locations";
 import { money, num, qty, humanError, todayMx } from "@/lib/utils";
+import { circuitLabel, requestCircuitLabel } from "@/lib/erp/circuits";
 
 export const Route = createFileRoute("/solicitudes/$solicitudId")({ component: Page });
 
@@ -640,7 +641,7 @@ function Page() {
           Azagro vende. No aparece quién nos cotizó. Dos precios por partida, cada uno con su propio margen: <strong>contado</strong> = costo puesto + margen
           contado; <strong>crédito</strong> = costo puesto + margen crédito + financiamiento. TIIE y spread van separados; la tasa es la suma.
         </p>
-        <div className="mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+        <div className="mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-7">
           <HeadBox label="Moneda">
             <select
               className="erp-input w-full border-0 bg-transparent px-0"
@@ -688,6 +689,16 @@ function Page() {
           </HeadBox>
           <HeadBox label="Comisión ASR % (Ajustes)">
             <p className="text-sm tabular-nums">{commissionPct.toFixed(2)}</p>
+          </HeadBox>
+          <HeadBox label="Circuito de financiamiento">
+            <p className="text-sm">
+              {data?.quote ? circuitLabel(data.quote.circuit_code) : requestCircuitLabel(data?.request.circuit_code)}
+            </p>
+            <p className="text-[11px] text-muted">
+              {data?.quote || data?.request.circuit_code
+                ? "Etiqueta: sigue al plazo. El precio sigue saliendo de Ajustes."
+                : "Se resuelve solo al capturar el plazo."}
+            </p>
           </HeadBox>
         </div>
         {settingsError ? <p className="mb-3 text-[12px] text-danger">Ajustes no disponibles: {settingsError}</p> : null}

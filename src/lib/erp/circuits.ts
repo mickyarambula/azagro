@@ -15,8 +15,12 @@ import { authMiddleware } from "@/lib/auth/middleware";
  * circuito lineal (Línea Santa Rosa) que se va a construir.
  *
  * Esta fase SOLO expone el catálogo para leerlo. Nada en el precio, la mora
- * ni los reportes lo consulta todavía — eso es el paso 3. El pedido tampoco
- * declara circuito todavía — eso es el paso 1.
+ * ni los reportes lo consulta todavía — eso es el paso 3.
+ *
+ * PASO 1 (etiqueta): cada documento guarda `circuit_code`, lo hereda por la
+ * cadena y lo muestra; los ayudantes puros de abajo (circuitForTerm,
+ * inheritCircuit, circuitLabel) son lo único que usan el servidor y las
+ * pantallas. Todavía no hay selector (paso 2) y el motor no lo lee (paso 3).
  */
 
 export type CircuitCode = "CONTADO" | "ASR" | "SANTA_ROSA" | "PROPIA";
@@ -115,3 +119,65 @@ export const WHO_LABEL: Record<string, string> = {
   azagro: "Azagro",
   santa_rosa: "Santa Rosa",
 };
+
+/**
+ * Nombres de pantalla de los cuatro circuitos: los mismos que sembró la
+ * migración 0024 en `credit_circuits.name`. Se usan como etiqueta de solo
+ * lectura en solicitud, cotización, pedido, cartera y estado de cuenta.
+ */
+export const CIRCUIT_LABEL: Record<CircuitCode, string> = {
+  CONTADO: "Contado",
+  ASR: "Circuito ASR",
+  SANTA_ROSA: "Línea Santa Rosa",
+  PROPIA: "Línea propia",
+};
+
+export function isCircuitCode(code: unknown): code is CircuitCode {
+  return code === "CONTADO" || code === "ASR" || code === "SANTA_ROSA" || code === "PROPIA";
+}
+
+/** Etiqueta para pantalla; un documento sin circuito guardado lo dice tal cual. */
+export function circuitLabel(code: string | null | undefined): string {
+  return isCircuitCode(code) ? CIRCUIT_LABEL[code] : "Sin circuito";
+}
+
+/**
+ * La solicitud nace SIN circuito (nulo), no en Contado: mientras nadie
+ * capture el plazo, el sistema no ha decidido nada, y Contado es justo el
+ * circuito que no cobra financiamiento (decisión del dueño, 5-sep-2026). Se
+ * resuelve sola con `inheritCircuit` en cuanto se guarda un plazo, así sea 0.
+ * Un documento con quote_id ya tiene circuito resuelto (nunca llega aquí en
+ * la práctica) — este texto es solo para la solicitud todavía sin cotizar.
+ */
+export function requestCircuitLabel(code: string | null | undefined): string {
+  return isCircuitCode(code) ? CIRCUIT_LABEL[code] : "Sin definir";
+}
+
+/**
+ * Regla decidida por la dirección (5-sep-2026) para un documento que nace
+ * sin circuito heredado: plazo 0 → Contado; con plazo, mientras el circuito
+ * lineal no exista, el sistema propone el Circuito ASR (el vigente).
+ */
+export function circuitForTerm(days: number): CircuitCode {
+  return days > 0 ? "ASR" : "CONTADO";
+}
+
+/**
+ * Herencia por la cadena (SOL → COT → PV → FV → FI/NC/ATC), igual que el
+ * plazo y la moneda: el documento nuevo trae el circuito del anterior. Si el
+ * plazo se vuelve 0 es Contado; si el anterior era Contado (o no tenía) y
+ * ahora hay plazo, aplica la regla de circuitForTerm. Un circuito de crédito
+ * ya elegido (ASR, Santa Rosa, propia) se respeta mientras haya plazo.
+ */
+export function inheritCircuit(upstream: string | null | undefined, days: number): CircuitCode {
+  if (days <= 0) return "CONTADO";
+  if (isCircuitCode(upstream) && upstream !== "CONTADO") return upstream;
+  return circuitForTerm(days);
+}
+
+/**
+ * Corte de Compaq: todo saldo abierto importado entra al Circuito ASR, sin
+ * mirar el plazo (decisión 4, 5-sep-2026). Es el circuito con el que se
+ * operó todo lo que viene de Compaq.
+ */
+export const CUTOVER_CIRCUIT: CircuitCode = "ASR";

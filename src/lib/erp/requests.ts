@@ -11,6 +11,7 @@ import { policy } from "@/lib/erp/ops";
 import { rememberTrade } from "@/lib/erp/links";
 import { marginInvalidMessage, marginOf, marginText, marginValid, normalizeMargin, OFFER_LABEL, type StoredMargin } from "@/lib/erp/margins";
 import { assertRequestOpen } from "@/lib/erp/request-lock";
+import { circuitLabel, inheritCircuit } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 async function cid(sql: Sql, userId: string) {
@@ -43,6 +44,9 @@ async function ensure(sql: Sql) {
   `);
   await sql.query(`alter table customer_requests add column if not exists location_id integer`);
   await sql.query(`alter table quotes add column if not exists owner_id text`);
+  // Paso 1 del catálogo de circuitos: etiqueta por documento (migración 0025).
+  await sql.query(`alter table customer_requests add column if not exists circuit_code text`);
+  await sql.query(`alter table quotes add column if not exists circuit_code text`);
   await sql.query(`
     create table if not exists customer_request_lines (
       id serial primary key,
@@ -204,11 +208,12 @@ export const getRequest = createServerFn({ method: "POST" })
       credit_days: number | null;
       currency: string | null;
       fx_rate: string | null;
+      circuit_code: string | null;
     }>`
       select r.id, r.name, r.partner_id, p.name as partner, r.date::text, r.delivery_mode, r.delivery_to,
         r.notes, r.state, r.quote_id, r.rfq_id,
         (select name from quotes where id = r.quote_id) as quote_name,
-        r.location_id, r.credit_days, r.currency, r.fx_rate::text
+        r.location_id, r.credit_days, r.currency, r.fx_rate::text, r.circuit_code
       from customer_requests r
       join partners p on p.id = r.partner_id
       where r.id = ${data.id} and r.company_id = ${companyId}
@@ -216,12 +221,12 @@ export const getRequest = createServerFn({ method: "POST" })
     if (!head[0]) throw new Error("Solicitud no encontrada");
     // Si ya generó cotización, la solicitud se muestra bloqueada con la cadena
     // completa: COT → PV (los pedidos que salieron de esa cotización).
-    let quote: { id: number; name: string; state: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null } | null = null;
+    let quote: { id: number; name: string; state: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null; circuit_code: string | null } | null = null;
     let orders: Array<{ id: number; name: string; state: string }> = [];
     if (head[0].quote_id) {
-      const qs = await sql<{ id: number; name: string; state: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null }>`
+      const qs = await sql<{ id: number; name: string; state: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null; circuit_code: string | null }>`
         select id, name, state, coalesce(credit_days,0)::int as credit_days, currency, fx_rate::text,
-          coalesce(price_offer,'both') as price_offer, accepted_offer
+          coalesce(price_offer,'both') as price_offer, accepted_offer, circuit_code
         from quotes where id = ${head[0].quote_id} and company_id = ${companyId}
       `;
       quote = qs[0] ?? null;
@@ -337,8 +342,8 @@ export const saveRequestTerms = createServerFn({ method: "POST" })
     const companyId = await cid(sql, context.userId);
     await ensure(sql);
     await assertRequestOpen(sql, companyId, data.id);
-    const before = await sql<{ name: string; credit_days: number | null; currency: string | null; fx_rate: string | null }>`
-      select name, credit_days, currency, fx_rate::text from customer_requests where id = ${data.id} and company_id = ${companyId}
+    const before = await sql<{ name: string; credit_days: number | null; currency: string | null; fx_rate: string | null; circuit_code: string | null }>`
+      select name, credit_days, currency, fx_rate::text, circuit_code from customer_requests where id = ${data.id} and company_id = ${companyId}
     `;
     if (!before[0]) throw new Error("Solicitud no encontrada");
     const cambios: string[] = [];
@@ -351,11 +356,17 @@ export const saveRequestTerms = createServerFn({ method: "POST" })
     if (data.fxRate !== undefined && data.fxRate !== Number(before[0].fx_rate ?? 0)) {
       cambios.push(`TC ${Number(before[0].fx_rate ?? 0)} → ${data.fxRate}`);
     }
+    // Paso 1: el circuito es una etiqueta que sigue al plazo. Cambia con rastro.
+    const circuit = data.creditDays !== undefined ? inheritCircuit(before[0].circuit_code, data.creditDays) : before[0].circuit_code;
+    if (circuit !== before[0].circuit_code) {
+      cambios.push(`circuito ${circuitLabel(before[0].circuit_code)} → ${circuitLabel(circuit)}`);
+    }
     await sql`
       update customer_requests
       set credit_days = coalesce(${data.creditDays ?? null}, credit_days),
         currency = coalesce(${data.currency ?? null}, currency),
-        fx_rate = coalesce(${data.fxRate ?? null}, fx_rate)
+        fx_rate = coalesce(${data.fxRate ?? null}, fx_rate),
+        circuit_code = ${circuit}
       where id = ${data.id} and company_id = ${companyId}
     `;
     if (cambios.length) {
@@ -392,8 +403,9 @@ export const createRequest = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from customer_requests where company_id = ${companyId}`;
     const name = `SOL-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const row = await sql<{ id: number }>`
-      insert into customer_requests (company_id, name, partner_id, date, delivery_mode, delivery_to, notes, state, location_id)
-      values (${companyId}, ${name}, ${data.partnerId}, ${todayMx()}, ${data.deliveryMode}, ${data.deliveryTo ?? ""}, ${data.notes ?? ""}, 'open', ${data.locationId ?? null})
+      insert into customer_requests (company_id, name, partner_id, date, delivery_mode, delivery_to, notes, state, location_id, circuit_code)
+      values (${companyId}, ${name}, ${data.partnerId}, ${todayMx()}, ${data.deliveryMode}, ${data.deliveryTo ?? ""}, ${data.notes ?? ""}, 'open', ${data.locationId ?? null},
+        ${null})
       returning id
     `;
     for (const line of data.lines) {
@@ -814,8 +826,8 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de cotizar en dólares.");
     }
     if (data.creditDays > 0 && !(data.tiie > 0)) throw new Error(missingRateMessage(todayMx(), "cotización a crédito"));
-    const req = await sql<{ id: number; name: string; partner_id: number; delivery_to: string; delivery_mode: string; quote_id: number | null }>`
-      select id, name, partner_id, delivery_to, delivery_mode, quote_id from customer_requests
+    const req = await sql<{ id: number; name: string; partner_id: number; delivery_to: string; delivery_mode: string; quote_id: number | null; circuit_code: string | null }>`
+      select id, name, partner_id, delivery_to, delivery_mode, quote_id, circuit_code from customer_requests
       where id = ${data.requestId} and company_id = ${companyId}
     `;
     if (!req[0]) throw new Error("Solicitud no encontrada");
@@ -953,9 +965,10 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     await sql`alter table quote_lines add column if not exists credit_price numeric(14,4) not null default 0`;
     await sql`alter table quotes add column if not exists request_id integer`;
     const q = await sql<{ id: number }>`
-      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, request_id)
+      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, request_id, circuit_code)
       values (${companyId}, ${name}, ${req[0].partner_id}, ${today}, ${until}, ${data.currency}, ${data.fxRate},
-        ${data.send ? "sent" : "draft"}, ${notes}, ${req[0].delivery_to}, ${total}, ${context.userId}, ${data.tiie}, ${data.spread}, ${data.creditDays}, ${offer}, ${data.requestId})
+        ${data.send ? "sent" : "draft"}, ${notes}, ${req[0].delivery_to}, ${total}, ${context.userId}, ${data.tiie}, ${data.spread}, ${data.creditDays}, ${offer}, ${data.requestId},
+        ${inheritCircuit(req[0].circuit_code, data.creditDays)})
       returning id
     `;
     for (const line of priced) {

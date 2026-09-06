@@ -6,6 +6,7 @@ import { assertCan } from "@/lib/erp/acl";
 import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { nearestRate } from "@/lib/erp/credit";
+import { circuitForTerm } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -198,11 +199,11 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
       insert into sales_orders (
         company_id, name, partner_id, date, state, location_id, notes, total,
         currency, fx_rate, delivery_to, owner_id,
-        term_kind, invoice_days, credit_days, route_kind, policy_code, oc_cliente, price_mode
+        term_kind, invoice_days, credit_days, route_kind, policy_code, oc_cliente, price_mode, circuit_code
       ) values (
         ${companyId}, ${name}, ${cpo[0].partner_id}, ${today}, 'draft', ${data.locationId},
         ${cpo[0].notes}, ${total}, ${cpo[0].currency}, ${fxRate}, '', ${context.userId},
-        'credit_days', ${plazo}, ${plazo}, 'own', 'NONE', ${cpo[0].customer_po_number}, 'custom'
+        'credit_days', ${plazo}, ${plazo}, 'own', 'NONE', ${cpo[0].customer_po_number}, 'custom', ${circuitForTerm(plazo)}
       )
       returning id
     `;

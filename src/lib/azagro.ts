@@ -14,6 +14,7 @@ import { ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, se
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { todayMx } from "@/lib/utils";
+import { inheritCircuit } from "@/lib/erp/circuits";
 
 export type Role = AppRole;
 
@@ -119,6 +120,9 @@ export async function seedCompany(sql: Sql, companyId: number) {
   await sql`alter table invoices add column if not exists invoice_days integer`;
   await sql`alter table invoices add column if not exists credit_days integer`;
   await sql`alter table invoices add column if not exists policy_code text not null default 'NONE'`;
+  // Paso 1 del catálogo de circuitos: etiqueta por documento (migración 0025).
+  await sql`alter table sales_orders add column if not exists circuit_code text`;
+  await sql`alter table invoices add column if not exists circuit_code text`;
   for (const p of CREDIT_POLICY_CATALOG) {
     await sql`
       insert into credit_policies (company_id, code, name)
@@ -1391,10 +1395,11 @@ export const deliverSale = createServerFn({ method: "POST" })
       policy_code: string | null;
       date: string;
       route_kind: string;
+      circuit_code: string | null;
     }>`
       select id, location_id, name, state, partner_id, total::text,
         invoice_due::text, credit_due::text, invoice_days, credit_days, policy_code, date::text,
-        coalesce(route_kind,'own') as route_kind
+        coalesce(route_kind,'own') as route_kind, circuit_code
       from sales_orders
       where id = ${data.soId} and company_id = ${m.company_id}
       for update
@@ -1463,13 +1468,13 @@ export const deliverSale = createServerFn({ method: "POST" })
       insert into invoices (
         company_id, kind, name, partner_id, date, due_date, credit_due, state, amount, residual, origin,
         currency, amount_fx, fx_agreed, inv_class, order_id, invoice_days, credit_days, policy_code,
-        created_by, params_snap
+        created_by, params_snap, circuit_code
       )
       values (
         ${m.company_id}, 'customer', ${iname}, ${so[0].partner_id}, ${today}, ${invoiceDue}, ${creditDue}, 'open',
         ${mxn}, ${mxn}, ${so[0].name}, ${currency}, ${currency === "USD" && fx ? mxn / fx : 0}, ${fx}, 'product', ${so[0].id},
         ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${so[0].policy_code ?? "NONE"},
-        ${context.userId}, ${snap}
+        ${context.userId}, ${snap}, ${inheritCircuit(so[0].circuit_code, so[0].credit_days ?? 0)}
       )
       returning id
     `;
@@ -1522,8 +1527,9 @@ export const returnSale = createServerFn({ method: "POST" })
       location_id: number;
       route_kind: string;
       currency: string;
+      circuit_code: string | null;
     }>`
-      select id, name, state, partner_id, location_id, coalesce(route_kind,'own') as route_kind, currency
+      select id, name, state, partner_id, location_id, coalesce(route_kind,'own') as route_kind, currency, circuit_code
       from sales_orders where id = ${data.soId} and company_id = ${m.company_id}
       for update
     `;
@@ -1576,11 +1582,11 @@ export const returnSale = createServerFn({ method: "POST" })
     const nc = await sql<{ id: number }>`
       insert into invoices (
         company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin,
-        currency, order_id, inv_class, created_by
+        currency, order_id, inv_class, created_by, circuit_code
       )
       values (
         ${m.company_id}, 'customer', ${ncName}, ${so[0].partner_id}, ${today}, ${today},
-        'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product', ${context.userId}
+        'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product', ${context.userId}, ${so[0].circuit_code}
       )
       returning id
     `;
@@ -1675,6 +1681,7 @@ export const listInvoices = createServerFn({ method: "POST" })
       fega_part: string;
       calc_client: string;
       calc: string;
+      circuit_code: string | null;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1688,7 +1695,8 @@ export const listInvoices = createServerFn({ method: "POST" })
         coalesce(i.int_part, 0)::text as int_part,
         coalesce(i.fega_part, 0)::text as fega_part,
         coalesce(i.calc_client, '') as calc_client,
-        coalesce(i.calc, '') as calc
+        coalesce(i.calc, '') as calc,
+        i.circuit_code
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

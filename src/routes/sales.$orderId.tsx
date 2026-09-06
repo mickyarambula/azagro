@@ -61,6 +61,8 @@ function Ficha() {
   const [originLines, setOriginLines] = useState<Awaited<ReturnType<typeof getOrder>>["lines"]>([]);
   const [changeTerm, setChangeTerm] = useState(false);
   const [newDays, setNewDays] = useState(0);
+  // Circuito de financiamiento guardado (etiqueta de solo lectura, paso 1).
+  const [circuit, setCircuit] = useState<string | null | undefined>(undefined);
 
   async function load() {
     const [d, l, p] = await Promise.all([getOrder({ data: { id } }), orderLookups(), getDealPnl({ data: { soId: id } }).catch(() => null)]);
@@ -75,6 +77,7 @@ function Ficha() {
     setOriginLines(d.lines);
     setChangeTerm(false);
     setNewDays(o.credit_days);
+    setCircuit(o.circuit_code);
     setRetQty((cur) => {
       const next = { ...cur };
       for (const l of d.lines) {
@@ -330,6 +333,7 @@ function Ficha() {
         setForm={setForm}
         lookups={lookups}
         locked={locked}
+        circuit={circuit}
         inherited={
           origin
             ? {
