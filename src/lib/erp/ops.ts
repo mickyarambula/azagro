@@ -652,6 +652,7 @@ export const listQuotes = createServerFn({ method: "GET" })
         (select state from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_state
       from quotes q join partners p on p.id = q.partner_id
       where q.company_id = ${cid}
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by q.id desc
     `;
     const lines = await sql<{
@@ -704,7 +705,9 @@ export const listQuotes = createServerFn({ method: "GET" })
       from quote_lines ql
       join products pr on pr.id = ql.product_id
       join quotes q on q.id = ql.quote_id
+      join partners p on p.id = q.partner_id
       where q.company_id = ${cid}
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;
     const customers = await sql<{ id: number; name: string; email: string; phone: string }>`
       select id, name, coalesce(email,'') as email, coalesce(phone,'') as phone

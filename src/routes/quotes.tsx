@@ -402,6 +402,7 @@ function Page() {
         notes: quoteNotes({ notes: qrow.notes, deliveryTo: qrow.delivery_to }),
       }),
       {
+        module: "quotes",
         title: "Cotización",
         number: `${qrow.name}${rev}`,
         party: qrow.partner,
@@ -684,6 +685,7 @@ function Page() {
                         Documento
                       </button>
                       <SendButton
+                        module="quotes"
                         title="Cotización"
                         number={`${qrow.name}${Number(qrow.revision) > 1 ? ` Rev. ${qrow.revision}` : ""}`}
                         party={qrow.partner}

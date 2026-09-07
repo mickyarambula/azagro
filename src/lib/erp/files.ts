@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, type Sql } from "@/lib/db";
-import { assertCan } from "@/lib/erp/acl";
+import { assertCan, type ModuleId } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 
 async function cid(sql: Sql, userId: string) {
@@ -28,6 +28,17 @@ async function ensureFiles(sql: Sql) {
 }
 
 const kindZ = z.enum(["sale", "purchase", "invoice", "request", "rfq", "cutover"]);
+export type DocKind = z.infer<typeof kindZ>;
+
+/** El documento manda: cada tipo de archivo se cuida con el permiso de SU propio módulo, no con uno fijo. */
+export const DOC_KIND_MODULE: Record<DocKind, ModuleId> = {
+  sale: "sales",
+  purchase: "purchases",
+  invoice: "credit",
+  request: "quotes",
+  rfq: "purchases",
+  cutover: "settings",
+};
 
 export const listDocFiles = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
@@ -35,7 +46,7 @@ export const listDocFiles = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
-    await assertCan(sql, context.userId, data.kind === "cutover" ? "settings" : "sales", "view");
+    await assertCan(sql, context.userId, DOC_KIND_MODULE[data.kind], "view");
     await ensureFiles(sql);
     const rows = await sql<{ id: number; filename: string; mime: string; created_at: string; bytes: number }>`
       select id, filename, mime, created_at::text, length(content) as bytes
@@ -59,7 +70,7 @@ export const uploadDocFile = createServerFn({ method: "POST" })
   )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
-    await assertCan(sql, context.userId, data.kind === "cutover" ? "settings" : "sales", "edit");
+    await assertCan(sql, context.userId, DOC_KIND_MODULE[data.kind], "edit");
     const companyId = await cid(sql, context.userId);
     await ensureFiles(sql);
     if (data.content.length > 6_000_000) throw new Error("El archivo pesa más de ~4 MB. Parte o comprime.");
@@ -85,11 +96,12 @@ export const getDocFile = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
-    await assertCan(sql, context.userId, "sales", "view");
     await ensureFiles(sql);
-    const rows = await sql<{ filename: string; mime: string; content: string }>`
-      select filename, mime, content from doc_files where id = ${data.id} and company_id = ${companyId}
+    const rows = await sql<{ kind: DocKind; filename: string; mime: string; content: string }>`
+      select kind, filename, mime, content from doc_files where id = ${data.id} and company_id = ${companyId}
     `;
     if (!rows[0]) throw new Error("Archivo no encontrado");
+    // El permiso depende de a qué tipo de documento pertenece el archivo.
+    await assertCan(sql, context.userId, DOC_KIND_MODULE[rows[0].kind], "view");
     return rows[0];
   });

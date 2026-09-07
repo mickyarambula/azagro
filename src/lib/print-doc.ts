@@ -1,6 +1,10 @@
 /** Documento formal: se abre en el visor del ERP (no en about:blank). */
 
+import type { SendModule } from "@/components/send-doc";
+
 export type DocSend = {
+  // El permiso de ESTE documento, no uno fijo (sesión de permisos, 7-sep-2026).
+  module: SendModule;
   title?: string;
   number?: string;
   party?: string;

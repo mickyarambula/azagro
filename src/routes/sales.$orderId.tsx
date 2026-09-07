@@ -29,6 +29,10 @@ function Ficha() {
   const { can, role } = useAccess();
   const isAdmin = role === "admin";
   const canEdit = can("sales", "edit");
+  // Recibir una OC ligada al pedido es acción de compras/almacén
+  // (receivePurchase exige purchases:edit): no mostrar el botón a quien va a
+  // truenar al hacer clic.
+  const canReceive = can("purchases", "edit");
   const [lookups, setLookups] = useState<OrderLookups | null>(null);
   const [form, setForm] = useState<OrderDraft | null>(null);
   const [state, setState] = useState("draft");
@@ -296,6 +300,7 @@ function Ficha() {
                   total: moneyIn(form.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0), form.currency),
                 }),
                 {
+                  module: "sales",
                   title: "Pedido de venta",
                   number: form.name,
                   party: lookups.customers.find((c) => c.id === form.partnerId)?.name || "",
@@ -307,6 +312,7 @@ function Ficha() {
             Documento
           </button>
           <SendButton
+            module="sales"
             title="Pedido de venta"
             number={form.name}
             party={lookups.customers.find((c) => c.id === form.partnerId)?.name || ""}
@@ -560,7 +566,7 @@ function Ficha() {
                     </StatusPill>
                   </span>
                 </span>
-                {canEdit && po.state !== "done" && po.fulfill_kind !== "direct" && (
+                {canEdit && canReceive && po.state !== "done" && po.fulfill_kind !== "direct" && (
                   <button
                     type="button"
                     className="erp-btn h-8 text-[12px]"
@@ -850,6 +856,7 @@ function Ficha() {
                       observaciones: obs,
                     }),
                     {
+                      module: "sales",
                       title: "Guía de carga",
                       number: form.name,
                       party: cliente,

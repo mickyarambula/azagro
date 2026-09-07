@@ -394,11 +394,18 @@ export const getDashboard = createServerFn({ method: "GET" })
       from banks b
       where b.company_id = ${cid}
     `;
+    // "Cartera propia" deja a un cliente sin vendedor visible para todos los
+    // vendedores por diseño (nadie se queda huérfano de nadie) — pero eso
+    // mismo puede esconder que nadie se hizo cargo. Aviso visible, no filtrado.
+    const orphan = await sql<{ n: number }>`
+      select count(*)::int as n from partners where company_id = ${cid} and is_customer = true and seller_id is null
+    `;
     // Cada quien ve solo las cifras de sus módulos: sin cartera no hay saldos,
     // sin bancos no hay caja, sin permiso de costos el valor de inventario va en cero.
     const seeCredit = me.acl.credit !== "none";
     const seeBanks = me.acl.banks !== "none";
     const seeCosts = canSeeCosts(me.role);
+    const seePartners = me.acl.partners !== "none";
     return {
       ar: seeCredit ? Number(ar[0]?.total ?? 0) : 0,
       arOverdue: seeCredit ? Number(ar[0]?.overdue ?? 0) : 0,
@@ -412,6 +419,7 @@ export const getDashboard = createServerFn({ method: "GET" })
       pendingPo: pending[0]?.po ?? 0,
       pendingSo: pending[0]?.so ?? 0,
       overdueN: seeCredit ? pending[0]?.overdue_n ?? 0 : 0,
+      orphanCustomers: seePartners ? orphan[0]?.n ?? 0 : 0,
       aging: seeCredit ? aging.map((a) => ({ bucket: a.bucket, amount: Number(a.amount) })) : [],
       recentInv: seeCredit ? recentInv : [],
       locStock: locStock.map((l) => ({
@@ -1674,6 +1682,7 @@ export const listInvoices = createServerFn({ method: "POST" })
     await ensureInvoiceExtras(sql);
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "credit", "view");
+    const me = await activeMember(sql, context.userId);
     const kind = data?.kind && data.kind !== "all" ? data.kind : null;
     const today = todayMx();
     return sql<{
@@ -1727,6 +1736,7 @@ export const listInvoices = createServerFn({ method: "POST" })
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}
         and (${kind}::text is null or i.kind = ${kind})
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by i.due_date, i.id
     `;
   });
@@ -1818,7 +1828,10 @@ export const registerPayment = createServerFn({ method: "POST" })
     await ensureInvoiceExtras(boot);
     return withTx(async (sql) => {
       const m = await requireCompany(sql, context.userId);
-      await assertCan(sql, context.userId, "banks", "edit");
+      // Vive en Cartera: cobrar/pagar es acción de cartera, no de bancos (el
+      // alta de un movimiento suelto en /banks sigue exigiendo banks:edit,
+      // en addBankMove).
+      await assertCan(sql, context.userId, "credit", "edit");
       // Mismo camino que Bancos: applyInvoicePayment es la única puerta de cobro.
       return applyInvoicePayment(sql, {
         companyId: m.company_id,

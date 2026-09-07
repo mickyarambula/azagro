@@ -100,6 +100,7 @@ export function DocPreviewHost() {
             </button>
             {send ? (
               <SendButton
+                module={send.module}
                 title={send.title || "Documento"}
                 number={send.number || doc.title}
                 party={send.party || ""}

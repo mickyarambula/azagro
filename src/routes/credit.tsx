@@ -303,6 +303,7 @@ function Page() {
                                     : undefined,
                             }),
                             {
+                              module: "credit",
                               title: paperTitle,
                               number: r.name,
                               party: r.partner,
@@ -318,6 +319,7 @@ function Page() {
                         Documento
                       </button>
                       <SendButton
+                        module="credit"
                         title={r.kind === "customer" ? invoicePaperTitle(r.kind, r.inv_class) : "Cuenta por pagar"}
                         number={r.name}
                         party={r.partner}

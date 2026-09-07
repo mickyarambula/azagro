@@ -227,7 +227,10 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
     `;
     if (!rfq[0]) throw new Error("Solicitud no encontrada");
     const stock = rfq[0].purpose === "stock";
-    await assertCan(sql, context.userId, stock ? "purchases" : "quotes", "edit");
+    // /rfq es la pantalla de compras sin excepción, sea de inventario o de
+    // cliente: el camino "cliente" ya se cierra desde la solicitud (pickVendor,
+    // quotes:edit). Aquí siempre manda purchases:edit.
+    await assertCan(sql, context.userId, "purchases", "edit");
     if (rfq[0].state === "awarded" && stock) {
       throw new Error("Ya se emitieron las órdenes de compra.");
     }

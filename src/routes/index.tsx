@@ -103,6 +103,20 @@ function Home() {
 
       {error && <p className="mt-4 text-sm text-danger">{error}</p>}
 
+      {Boolean(data?.orphanCustomers) && (
+        <Link
+          to="/partners"
+          search={{ tab: "clientes", q: "" }}
+          className="mt-4 flex items-center justify-between rounded-md border border-warn bg-cream px-3 py-2 text-sm text-warn"
+        >
+          <span>
+            {data!.orphanCustomers} cliente{data!.orphanCustomers === 1 ? "" : "s"} sin vendedor asignado —
+            cualquiera con cartera propia los ve y los toca por igual.
+          </span>
+          <span className="font-medium underline decoration-dotted">Ver</span>
+        </Link>
+      )}
+
       {(seeCash || seeCredit || seeStockValue) && (
         <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {seeCash && <Kpi label="Caja" value={data ? money(data.cash) : "—"} hint="Saldos bancarios" />}

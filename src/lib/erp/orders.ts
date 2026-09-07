@@ -131,6 +131,7 @@ export const listOrders = createServerFn({ method: "GET" })
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
     await assertCan(sql, context.userId, "sales", "view");
+    const me = await activeMember(sql, context.userId);
     return sql<{
       id: number;
       name: string;
@@ -151,6 +152,7 @@ export const listOrders = createServerFn({ method: "GET" })
       from sales_orders so
       join partners pt on pt.id = so.partner_id
       where so.company_id = ${companyId}
+        and (${me.own_only} = false or pt.seller_id = ${context.userId} or pt.seller_id is null)
       order by so.id desc
     `;
   });

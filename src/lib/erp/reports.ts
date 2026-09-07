@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
-import { assertCan, canSeeMargins } from "@/lib/erp/acl";
+import { activeMember, assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
@@ -436,6 +436,7 @@ export const listDealPnl = createServerFn({ method: "POST" })
     const sql = await getSql();
     const me = await assertCan(sql, context.userId, "credit", "view");
     if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
+    const own = await activeMember(sql, context.userId);
     const companyId = await cid(sql, context.userId);
     const from = (data.from || "2000-01-01").slice(0, 10);
     const to = (data.to || "2099-12-31").slice(0, 10);
@@ -452,6 +453,7 @@ export const listDealPnl = createServerFn({ method: "POST" })
       from sales_orders s
       join partners p on p.id = s.partner_id
       where s.company_id = ${companyId} and s.date between ${from} and ${to}
+        and (${own.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by s.date desc, s.id desc
       limit 200
     `;
@@ -614,12 +616,14 @@ export const getPanorama = createServerFn({ method: "GET" })
     const sql = await getSql();
     const me = await assertCan(sql, context.userId, "credit", "view");
     if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
+    const own = await activeMember(sql, context.userId);
     const companyId = await cid(sql, context.userId);
     const orders = await sql<{ id: number; partner: string; group_name: string }>`
       select s.id, p.name as partner, coalesce(p.group_name, '') as group_name
       from sales_orders s
       join partners p on p.id = s.partner_id
       where s.company_id = ${companyId}
+        and (${own.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by s.id desc
       limit 500
     `;
@@ -754,6 +758,7 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     await assertCan(sql, context.userId, "credit", "view");
+    const own = await activeMember(sql, context.userId);
     const companyId = await cid(sql, context.userId);
     const pol = await policy(sql, companyId);
     const tiieRows = await sql<{ date: string; rate: string }>`
@@ -767,10 +772,12 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       due_date: string;
       credit_due: string | null;
     }>`
-      select amount::text, residual::text, coalesce(currency,'MXN') as currency, due_date::text, credit_due::text
-      from invoices
-      where company_id = ${companyId} and kind = 'customer' and coalesce(inv_class,'product') = 'product'
-        and state = 'open' and residual > 0.009 and amount > 0
+      select i.amount::text, i.residual::text, coalesce(i.currency,'MXN') as currency, i.due_date::text, i.credit_due::text
+      from invoices i
+      join partners p on p.id = i.partner_id
+      where i.company_id = ${companyId} and i.kind = 'customer' and coalesce(i.inv_class,'product') = 'product'
+        and i.state = 'open' and i.residual > 0.009 and i.amount > 0
+        and (${own.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;
     const today = todayMx();
     type Bucket = { month: string; n: number; saldo: number; saldoMxnDocs: number; saldoUsdDocs: number; interesMensual: number };

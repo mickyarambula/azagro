@@ -571,7 +571,9 @@ export const sendVendorRfq = createServerFn({ method: "POST" })
   )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
-    await assertCan(sql, context.userId, "purchases", "edit");
+    // Elegir/enviar/aplicar proveedor es un paso DENTRO de la solicitud: quien
+    // la edita (quotes:edit) la termina sola, sin pedirle un clic a compras.
+    await assertCan(sql, context.userId, "quotes", "edit");
     const companyId = await cid(sql, context.userId);
     await ensure(sql);
     await assertRequestOpen(sql, companyId, data.requestId);
@@ -635,7 +637,9 @@ export const pickVendor = createServerFn({ method: "POST" })
   .validator(z.object({ requestId: z.number(), productId: z.number(), supplierId: z.number(), unitPrice: z.number() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
-    await assertCan(sql, context.userId, "purchases", "edit");
+    // Elegir/enviar/aplicar proveedor es un paso DENTRO de la solicitud: quien
+    // la edita (quotes:edit) la termina sola, sin pedirle un clic a compras.
+    await assertCan(sql, context.userId, "quotes", "edit");
     const companyId = await cid(sql, context.userId);
     await assertRequestOpen(sql, companyId, data.requestId);
     const before = await sql<{ cost: string; supplier_id: number | null; name: string; code: string }>`
@@ -762,7 +766,9 @@ export const applyCheapest = createServerFn({ method: "POST" })
   .validator(z.object({ requestId: z.number() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
-    await assertCan(sql, context.userId, "purchases", "edit");
+    // Elegir/enviar/aplicar proveedor es un paso DENTRO de la solicitud: quien
+    // la edita (quotes:edit) la termina sola, sin pedirle un clic a compras.
+    await assertCan(sql, context.userId, "quotes", "edit");
     const companyId = await cid(sql, context.userId);
     await assertRequestOpen(sql, companyId, data.requestId);
     const req = await sql<{ rfq_id: number | null }>`
@@ -805,7 +811,9 @@ export const saveLineFreight = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
-    await assertCan(sql, context.userId, "purchases", "edit");
+    // Elegir/enviar/aplicar proveedor es un paso DENTRO de la solicitud: quien
+    // la edita (quotes:edit) la termina sola, sin pedirle un clic a compras.
+    await assertCan(sql, context.userId, "quotes", "edit");
     await assertRequestOpen(sql, companyId, data.requestId);
     await sql`
       update customer_request_lines set freight = ${data.freight}

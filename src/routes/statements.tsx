@@ -165,6 +165,7 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       notes: statementNotes(ratesOf(st)),
     }),
     {
+      module: "statements",
       title: "Estado de cuenta",
       number: `corte ${dateDMY(asOf)}`,
       party: block.partner.name,
@@ -551,6 +552,7 @@ function StatementView({
                 Documento
               </button>
               <SendButton
+                module="statements"
                 title="Estado de cuenta"
                 number={`corte ${st?.asOf ?? ""}`}
                 party={viewing.partner.name}

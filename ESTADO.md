@@ -519,6 +519,31 @@ proveedor?*
 **ABIERTA.** Siempre completas. *Para el dueño: si el proveedor manda 20 de 50
 tambos, o si al cliente se le entrega en dos viajes, ¿se registra por partes?*
 
+### H4e. Almacén tiene más permiso del que dice su descripción (Sesión de permisos, 7-sep-2026)
+**ABIERTA.** `templateAcl("almacen")` (`src/lib/erp/acl.ts`) le da `sales: "edit"`
+y `purchases: "edit"` completos — no solo entregar/recibir/devolver. Con eso
+puede crear y editar el pedido entero (`saveOrder`), cambiar el plazo de
+crédito (`changeOrderTerm`) y crear/editar una OC, aunque la regla dicha es
+"Almacén: inventario y movimientos, nada más". Repuntear el permiso no
+alcanza aquí: `sales`/`purchases` son todo-o-nada, no hay un nivel
+intermedio "solo confirmar entrega/recepción/devolución". *Para el dueño, dos
+caminos, cada uno con su costo:*
+- **(a) Un tercer nivel de `AclLevel`** (hoy `"none" | "view" | "edit"`, se
+  agregaría algo como `"deliver"`) que `assertCan` entienda para `sales` y
+  `purchases`. Costo: toca el tipo central `AclLevel` y cada lugar que lo lee
+  (pantalla de permisos en `/users`, `assertCan`, y las funciones que hoy piden
+  `"edit"` a secas — `deliverSale`/`returnSale`/`receivePurchase` pasarían a
+  aceptar `"deliver"` o `"edit"`, mientras que `saveOrder`/`createPurchase`
+  seguirían exigiendo `"edit"` estricto). Cambia el motor de permisos para
+  todos los módulos, no solo almacén.
+- **(b) Una bandera aparte** (p. ej. `member_acl` gana una columna
+  `deliver_only` o se separan `sales`/`purchases` en dos módulos nuevos,
+  `sales_deliver`/`purchases_receive`, con su propio `assertCan`). Costo: no
+  toca `AclLevel` ni el resto del motor, pero agrega módulos/columnas nuevas
+  solo para este caso, y cada función que hoy es un solo `assertCan` pasaría a
+  aceptar dos permisos válidos (el fino o el de módulo completo).
+No se construye hasta que el dueño elija uno.
+
 ### H5. Lotes y caducidad
 **ABIERTA.** CLAUDE.md los pone "después"; nadie ha dicho cuándo ni cómo.
 *Para el dueño: ¿el sistema tiene que saber de qué lote es cada tambo y cuándo

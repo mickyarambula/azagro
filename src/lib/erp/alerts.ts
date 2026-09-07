@@ -229,12 +229,22 @@ export const getMailProfile = createServerFn({ method: "GET" })
 
 export const sendDirectMail = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ to: z.string(), subject: z.string(), text: z.string() }))
+  .validator(
+    z.object({
+      to: z.string(),
+      subject: z.string(),
+      text: z.string(),
+      // El documento que se envía manda: cotización, pedido, OC/RFQ, factura o
+      // estado de cuenta — el mismo permiso que ya edita ese documento, no
+      // uno fijo de cartera para todos (SESIÓN D, hallazgo D).
+      module: z.enum(["quotes", "sales", "purchases", "credit", "statements"]),
+    }),
+  )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
-    // Escribir a nombre de la empresa exige permiso de cartera, no basta la sesión.
-    await assertCan(sql, context.userId, "credit", "edit");
+    // Escribir a nombre de la empresa exige poder editar el documento que se envía.
+    await assertCan(sql, context.userId, data.module, "edit");
     const acc = await mailAccount(sql, companyId);
     const to = data.to.split(/[,;]/).map((s) => s.trim()).filter((s) => s.includes("@"));
     if (!to.length) throw new Error("Falta el correo destino");

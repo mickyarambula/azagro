@@ -530,6 +530,7 @@ function Page() {
                     <p className="text-[11px] text-muted">No incluye al cliente</p>
                     <div className="mt-2">
                       <SendButton
+                        module="quotes"
                         label={`Enviar a ${s.name}`}
                         title="Solicitud de cotización"
                         number={data.rfq!.name}

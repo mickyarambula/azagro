@@ -361,6 +361,7 @@ function Page() {
                                 notes: PURCHASE_ORDER_NOTE,
                               }),
                               {
+                                module: "purchases",
                                 title: "Orden de compra",
                                 number: o.name,
                                 party: o.partner,
@@ -374,6 +375,7 @@ function Page() {
                           Documento
                         </button>
                         <SendButton
+                          module="purchases"
                           title="Orden de compra"
                           number={o.name}
                           party={o.partner}

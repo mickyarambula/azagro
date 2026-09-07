@@ -187,6 +187,7 @@ export function pathModule(pathname: string): ModuleId {
   if (pathname.startsWith("/cpo")) return "sales";
   if (pathname.startsWith("/solicitudes")) return "quotes";
   if (pathname.startsWith("/cotizador")) return "quotes";
+  if (pathname.startsWith("/quotes")) return "quotes";
   if (pathname.startsWith("/rfq")) return "purchases";
   if (pathname.startsWith("/sales")) return "sales";
   if (pathname.startsWith("/purchases")) return "purchases";

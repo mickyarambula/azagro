@@ -66,7 +66,10 @@ function openOutside(href: string) {
   a.remove();
 }
 
+export type SendModule = "quotes" | "sales" | "purchases" | "credit" | "statements";
+
 export function SendButton({
+  module,
   title,
   number,
   party,
@@ -81,6 +84,7 @@ export function SendButton({
   fxRate,
   amount,
 }: {
+  module: SendModule;
   title: string;
   number: string;
   party: string;
@@ -194,7 +198,7 @@ export function SendButton({
                   onClick={async () => {
                     setNotice(null);
                     try {
-                      const r = await sendDirectMail({ data: { to: toEmail, subject: `${title} ${number}`, text } });
+                      const r = await sendDirectMail({ data: { to: toEmail, subject: `${title} ${number}`, text, module } });
                       setNotice(r.notice);
                     } catch (e) {
                       setNotice(e instanceof Error ? e.message : "No se pudo enviar");

@@ -72,6 +72,7 @@ function Page() {
         {data.invited.map((s) => (
           <SendButton
             key={s.id}
+            module="purchases"
             title="Solicitud de cotización"
             number={data.rfq.name}
             party={s.name}
