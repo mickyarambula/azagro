@@ -280,18 +280,18 @@ export function statementSheet(opts: {
     .filter((s) => s.rows.length)
     .map((s) => {
       const head = s.headers
-        .map((h, i) => `<th class="${i < 2 ? "" : "r"}">${escapeHtml(h)}</th>`)
+        .map((h, i) => `<th class="${i < 3 ? "" : "r"}">${escapeHtml(h)}</th>`)
         .join("");
       const body = s.rows
         .map(
           (cells) =>
             `<tr>${cells
-              .map((c, i) => `<td class="${i < 2 ? "" : "r"}">${escapeHtml(c)}</td>`)
+              .map((c, i) => `<td class="${i < 3 ? "" : "r"}">${escapeHtml(c)}</td>`)
               .join("")}</tr>`,
         )
         .join("");
       const tot = `<tr class="totline">${s.totals
-        .map((c, i) => `<td class="${i < 2 ? "" : "r"}">${escapeHtml(c)}</td>`)
+        .map((c, i) => `<td class="${i < 3 ? "" : "r"}">${escapeHtml(c)}</td>`)
         .join("")}</tr>`;
       return `<p class="cur-h">Moneda: ${escapeHtml(s.currency)}</p>
         <table class="wide"><thead><tr>${head}</tr></thead><tbody>${body}${tot}</tbody></table>`;

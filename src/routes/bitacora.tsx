@@ -21,6 +21,7 @@ const ACTION: Record<string, string> = {
   "tipo-cambio": "Cambio de tipo de cambio",
   parametros: "Cambio de parámetros",
   "facturar-mora": "Facturó mora (FI)",
+  "folio-fiscal": "Folio fiscal / referencia del proveedor",
   "pronto-pago": "Descuento pronto pago",
   "ajuste-tc": "Ajuste TC (por cobrar/devolver)",
   "diferencial-tc": "Diferencial TC (utilidad)",

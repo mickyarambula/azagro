@@ -1702,6 +1702,9 @@ export const listInvoices = createServerFn({ method: "POST" })
       calc_client: string;
       calc: string;
       circuit_code: string | null;
+      folio_fiscal: string;
+      uuid_fiscal: string;
+      supplier_folio: string;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1716,13 +1719,80 @@ export const listInvoices = createServerFn({ method: "POST" })
         coalesce(i.fega_part, 0)::text as fega_part,
         coalesce(i.calc_client, '') as calc_client,
         coalesce(i.calc, '') as calc,
-        i.circuit_code
+        i.circuit_code,
+        coalesce(i.folio_fiscal, '') as folio_fiscal,
+        coalesce(i.uuid_fiscal, '') as uuid_fiscal,
+        coalesce(i.supplier_folio, '') as supplier_folio
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}
         and (${kind}::text is null or i.kind = ${kind})
       order by i.due_date, i.id
     `;
+  });
+
+/**
+ * Puente con Compaq: el folio/UUID del CFDI que timbra Compaq (facturas de
+ * cliente) o el folio de la factura del proveedor (facturas de compra), capturados
+ * DESPUÉS de emitido el documento porque Compaq timbra más tarde. Vacío no es
+ * error: es "todavía no se timbra". Sirve tanto para capturar la primera vez
+ * como para corregir; las dos veces quedan en bitácora con el antes y el después.
+ */
+export const saveInvoiceReference = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(
+    z.object({
+      invoiceId: z.number(),
+      folioFiscal: z.string().optional(),
+      uuidFiscal: z.string().optional(),
+      supplierFolio: z.string().optional(),
+    }),
+  )
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    await ensureInvoiceExtras(sql);
+    const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "credit", "edit");
+    const inv = await sql<{
+      id: number;
+      kind: string;
+      name: string;
+      folio_fiscal: string;
+      uuid_fiscal: string;
+      supplier_folio: string;
+    }>`
+      select id, kind, name, coalesce(folio_fiscal,'') as folio_fiscal, coalesce(uuid_fiscal,'') as uuid_fiscal,
+        coalesce(supplier_folio,'') as supplier_folio
+      from invoices where id = ${data.invoiceId} and company_id = ${m.company_id} limit 1
+    `;
+    if (!inv[0]) throw new Error("Factura no encontrada");
+    if (data.supplierFolio !== undefined && inv[0].kind !== "supplier") {
+      throw new Error("El folio del proveedor solo aplica a facturas de proveedor.");
+    }
+    if ((data.folioFiscal !== undefined || data.uuidFiscal !== undefined) && inv[0].kind !== "customer") {
+      throw new Error("El folio fiscal y el UUID solo aplican a facturas de cliente.");
+    }
+    const folioFiscal = data.folioFiscal !== undefined ? data.folioFiscal.trim() : inv[0].folio_fiscal;
+    const uuidFiscal = data.uuidFiscal !== undefined ? data.uuidFiscal.trim() : inv[0].uuid_fiscal;
+    const supplierFolio = data.supplierFolio !== undefined ? data.supplierFolio.trim() : inv[0].supplier_folio;
+    await sql`
+      update invoices set folio_fiscal = ${folioFiscal}, uuid_fiscal = ${uuidFiscal}, supplier_folio = ${supplierFolio}
+      where id = ${inv[0].id}
+    `;
+    const describe = (folio: string, uuid: string, supplier: string) =>
+      [folio ? `folio fiscal ${folio}` : "", uuid ? `UUID ${uuid}` : "", supplier ? `folio proveedor ${supplier}` : ""]
+        .filter(Boolean)
+        .join(" · ") || "sin captura";
+    await writeAudit(sql, {
+      companyId: m.company_id,
+      userId: context.userId,
+      action: "folio-fiscal",
+      entity: "invoice",
+      entityId: inv[0].id,
+      name: inv[0].name,
+      detail: `${describe(inv[0].folio_fiscal, inv[0].uuid_fiscal, inv[0].supplier_folio)} → ${describe(folioFiscal, uuidFiscal, supplierFolio)}`,
+    });
+    return { ok: true };
   });
 
 export const registerPayment = createServerFn({ method: "POST" })

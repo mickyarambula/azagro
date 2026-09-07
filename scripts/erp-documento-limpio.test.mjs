@@ -237,7 +237,7 @@ test("cableado: estado de cuenta", () => {
 // Copia de statementPaperRow / statementPaperTotals (doc-text.ts).
 const PAPER_DASH = "—";
 const PAPER_PENDING = "Pendiente de cálculo";
-const STATEMENT_PAPER_HEADERS = ["Serie", "Folio", "Fecha", "Vence", "Interés desde", "Cargo", "Abonos", "Saldo", "Fecha pago", "Días vencidos (desde interés)", "Interés s/ días", "Comisión + FEGA", "Total int+FEGA"];
+const STATEMENT_PAPER_HEADERS = ["Serie", "Folio", "Folio fiscal", "Fecha", "Vence", "Interés desde", "Cargo", "Abonos", "Saldo", "Fecha pago", "Días vencidos (desde interés)", "Interés s/ días", "Comisión + FEGA", "Total int+FEGA"];
 function statementPaperRow(r, cur, withFx) {
   const money = (n) => moneyIn(n, cur);
   const interes = r.sinMora ? PAPER_DASH : !r.vencido ? "—" : r.sinTiie ? PAPER_PENDING : Math.abs(r.interes) > 0.009 ? money(r.interes) : "—";
@@ -245,7 +245,7 @@ function statementPaperRow(r, cur, withFx) {
   const comision = r.sinMora ? PAPER_DASH : !r.vencido ? "—" : pend ? PAPER_PENDING : r.comisionFega > 0.009 ? money(r.comisionFega) : "—";
   const total = r.sinMora ? PAPER_DASH : !r.vencido ? "—" : pend ? PAPER_PENDING : Math.abs(r.totalFinanciero) > 0.009 ? money(r.totalFinanciero) : "—";
   const cells = [
-    r.serie || "—", r.folio || r.name, dateDMY(r.date), dateDMY(r.due_date), r.sinMora ? PAPER_DASH : dateDMY(r.moraDue),
+    r.serie || "—", r.folio || r.name, r.folio_fiscal || "—", dateDMY(r.date), dateDMY(r.due_date), r.sinMora ? PAPER_DASH : dateDMY(r.moraDue),
     money(r.cargo), r.abono ? money(r.abono) : "—", money(r.saldo),
     r.fechaPago ? dateDMY(r.fechaPago) : r.fechaAbono ? dateDMY(r.fechaAbono) : "—",
     r.sinMora ? PAPER_DASH : r.vencido ? String(r.daysVencidos) : `faltan ${r.diasPorVencer}`,
@@ -256,50 +256,55 @@ function statementPaperRow(r, cur, withFx) {
 }
 function statementPaperTotals(rows, cur, withFx) {
   const sum = (f) => moneyIn(rows.reduce((s, r) => s + f(r), 0), cur);
-  const cells = ["", "Total", "", "", "", sum((r) => r.cargo), sum((r) => r.abono), sum((r) => r.saldo), "", "", sum((r) => r.interes), sum((r) => r.comisionFega), sum((r) => r.totalFinanciero)];
+  const cells = ["", "Total", "", "", "", "", sum((r) => r.cargo), sum((r) => r.abono), sum((r) => r.saldo), "", "", sum((r) => r.interes), sum((r) => r.comisionFega), sum((r) => r.totalFinanciero)];
   if (withFx) cells.push(sum((r) => r.utCambiaria));
   return cells;
 }
 
-test("el papel del estado de cuenta: dos fechas, sin Plazo, sin pronto pago, días ligados a la fecha de interés", () => {
+test("el papel del estado de cuenta: dos fechas, sin Plazo, sin pronto pago, días ligados a la fecha de interés, folio fiscal", () => {
   assert.ok(!STATEMENT_PAPER_HEADERS.includes("Plazo"), "Plazo armaba la confusión y no le sirve al cliente");
   assert.ok(!STATEMENT_PAPER_HEADERS.some((h) => /pronto pago/i.test(h)), "pronto pago solo en pantalla");
   assert.equal(STATEMENT_PAPER_HEADERS.indexOf("Interés desde"), STATEMENT_PAPER_HEADERS.indexOf("Vence") + 1, "las dos fechas, juntas");
   assert.ok(STATEMENT_PAPER_HEADERS.includes("Días vencidos (desde interés)"), "los días dicen desde cuál fecha se cuentan");
+  assert.equal(STATEMENT_PAPER_HEADERS.indexOf("Folio fiscal"), STATEMENT_PAPER_HEADERS.indexOf("Folio") + 1, "el folio fiscal va junto al folio propio");
   const base = {
-    serie: "FV", folio: "0002", name: "FV-0002", date: "2026-09-03", due_date: "2027-01-01", moraDue: "2027-01-31",
+    serie: "FV", folio: "0002", folio_fiscal: "", name: "FV-0002", date: "2026-09-03", due_date: "2027-01-01", moraDue: "2027-01-31",
     cargo: 156849.85, abono: 0, saldo: 156849.85, fechaPago: null, fechaAbono: null,
     sinMora: false, sinTiie: false, sinPolitica: false, interes: 0, comisionFega: 0, totalFinanciero: 0, utCambiaria: 0,
   };
   // Antes de la fecha de interés: las dos fechas y cuántos días faltan para la segunda.
   const porVencer = statementPaperRow({ ...base, vencido: false, diasPorVencer: 150, daysVencidos: -150 }, "MXN", false);
   assert.equal(porVencer.length, STATEMENT_PAPER_HEADERS.length);
-  assert.equal(porVencer[3], "01/01/2027");
-  assert.equal(porVencer[4], "31/01/2027");
-  assert.equal(porVencer[9], "faltan 150");
-  assert.deepEqual(porVencer.slice(10, 13), ["—", "—", "—"]);
+  assert.equal(porVencer[2], "—", "sin folio fiscal capturado: guion, no error");
+  assert.equal(porVencer[4], "01/01/2027");
+  assert.equal(porVencer[5], "31/01/2027");
+  assert.equal(porVencer[10], "faltan 150");
+  assert.deepEqual(porVencer.slice(11, 14), ["—", "—", "—"]);
+  // Compaq timbró: el folio fiscal capturado sale en su columna, todavía guion no.
+  const timbrada = statementPaperRow({ ...base, folio_fiscal: "A1B2C3", vencido: false, diasPorVencer: 150, daysVencidos: -150 }, "MXN", false);
+  assert.equal(timbrada[2], "A1B2C3");
   // Vencida con interés: los días son desde la fecha de interés.
   const vencida = statementPaperRow({ ...base, vencido: true, diasPorVencer: 0, daysVencidos: 30, interes: 2078.26, comisionFega: 4768.24, totalFinanciero: 6846.5 }, "MXN", false);
-  assert.equal(vencida[9], "30");
-  assert.equal(vencida[10], "$2,078.26");
-  assert.equal(vencida[12], "$6,846.50");
+  assert.equal(vencida[10], "30");
+  assert.equal(vencida[11], "$2,078.26");
+  assert.equal(vencida[13], "$6,846.50");
   // Vencida sin TIIE o sin política: «Pendiente de cálculo», ni guion ni cero.
   const sinTiie = statementPaperRow({ ...base, vencido: true, diasPorVencer: 0, daysVencidos: 30, sinTiie: true }, "MXN", false);
-  assert.deepEqual(sinTiie.slice(10, 13), [PAPER_PENDING, PAPER_PENDING, PAPER_PENDING]);
+  assert.deepEqual(sinTiie.slice(11, 14), [PAPER_PENDING, PAPER_PENDING, PAPER_PENDING]);
   const sinPol = statementPaperRow({ ...base, vencido: true, diasPorVencer: 0, daysVencidos: 30, sinPolitica: true, interes: 2078.26 }, "MXN", false);
-  assert.equal(sinPol[10], "$2,078.26", "el interés sí se sabe");
-  assert.deepEqual(sinPol.slice(11, 13), [PAPER_PENDING, PAPER_PENDING], "comisión y FEGA no");
+  assert.equal(sinPol[11], "$2,078.26", "el interés sí se sabe");
+  assert.deepEqual(sinPol.slice(12, 14), [PAPER_PENDING, PAPER_PENDING], "comisión y FEGA no");
   // Sin mora: no hay fecha de interés, ni días, ni cargos — guion, no pendiente.
   const sinMora = statementPaperRow({ ...base, vencido: true, diasPorVencer: 0, daysVencidos: 40, sinMora: true }, "MXN", false);
-  assert.equal(sinMora[4], PAPER_DASH);
-  assert.equal(sinMora[9], PAPER_DASH);
-  assert.deepEqual(sinMora.slice(10, 13), [PAPER_DASH, PAPER_DASH, PAPER_DASH]);
+  assert.equal(sinMora[5], PAPER_DASH);
+  assert.equal(sinMora[10], PAPER_DASH);
+  assert.deepEqual(sinMora.slice(11, 14), [PAPER_DASH, PAPER_DASH, PAPER_DASH]);
   // USD lleva una columna más, y el total tiene tantas celdas como encabezados.
   assert.equal(statementPaperRow({ ...base, vencido: false, diasPorVencer: 10, daysVencidos: -10, utCambiaria: 120 }, "USD", true).length, STATEMENT_PAPER_HEADERS.length + 1);
   const tot = statementPaperTotals([{ ...base, vencido: true, diasPorVencer: 0, daysVencidos: 30, interes: 2078.26, comisionFega: 4768.24, totalFinanciero: 6846.5 }], "MXN", false);
   assert.equal(tot.length, STATEMENT_PAPER_HEADERS.length);
-  assert.equal(tot[12], "$6,846.50");
-  for (const c of [...porVencer, ...vencida, ...sinTiie, ...sinMora, ...tot, ...STATEMENT_PAPER_HEADERS]) limpio(String(c), "una celda del papel");
+  assert.equal(tot[13], "$6,846.50");
+  for (const c of [...porVencer, ...timbrada, ...vencida, ...sinTiie, ...sinMora, ...tot, ...STATEMENT_PAPER_HEADERS]) limpio(String(c), "una celda del papel");
 });
 
 // Copia de paperOfferOf (quotes.tsx): un solo precio en el papel.

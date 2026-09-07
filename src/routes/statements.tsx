@@ -22,6 +22,7 @@ type Row = Block["rows"][number];
 const EC_HEADERS = [
   "Serie",
   "Folio",
+  "Folio fiscal",
   "Fecha",
   "Plazo",
   "Vencimiento",
@@ -67,6 +68,7 @@ function rowCells(r: Row, cur: string, withFx: boolean) {
   const cells = [
     r.serie || "—",
     r.folio || r.name,
+    r.folio_fiscal || "—",
     dateDMY(r.date),
     r.plazo ? String(r.plazo) : "—",
     dateDMY(r.due_date),
@@ -97,6 +99,7 @@ function totalsCells(rows: Row[], cur: string, withFx: boolean) {
   const cells = [
     "",
     "Total",
+    "",
     "",
     "",
     "",
@@ -600,7 +603,7 @@ function StatementView({
                   <thead className="text-[10px] uppercase tracking-wide text-muted">
                     <tr>
                       {headers.map((h) => (
-                        <th key={h} className={`py-1 font-medium ${h === "Serie" || h === "Folio" ? "" : "text-right"}`}>{h}</th>
+                        <th key={h} className={`py-1 font-medium ${h === "Serie" || h === "Folio" || h === "Folio fiscal" ? "" : "text-right"}`}>{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -611,11 +614,11 @@ function StatementView({
                           {rowCells(r, cur, withFx).map((c, i) => (
                             <td
                               key={`${r.id}-${i}`}
-                              className={`py-1.5 tabular-nums ${i < 2 ? "text-left font-medium" : "text-right"} ${
-                                i === 11 && r.daysVencidos > 0 ? "text-warn" : ""
+                              className={`py-1.5 tabular-nums ${i < 3 ? "text-left font-medium" : "text-right"} ${
+                                i === 12 && r.daysVencidos > 0 ? "text-warn" : ""
                               }`}
                             >
-                              {i === 11 ? (
+                              {i === 12 ? (
                                 <button
                                   type="button"
                                   className="underline decoration-dotted"
@@ -652,7 +655,7 @@ function StatementView({
                     ))}
                     <tr className="border-t border-ink/40">
                       {tot.map((c, i) => (
-                        <td key={`t-${i}`} className={`py-2 text-[12px] font-semibold tabular-nums ${i < 2 ? "" : "text-right"}`}>{c}</td>
+                        <td key={`t-${i}`} className={`py-2 text-[12px] font-semibold tabular-nums ${i < 3 ? "" : "text-right"}`}>{c}</td>
                       ))}
                     </tr>
                   </tbody>

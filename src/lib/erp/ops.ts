@@ -2044,6 +2044,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         opening_paid: string;
         policy_code: string;
         circuit_code: string | null;
+        folio_fiscal: string;
+        uuid_fiscal: string;
       }>`
         select id, name, kind, date::text, due_date::text, credit_due::text, amount::text, residual::text, state, origin,
           currency, amount_fx::text, fx_agreed::text, fx_paid::text, inv_class, fega_charged,
@@ -2051,7 +2053,9 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           coalesce(credit_days, 0)::int as credit_days,
           coalesce(opening_paid, 0)::text as opening_paid,
           coalesce(policy_code, '') as policy_code,
-          circuit_code
+          circuit_code,
+          coalesce(folio_fiscal, '') as folio_fiscal,
+          coalesce(uuid_fiscal, '') as uuid_fiscal
         from invoices
         where company_id = ${cid} and partner_id = ${partner.id}
         order by date, id
@@ -2260,9 +2264,11 @@ export const getLiveStatement = createServerFn({ method: "POST" })
             `Sin bonificación por pronto pago: al ${dateDMY(fechaBono)} ya pasaron ${bono.lived} d desde la emisión y el umbral es ${pol.earlyPayDays} d.`,
           );
         }
-        // Paso 1 del catálogo de circuitos: etiqueta de solo lectura, solo en
-        // pantalla. El cálculo de arriba sigue saliendo de Ajustes.
-        formula.lines.push(`Circuito de financiamiento: ${circuitLabel(inv.circuit_code)} (etiqueta; el cálculo sigue leyendo Ajustes).`);
+        // Desde el paso 3 el circuito ya gobierna la comisión y la base del
+        // financiamiento del precio (congeladas al cotizar). Lo que sigue
+        // leyendo Ajustes es este interés de mora: la TIIE y el spread de
+        // cobro, porque la mora todavía no lee el circuito (Fase 3, pendiente).
+        formula.lines.push(`Circuito de financiamiento: ${circuitLabel(inv.circuit_code)} (la comisión y la base del financiamiento del precio ya salen de aquí; este interés de mora sigue leyendo la TIIE y el spread de Ajustes).`);
         if (sinMora) {
           formula.lines.push(noMoraMessage(politica?.name));
           formula.lines.push(

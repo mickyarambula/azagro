@@ -154,6 +154,7 @@ export function statementSendLine(r: {
 export type StatementPaperRow = {
   serie?: string | null;
   folio?: string | null;
+  folio_fiscal?: string | null;
   name: string;
   date: string;
   due_date: string;
@@ -178,6 +179,7 @@ export type StatementPaperRow = {
 export const STATEMENT_PAPER_HEADERS = [
   "Serie",
   "Folio",
+  "Folio fiscal",
   "Fecha",
   "Vence",
   "Interés desde",
@@ -206,6 +208,7 @@ export function statementPaperRow(r: StatementPaperRow, cur: string, withFx: boo
   const cells = [
     r.serie || "—",
     r.folio || r.name,
+    r.folio_fiscal || "—",
     dateDMY(r.date),
     dateDMY(r.due_date),
     r.sinMora ? PAPER_DASH : dateDMY(r.moraDue),
@@ -227,6 +230,7 @@ export function statementPaperTotals(rows: StatementPaperRow[], cur: string, wit
   const cells = [
     "",
     "Total",
+    "",
     "",
     "",
     "",

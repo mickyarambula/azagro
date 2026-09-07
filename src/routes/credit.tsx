@@ -5,7 +5,7 @@ import { FinanceNav, StatusPill } from "@/components/erp";
 import { Expediente } from "@/components/expediente";
 import { SendButton } from "@/components/send-doc";
 import { getDealTrail } from "@/lib/erp/deal";
-import { listInvoices, registerPayment } from "@/lib/azagro";
+import { listInvoices, registerPayment, saveInvoiceReference } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
 import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, missingChargesMessage, missingRateMessage, nearestRate, noMoraMessage, policyChargesInterest, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
@@ -24,7 +24,15 @@ function Page() {
   const { lado } = useSearch({ from: "/credit" });
   const kind = lado === "pagar" ? "supplier" : lado === "todos" ? "all" : "customer";
   const [status, setStatus] = useState<"all" | "open" | "overdue" | "paid">("all");
+  const [q, setQ] = useState("");
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listInvoices>>>([]);
+  const [folioEdit, setFolioEdit] = useState<{
+    id: number;
+    kind: string;
+    folioFiscal: string;
+    uuidFiscal: string;
+    supplierFolio: string;
+  } | null>(null);
   const [pay, setPay] = useState<{
     id: number;
     amount: number;
@@ -62,13 +70,18 @@ function Page() {
   }, [kind]);
 
   const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
     return rows.filter((r) => {
-      if (status === "paid") return r.state === "paid";
-      if (status === "open") return r.state !== "paid";
-      if (status === "overdue") return r.state !== "paid" && r.days_overdue > 0;
-      return true;
+      if (status === "paid" && r.state !== "paid") return false;
+      if (status === "open" && r.state === "paid") return false;
+      if (status === "overdue" && !(r.state !== "paid" && r.days_overdue > 0)) return false;
+      if (!needle) return true;
+      // Buscar en las dos direcciones: el folio que dio Compaq/el proveedor,
+      // o el nuestro, encuentra el mismo documento.
+      const haystack = [r.name, r.partner, r.folio_fiscal, r.uuid_fiscal, r.supplier_folio].join(" ").toLowerCase();
+      return haystack.includes(needle);
     });
-  }, [rows, status]);
+  }, [rows, status, q]);
 
   const kpis = useMemo(() => {
     const open = rows.filter((r) => r.state !== "paid");
@@ -93,6 +106,12 @@ function Page() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <input
+            className="erp-input"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Folio, folio fiscal, UUID, cliente…"
+          />
           <select className="erp-input" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}>
             <option value="all">Todos los estatus</option>
             <option value="open">Abiertas</option>
@@ -142,7 +161,17 @@ function Page() {
               const terms = (r.credit_days ?? 0) === 0 ? "Contado" : `${r.credit_days} d exactos`;
               return (
                 <tr key={r.id} className="border-t border-line">
-                  <td className="px-4 py-3 font-medium">{r.name}</td>
+                  <td className="px-4 py-3 font-medium">
+                    <p>{r.name}</p>
+                    {r.kind === "customer" && (r.folio_fiscal || r.uuid_fiscal) ? (
+                      <p className="text-[11px] font-normal text-muted">
+                        {[r.folio_fiscal, r.uuid_fiscal].filter(Boolean).join(" · ")}
+                      </p>
+                    ) : null}
+                    {r.kind === "supplier" && r.supplier_folio ? (
+                      <p className="text-[11px] font-normal text-muted">{r.supplier_folio}</p>
+                    ) : null}
+                  </td>
                   <td className="px-3 py-3 text-muted">{r.kind === "customer" ? "Cliente" : "Proveedor"}</td>
                   <td className="px-3 py-3">
                     <Link to="/partners/$partnerId" params={{ partnerId: String(r.partner_id) }} search={{ tab: r.kind === "supplier" ? "proveedores" : "clientes", q: "" }} className="hover:underline">
@@ -215,6 +244,21 @@ function Page() {
                           </button>
                         </>
                       )}
+                      <button
+                        type="button"
+                        className="erp-btn h-8 text-[12px]"
+                        onClick={() =>
+                          setFolioEdit({
+                            id: r.id,
+                            kind: r.kind,
+                            folioFiscal: r.folio_fiscal || "",
+                            uuidFiscal: r.uuid_fiscal || "",
+                            supplierFolio: r.supplier_folio || "",
+                          })
+                        }
+                      >
+                        {r.kind === "customer" ? "Folio fiscal" : "Folio proveedor"}
+                      </button>
                       <button
                         type="button"
                         className="erp-btn h-8 text-[12px]"
@@ -499,6 +543,79 @@ function Page() {
                 Cancelar
               </button>
               <button className="erp-btn-primary flex-1">Aplicar</button>
+            </div>
+          </div>
+        </form>
+      )}
+
+      {folioEdit && (
+        <form
+          className="fixed inset-0 z-50 grid place-items-center bg-ink/40 p-4"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            setError(null);
+            setMsg(null);
+            try {
+              await saveInvoiceReference({
+                data:
+                  folioEdit.kind === "customer"
+                    ? {
+                        invoiceId: folioEdit.id,
+                        folioFiscal: folioEdit.folioFiscal.trim(),
+                        uuidFiscal: folioEdit.uuidFiscal.trim(),
+                      }
+                    : { invoiceId: folioEdit.id, supplierFolio: folioEdit.supplierFolio.trim() },
+              });
+              setFolioEdit(null);
+              setMsg("Folio guardado.");
+              await load();
+            } catch (err) {
+              setError(err instanceof Error ? err.message : "Error");
+            }
+          }}
+        >
+          <div className="w-full max-w-md erp-card p-5" onClick={(e) => e.stopPropagation()}>
+            <p className="text-base font-semibold">
+              {folioEdit.kind === "customer" ? "Folio fiscal del CFDI" : "Folio de la factura del proveedor"}
+            </p>
+            <p className="mt-1 text-[12px] text-muted">
+              Compaq timbra después de emitido este documento. Se captura cuando llegue; en blanco significa que
+              todavía no se ha timbrado, no es un error.
+            </p>
+            {folioEdit.kind === "customer" ? (
+              <>
+                <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+                  Folio fiscal
+                  <input
+                    className="erp-input"
+                    value={folioEdit.folioFiscal}
+                    onChange={(e) => setFolioEdit({ ...folioEdit, folioFiscal: e.target.value })}
+                  />
+                </label>
+                <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+                  UUID
+                  <input
+                    className="erp-input"
+                    value={folioEdit.uuidFiscal}
+                    onChange={(e) => setFolioEdit({ ...folioEdit, uuidFiscal: e.target.value })}
+                  />
+                </label>
+              </>
+            ) : (
+              <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+                Folio del proveedor
+                <input
+                  className="erp-input"
+                  value={folioEdit.supplierFolio}
+                  onChange={(e) => setFolioEdit({ ...folioEdit, supplierFolio: e.target.value })}
+                />
+              </label>
+            )}
+            <div className="mt-4 flex gap-2">
+              <button type="button" className="erp-btn flex-1" onClick={() => setFolioEdit(null)}>
+                Cancelar
+              </button>
+              <button className="erp-btn-primary flex-1">Guardar</button>
             </div>
           </div>
         </form>

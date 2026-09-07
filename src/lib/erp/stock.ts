@@ -38,6 +38,12 @@ export async function ensureInvoiceExtras(sql: Sql) {
   await sql`alter table invoices add column if not exists calc_client text not null default ''`;
   // Paso 1 del catálogo de circuitos: etiqueta por documento (migración 0025).
   await sql`alter table invoices add column if not exists circuit_code text`;
+  // Puente con Compaq (migración 0027): folio fiscal + UUID del CFDI que
+  // timbra Compaq (kind='customer'), folio de la factura del proveedor
+  // (kind='supplier'). Se capturan después de emitido; vacío no es error.
+  await sql`alter table invoices add column if not exists folio_fiscal text not null default ''`;
+  await sql`alter table invoices add column if not exists uuid_fiscal text not null default ''`;
+  await sql`alter table invoices add column if not exists supplier_folio text not null default ''`;
 }
 
 export async function ensureStock(sql: Sql) {
