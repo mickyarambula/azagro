@@ -12,7 +12,7 @@ import { addDays, missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { getDealTrail } from "@/lib/erp/deal";
 import { marginFromPrice, OFFER_LABEL, type MarginMode } from "@/lib/erp/margins";
 import { ladderFor, termLabel, type LadderStep } from "@/lib/erp/ladder";
-import { createQuote, decideQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
+import { createQuote, decideQuote, duplicateQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
 import { creditFromCash, creditFromCashLineal, linealMarginFromPrice, type FinanceBase } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, quoteNotes } from "@/lib/erp/doc-text";
@@ -136,7 +136,8 @@ function Page() {
   // hay dato, y el servidor no deja guardar sin él.
   const [fxRate, setFxRate] = useState(0);
   const [fxFrom, setFxFrom] = useState<string | null>(null);
-  const [validUntil, setValidUntil] = useState(() => addDays(todayMx(), 15));
+  // Sin valor de respaldo: nace vacío y load() la propone de Ajustes.
+  const [validUntil, setValidUntil] = useState("");
   const [priceOffer, setPriceOffer] = useState<Offer>("both");
   const [creditDays, setCreditDays] = useState(0);
   // Circuito de la cotización directa nueva (paso 2): propone la regla según
@@ -246,6 +247,8 @@ function Page() {
       const fx = nearestRate(s.fx.map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), todayMx());
       setFxRate(fx?.rate ?? 0);
       setFxFrom(fx?.date ?? null);
+      // Vigencia propuesta de Ajustes; se pisa sola solo si nadie la tocó todavía.
+      setValidUntil((v) => (v ? v : s.quoteValidityDays > 0 ? addDays(todayMx(), s.quoteValidityDays) : ""));
     }
     setTiie(d.tiieToday?.rate ?? 0);
     setTiieFrom(d.tiieToday?.date ?? null);
@@ -713,6 +716,20 @@ function Page() {
                       >
                         {open ? "Cerrar" : "Ver"}
                       </button>
+                      {!qrow.request_name && (qrow.state === "rejected" || expired) ? (
+                        <button
+                          type="button"
+                          className="erp-btn h-8 text-[12px]"
+                          disabled={busy}
+                          onClick={() =>
+                            duplicateQuote({ data: { quoteId: qrow.id } })
+                              .then((r) => { setMsg(`${r.name} lista como borrador, con tasas y vigencia de hoy.`); return load(); })
+                              .catch((e) => setError(humanError(e)))
+                          }
+                        >
+                          Duplicar con tasas de hoy
+                        </button>
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -1181,7 +1198,8 @@ function Page() {
                           </button>
                           {expired ? (
                             <p className="text-[12px] text-warn">
-                              Vigencia vencida ({dateDMY(qrow.valid_until)}). Renegocia o emite otra cotización. No se puede aceptar.
+                              Vigencia vencida ({dateDMY(qrow.valid_until)}). No se puede aceptar
+                              {qrow.request_name ? ": cotiza de nuevo desde la solicitud." : ': usa "Duplicar con tasas de hoy" arriba.'}
                             </p>
                           ) : (
                             <>

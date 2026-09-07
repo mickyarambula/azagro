@@ -48,6 +48,7 @@ function SettingsBody() {
     collectionSpread: null,
     asrSpread: null,
     earlyPayDays: null,
+    quoteValidityDays: null,
   });
   const [missing, setMissing] = useState<string[]>([]);
   // Escalera de plazos de la cotización interna: texto "0, 30, 60…" tal cual
@@ -387,6 +388,7 @@ function SettingsBody() {
         <Field label="Plazo factura (días) — vencimiento visible al cliente">{numInput("invoiceDays")}</Field>
         <Field label="Plazo financiero / mora (días) — aquí arranca el interés">{numInput("creditDays")}</Field>
         <Field label="Umbral pronto pago (días)">{numInput("earlyPayDays")}</Field>
+        <Field label="Vigencia de cotización (días)">{numInput("quoteValidityDays")}</Field>
         <Field label="Comisión + FEGA (única vez, fracción)">{numInput("fegaRate", "0.0001")}</Field>
         <Field label="Comisión dentro de «comisión + FEGA» (fracción)">{numInput("fegaCommission", "0.0001")}</Field>
         <Field label="Spread mora (factura de intereses, fracción)">{numInput("collectionSpread", "0.0001")}</Field>

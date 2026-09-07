@@ -8,9 +8,10 @@ import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from
 import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
-import { financeBase, financeUnit, linealMarginFromPrice, type FinancingBase } from "@/lib/erp/pricing";
+import { financeBase, financeUnit, linealMarginFromPrice, priceSale, type FinancingBase } from "@/lib/erp/pricing";
+import { quoteStillBlocks } from "@/lib/erp/request-lock";
 import { formatTerms, ladderFor, parseTerms } from "@/lib/erp/ladder";
-import { marginFromPrice, marginOf, marginText, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
+import { marginFromPrice, marginOf, marginText, normalizeMargin, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
 import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
@@ -79,6 +80,7 @@ export const POLICY_FIELDS = [
   // (credit_circuits.commission_rate, paso 3). Un solo lugar decide cada número.
   ["asrSpread", "spread ASR"],
   ["earlyPayDays", "umbral de pronto pago (días)"],
+  ["quoteValidityDays", "vigencia de cotización (días)"],
 ] as const;
 export type PolicyField = (typeof POLICY_FIELDS)[number][0];
 
@@ -117,6 +119,9 @@ async function ensureSettingsColumns(sql: Sql) {
   // Parámetros de negocio: sin default, sin NOT NULL (migración 0019). Vacío = sin capturar.
   await sql`alter table company_settings add column if not exists early_pay_days integer`;
   await sql`alter table company_settings add column if not exists fega_commission numeric(8,4)`;
+  // Vigencia de cotización (migración 0028): la pantalla la propone de aquí,
+  // se congela en quotes.valid_until al cotizar.
+  await sql`alter table company_settings add column if not exists quote_validity_days integer`;
   // Escalera de plazos de la cotización interna (migración 0020 la siembra).
   await sql`alter table company_settings add column if not exists quote_terms text`;
   // El "spread de línea" ya no existe: el financiamiento del precio usa
@@ -148,6 +153,7 @@ export async function readPolicy(sql: Sql, companyId: number): Promise<PolicyRea
     alert_email_on: boolean;
     resend_key: string;
     early_pay_days: number | null;
+    quote_validity_days: number | null;
     quote_terms: string | null;
   }>`
     select credit_days, invoice_days, fega_rate::text, fega_commission::text, collection_spread::text,
@@ -155,7 +161,7 @@ export async function readPolicy(sql: Sql, companyId: number): Promise<PolicyRea
       coalesce(alert_days_cxc,7)::int as alert_days_cxc, coalesce(alert_days_cxp,7)::int as alert_days_cxp,
       coalesce(alert_email,'') as alert_email, coalesce(alert_email_on,true) as alert_email_on,
       coalesce(resend_key,'') as resend_key,
-      early_pay_days, quote_terms
+      early_pay_days, quote_validity_days, quote_terms
     from company_settings where company_id = ${companyId}
   `;
   const r = rows[0];
@@ -168,6 +174,7 @@ export async function readPolicy(sql: Sql, companyId: number): Promise<PolicyRea
     collectionSpread: num(r?.collection_spread),
     asrSpread: num(r?.asr_spread),
     earlyPayDays: num(r?.early_pay_days),
+    quoteValidityDays: num(r?.quote_validity_days),
   };
   const missing: string[] = POLICY_FIELDS.filter(([k]) => values[k] == null).map(([, label]) => label);
   const quoteTerms = parseTerms(r?.quote_terms);
@@ -306,6 +313,7 @@ export const saveSettings = createServerFn({ method: "POST" })
       alertEmailOn: z.boolean().optional(),
       resendKey: z.string().optional(),
       earlyPayDays: z.number().int().min(0).max(365),
+      quoteValidityDays: z.number().int().positive().max(365),
       // Escalera de plazos de la cotización: días separados por coma (0 = contado).
       quoteTerms: z.string(),
     }),
@@ -329,13 +337,13 @@ export const saveSettings = createServerFn({ method: "POST" })
       insert into company_settings (
         company_id, legal_name, rfc, credit_days, invoice_days, fega_rate, fega_commission,
         collection_spread, asr_spread, email_from, phone,
-        alert_days_cxc, alert_days_cxp, alert_email, alert_email_on, early_pay_days, quote_terms
+        alert_days_cxc, alert_days_cxp, alert_email, alert_email_on, early_pay_days, quote_validity_days, quote_terms
       )
       values (
         ${cid}, ${data.legalName}, ${data.rfc}, ${data.creditDays}, ${data.invoiceDays}, ${data.fegaRate}, ${data.fegaCommission},
         ${data.collectionSpread}, ${data.asrSpread},
         ${data.emailFrom}, ${data.phone}, ${data.alertDaysCxc ?? 7}, ${data.alertDaysCxp ?? 7},
-        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays}, ${termsText}
+        ${data.alertEmail ?? ""}, ${data.alertEmailOn ?? true}, ${data.earlyPayDays}, ${data.quoteValidityDays}, ${termsText}
       )
       on conflict (company_id) do update set
         legal_name = excluded.legal_name,
@@ -353,6 +361,7 @@ export const saveSettings = createServerFn({ method: "POST" })
         alert_email = excluded.alert_email,
         alert_email_on = excluded.alert_email_on,
         early_pay_days = excluded.early_pay_days,
+        quote_validity_days = excluded.quote_validity_days,
         quote_terms = excluded.quote_terms
     `;
     const key = (data.resendKey || "").trim();
@@ -369,6 +378,7 @@ export const saveSettings = createServerFn({ method: "POST" })
       ["plazo factura", b.invoiceDays, data.invoiceDays],
       ["plazo financiero", b.creditDays, data.creditDays],
       ["umbral pronto pago", b.earlyPayDays, data.earlyPayDays],
+      ["vigencia de cotización", b.quoteValidityDays, data.quoteValidityDays],
     ];
     const changes = watch.filter(([, a, c]) => a !== c).map(([n, a, c]) => `${n} ${a ?? "sin capturar"} → ${c}`);
     const antesTerms = before.quoteTerms ? formatTerms(before.quoteTerms) : null;
@@ -998,6 +1008,218 @@ export const createQuote = createServerFn({ method: "POST" })
     return { id: q[0]!.id, name, state };
   });
 
+/**
+ * Duplicar una cotización DIRECTA (sin solicitud) muerta — rechazada, o
+ * vencida sin que nadie la decidiera — como borrador nuevo. Hereda cliente,
+ * productos, cantidades y márgenes; LAS TASAS SE PROPONEN DE HOY, no se
+ * copian (mismo camino que cualquier cotización nueva: es exactamente el
+ * cómputo de quoteFromRequest, aquí a partir de la cotización vieja en vez
+ * de una solicitud). La vieja se queda intacta, con su folio y su precio.
+ * Una cotización ligada a una solicitud NO se duplica aquí: se recotiza
+ * desde la solicitud, que se libera sola cuando la cotización muere
+ * (request-lock.ts).
+ */
+export const duplicateQuote = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ quoteId: z.number() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const cid = await companyOf(sql, context.userId);
+    await assertCan(sql, context.userId, "quotes", "edit");
+    const pol = await policy(sql, cid);
+    const today = todayMx();
+    const old = await sql<{
+      id: number;
+      name: string;
+      state: string;
+      valid_until: string;
+      partner_id: number;
+      currency: string;
+      fx_rate: string;
+      credit_days: number;
+      price_offer: string;
+      request_id: number | null;
+      delivery_to: string;
+      circuit_code: string | null;
+    }>`
+      select id, name, state, valid_until::text as valid_until, partner_id, currency, fx_rate::text,
+        coalesce(credit_days,0)::int as credit_days, coalesce(price_offer,'both') as price_offer,
+        request_id, coalesce(delivery_to,'') as delivery_to, circuit_code
+      from quotes where id = ${data.quoteId} and company_id = ${cid}
+    `;
+    if (!old[0]) throw new Error("Cotización no encontrada");
+    if (old[0].request_id) {
+      throw new Error("Esta cotización viene de una solicitud: vuelve a la solicitud y cotiza de nuevo desde ahí.");
+    }
+    if (quoteStillBlocks(old[0].state, old[0].valid_until, today)) {
+      throw new Error(`${old[0].name} sigue vigente. Espera a que se rechace o venza, o revísala.`);
+    }
+    const oldLines = await sql<{
+      product_id: number;
+      code: string;
+      qty: string;
+      uom: string;
+      freight: string;
+      other_cost: string;
+      margin_cash_mode: string | null;
+      margin_cash_pct: string | null;
+      margin_cash_nominal: string | null;
+      margin_credit_mode: string | null;
+      margin_credit_pct: string | null;
+      margin_credit_nominal: string | null;
+    }>`
+      select ql.product_id, p.code, ql.qty::text, coalesce(ql.uom,'') as uom,
+        coalesce(ql.freight,0)::text as freight, coalesce(ql.other_cost,0)::text as other_cost,
+        ql.margin_cash_mode, ql.margin_cash_pct::text as margin_cash_pct, ql.margin_cash_nominal::text as margin_cash_nominal,
+        ql.margin_credit_mode, ql.margin_credit_pct::text as margin_credit_pct, ql.margin_credit_nominal::text as margin_credit_nominal
+      from quote_lines ql join products p on p.id = ql.product_id
+      where ql.quote_id = ${old[0].id}
+      order by ql.id
+    `;
+    if (!oldLines.length) throw new Error("Sin partidas");
+    const sinMargen = oldLines.flatMap((l) => {
+      const falta: string[] = [];
+      if (!marginOf(l, "cash")) falta.push(OFFER_LABEL.cash);
+      if (old[0].credit_days > 0 && !marginOf(l, "credit")) falta.push(OFFER_LABEL.credit);
+      return falta.length ? [`${l.code} (${falta.join(" y ")})`] : [];
+    });
+    if (sinMargen.length) {
+      throw new Error(`No se puede duplicar: ${old[0].name} tiene partidas sin margen guardado (${sinMargen.join(", ")}).`);
+    }
+    // El circuito sigue la misma regla de siempre (plazo → circuito), partiendo
+    // del que ya traía la cotización vieja — igual que reviseQuote.
+    const circuitOfQuote = inheritCircuit(old[0].circuit_code, old[0].credit_days);
+    const terms = await circuitTerms(sql, cid, circuitOfQuote);
+    let tiie = 0;
+    let frozenRates: { costRate: number | null; collectionRate: number | null } = { costRate: null, collectionRate: null };
+    if (old[0].credit_days > 0) {
+      if (terms.financingBase === "costo_margen") {
+        const pick = await priceRateFor(sql, cid, terms, today);
+        if (!pick) throw new Error(missingPriceRateMessage(terms, today, "cotización a crédito"));
+        tiie = pick.rate;
+        frozenRates = { costRate: pick.costRate, collectionRate: pick.collectionRate };
+      } else {
+        const tiiePick = nearestRate(await tiieTableOf(sql, cid), today);
+        if (!tiiePick) throw new Error(missingRateMessage(today, "cotización a crédito"));
+        tiie = tiiePick.rate;
+      }
+    }
+    // Tipo de cambio de hoy (si aplica): se propone, no se copia — mismo
+    // criterio que la TIIE.
+    let fxRate = 1;
+    if (old[0].currency === "USD") {
+      const fxPick = nearestRate((await sql<{ date: string; usd_mxn: string }>`select date::text, usd_mxn::text from fx_rates where company_id = ${cid} order by date`).map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), today);
+      if (!fxPick) throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía. Captúralo en Ajustes → Tipo de cambio antes de duplicar en dólares.");
+      fxRate = fxPick.rate;
+    }
+    await assertCostForCredit(sql, cid, oldLines.map((l) => l.product_id), old[0].credit_days);
+    const costs = await productCosts(sql, cid);
+    const costoDe = (productId: number) => {
+      const p = costs.find((c) => c.id === productId);
+      return resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost;
+    };
+    const priced = oldLines.map((l) => {
+      const cost = costoDe(l.product_id);
+      const mCash = marginOf(l, "cash")!;
+      const mCredit = marginOf(l, "credit");
+      const cashCalc = priceSale({
+        cost,
+        freight: Number(l.freight),
+        other: Number(l.other_cost),
+        days: 0,
+        tiie: Math.max(0, tiie),
+        costSpread: Math.max(0, pol.asrSpread),
+        commissionRate: terms.commissionRate,
+        financingBase: terms.financingBase,
+        marginMode: mCash.mode,
+        marginPct: mCash.pct,
+        marginNominal: mCash.nominal,
+        qty: Number(l.qty),
+      });
+      const creditCalc = mCredit
+        ? priceSale({
+            cost,
+            freight: Number(l.freight),
+            other: Number(l.other_cost),
+            days: old[0].credit_days,
+            tiie: Math.max(0, tiie),
+            costSpread: Math.max(0, pol.asrSpread),
+            commissionRate: terms.commissionRate,
+            financingBase: terms.financingBase,
+            marginMode: mCredit.mode,
+            marginPct: mCredit.pct,
+            marginNominal: mCredit.nominal,
+            qty: Number(l.qty),
+          })
+        : null;
+      const cash = Number(cashCalc.priceUnit.toFixed(4));
+      const credit = creditCalc ? Number(creditCalc.priceUnit.toFixed(4)) : 0;
+      const unitPrice = old[0].credit_days > 0 ? credit : cash;
+      const landed = cashCalc.landedUnit;
+      return {
+        productId: l.product_id,
+        qty: Number(l.qty),
+        uom: l.uom,
+        cost,
+        freight: Number(l.freight),
+        otherCost: Number(l.other_cost),
+        cash,
+        credit,
+        unitPrice,
+        marginCash: normalizeMargin({ mode: mCash.mode, pct: mCash.pct, nominal: mCash.nominal }, landed, 0),
+        marginCredit:
+          mCredit && creditCalc
+            ? normalizeMargin(
+                { mode: mCredit.mode, pct: mCredit.pct, nominal: mCredit.nominal },
+                landed,
+                terms.financingBase === "costo_margen" ? 0 : creditCalc.financeUnit,
+              )
+            : null,
+        financeUnit: creditCalc ? Number(creditCalc.financeUnit.toFixed(4)) : 0,
+        disbursedUnit: creditCalc && old[0].credit_days > 0 ? Number(creditCalc.disbursedUnit.toFixed(4)) : null,
+      };
+    });
+    const total = priced.reduce((s, l) => s + l.qty * l.unitPrice, 0);
+    const n = await sql<{ c: number }>`select count(*)::int as c from quotes where company_id = ${cid}`;
+    const name = `COT-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+    const validUntil = addDays(today, pol.quoteValidityDays);
+    const q = await sql<{ id: number }>`
+      insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, circuit_code,
+        commission_rate, cost_rate, collection_rate)
+      values (${cid}, ${name}, ${old[0].partner_id}, ${today}, ${validUntil}, ${old[0].currency}, ${fxRate}, 'draft',
+        ${`Duplicada de ${old[0].name}`}, ${old[0].delivery_to}, ${total}, ${context.userId}, ${tiie}, ${pol.asrSpread}, ${old[0].credit_days}, ${old[0].price_offer},
+        ${circuitOfQuote}, ${terms.commissionRate}, ${frozenRates.costRate}, ${frozenRates.collectionRate})
+      returning id
+    `;
+    for (const line of priced) {
+      await sql`
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, cash_price, credit_price,
+          margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
+          margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.otherCost}, ${line.cash}, ${line.credit},
+          ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
+          ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
+          ${line.marginCredit ? "captura" : null}, ${line.financeUnit}, ${line.disbursedUnit})
+      `;
+    }
+    await rememberTrade(sql, {
+      companyId: cid,
+      partnerId: old[0].partner_id,
+      kind: "sell",
+      products: priced.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
+    });
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "crear-cotizacion",
+      entity: "quote",
+      entityId: q[0]!.id,
+      name,
+      detail: `Duplicada de ${old[0].name} (${old[0].state === "rejected" ? "rechazada" : "vencida sin decidir"}) · tasas y vigencia de hoy · ${priced.length} partidas · borrador`,
+    });
+    return { id: q[0]!.id, name };
+  });
+
 export const reviseQuote = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -1355,7 +1577,7 @@ export const decideQuote = createServerFn({ method: "POST" })
     if (data.decision !== "reject") {
       const today = todayMx();
       if (q[0].valid_until < today) {
-        throw new Error(`La vigencia ya venció (${dateDMY(q[0].valid_until)}). Renegocia o emite otra cotización.`);
+        throw new Error(`La vigencia ya venció (${dateDMY(q[0].valid_until)}). No se puede aceptar; cotiza de nuevo.`);
       }
     }
     if (data.decision === "reject") {

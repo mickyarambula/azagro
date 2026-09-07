@@ -309,7 +309,9 @@ test("solicitud bloqueada al cotizar: servidor (todas las escrituras) y RFQ", ()
 
 test("solicitud bloqueada en pantalla: banner con liga a la COT y al PV, y campos apagados", () => {
   const ui = src("src/routes/solicitudes.$solicitudId.tsx");
-  assert.ok(ui.includes("const locked = Boolean(request.quote_id);"), "candado = ya tiene cotización");
+  // Candado = ya tiene cotización VIVA; una rechazada o vencida sin decidir
+  // libera sola (Sesión de recotizar, 7-sep-2026 — ver erp-recotizar.test.mjs).
+  assert.ok(ui.includes("const locked = Boolean(request.quote_id) && !quoteDead;"), "candado = ya tiene cotización viva");
   assert.ok(ui.includes("<strong>Esta solicitud ya generó</strong>"), "banner");
   assert.ok(ui.includes(`<Link to="/quotes" search={{ ver: request.quote_id ?? undefined }}`), "liga a la cotización");
   assert.ok(ui.includes(`to="/sales/$orderId"`), "liga al pedido");

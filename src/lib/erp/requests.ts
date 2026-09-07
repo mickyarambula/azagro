@@ -4,12 +4,12 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
-import { addDays, missingRateMessage } from "@/lib/erp/credit";
+import { missingRateMessage } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
 import { rememberTrade } from "@/lib/erp/links";
 import { marginInvalidMessage, marginOf, marginText, marginValid, normalizeMargin, OFFER_LABEL, type StoredMargin } from "@/lib/erp/margins";
-import { assertRequestOpen } from "@/lib/erp/request-lock";
+import { assertRequestOpen, quoteStillBlocks } from "@/lib/erp/request-lock";
 import { circuitLabel, circuitTerms, inheritCircuit, isSelectableCircuit, missingPriceRateMessage, priceRateFor } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -218,13 +218,15 @@ export const getRequest = createServerFn({ method: "POST" })
       where r.id = ${data.id} and r.company_id = ${companyId}
     `;
     if (!head[0]) throw new Error("Solicitud no encontrada");
-    // Si ya generó cotización, la solicitud se muestra bloqueada con la cadena
-    // completa: COT → PV (los pedidos que salieron de esa cotización).
-    let quote: { id: number; name: string; state: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null; circuit_code: string | null } | null = null;
+    // Si ya generó cotización VIVA, la solicitud se muestra bloqueada con la
+    // cadena completa: COT → PV (los pedidos que salieron de esa cotización).
+    // Rechazada o vencida sin decidir: la pantalla la trae para mostrarla y
+    // ofrecer cotizar de nuevo, pero ya no bloquea nada (quoteStillBlocks).
+    let quote: { id: number; name: string; state: string; valid_until: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null; circuit_code: string | null } | null = null;
     let orders: Array<{ id: number; name: string; state: string }> = [];
     if (head[0].quote_id) {
-      const qs = await sql<{ id: number; name: string; state: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null; circuit_code: string | null }>`
-        select id, name, state, coalesce(credit_days,0)::int as credit_days, currency, fx_rate::text,
+      const qs = await sql<{ id: number; name: string; state: string; valid_until: string; credit_days: number; currency: string; fx_rate: string; price_offer: string; accepted_offer: string | null; circuit_code: string | null }>`
+        select id, name, state, valid_until::text as valid_until, coalesce(credit_days,0)::int as credit_days, currency, fx_rate::text,
           coalesce(price_offer,'both') as price_offer, accepted_offer, circuit_code
         from quotes where id = ${head[0].quote_id} and company_id = ${companyId}
       `;
@@ -833,6 +835,9 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       tiie: z.number().nonnegative(),
       spread: z.number().nonnegative(),
       creditDays: z.number().int().nonnegative(),
+      // Se captura por cotización (mismo patrón que createQuote); la pantalla
+      // la propone de Ajustes, nunca un 15 escrito en el servidor.
+      validUntil: z.string(),
       send: z.boolean().optional().default(true),
     }),
   )
@@ -840,6 +845,10 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     const sql = await getSql();
     await assertCan(sql, context.userId, "quotes", "edit");
     const companyId = await cid(sql, context.userId);
+    const today = todayMx();
+    if (data.validUntil < today) {
+      throw new Error(`La vigencia ya venció (${data.validUntil}). Elige hoy o una fecha posterior.`);
+    }
     // Nunca se inventa un número: en dólares hace falta tipo de cambio y a
     // crédito hace falta la TIIE de la tabla (la pantalla la propone con fecha).
     if (data.currency === "USD" && !(data.fxRate > 0)) {
@@ -871,9 +880,19 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         throw new Error(missingRateMessage(todayMx(), "cotización a crédito"));
       }
     }
+    // Una cotización viva (o ya convertida en pedido) no se duplica. Una
+    // rechazada o vencida sin decidir es un callejón sin salida: se libera y
+    // nace una cotización nueva, ligada a la misma solicitud; la vieja se
+    // queda intacta con su folio y su precio (Sesión de recotizar, 7-sep-2026).
+    let previousQuote: { name: string; state: string } | null = null;
     if (req[0].quote_id) {
-      const ex = await sql<{ name: string }>`select name from quotes where id = ${req[0].quote_id}`;
-      throw new Error(`Esta solicitud ya tiene ${ex[0]?.name ?? "una cotización"}. Ábrela en Cotizaciones; no se duplica.`);
+      const ex = await sql<{ name: string; state: string; valid_until: string }>`
+        select name, state, valid_until::text as valid_until from quotes where id = ${req[0].quote_id}
+      `;
+      if (ex[0] && quoteStillBlocks(ex[0].state, ex[0].valid_until, today)) {
+        throw new Error(`Esta solicitud ya tiene ${ex[0].name}. Ábrela en Cotizaciones; no se duplica.`);
+      }
+      if (ex[0]) previousQuote = { name: ex[0].name, state: ex[0].state };
     }
     await ensure(sql);
     const lines = await sql<{
@@ -1000,8 +1019,7 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     const total = priced.reduce((s, l) => s + l.qty * l.unitPrice, 0);
     const n = await sql<{ c: number }>`select count(*)::int as c from quotes where company_id = ${companyId}`;
     const name = `COT-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-    const today = todayMx();
-    const until = addDays(today, 15);
+    const until = data.validUntil;
     const mode = req[0].delivery_mode === "campo" ? "Puesta en campo" : req[0].delivery_mode === "pickup" ? "Recolección del cliente" : "Entrega en bodega";
     const notes = `${mode}${req[0].delivery_to ? ` · ${req[0].delivery_to}` : ""}${data.creditDays ? ` · contado y crédito ${data.creditDays} d` : " · contado"}`;
     const offer = data.creditDays > 0 ? "both" : "cash";
@@ -1046,6 +1064,9 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         credit_days = ${data.creditDays}, currency = ${data.currency}, fx_rate = ${data.fxRate}
       where id = ${data.requestId}
     `;
+    const reemplaza = previousQuote
+      ? ` · reemplaza a ${previousQuote.name} (${previousQuote.state === "rejected" ? "rechazada" : "vencida sin decidir"})`
+      : "";
     await writeAudit(sql, {
       companyId,
       userId: context.userId,
@@ -1053,7 +1074,7 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       entity: "quote",
       entityId: q[0]!.id,
       name,
-      detail: `Desde ${req[0].name} · ${priced.length} partidas · ${data.creditDays > 0 ? `contado y crédito ${data.creditDays} d` : "solo contado"} · total ${total.toFixed(2)} ${data.currency}`,
+      detail: `Desde ${req[0].name}${reemplaza} · ${priced.length} partidas · ${data.creditDays > 0 ? `contado y crédito ${data.creditDays} d` : "solo contado"} · total ${total.toFixed(2)} ${data.currency}`,
     });
     return { id: q[0]!.id, name };
   });

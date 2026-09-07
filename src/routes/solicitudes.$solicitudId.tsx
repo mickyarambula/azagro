@@ -7,7 +7,8 @@ import { MoneyField, QtyField } from "@/components/fields";
 import { OpsPipeline } from "@/components/pipeline";
 import { SendButton } from "@/components/send-doc";
 import { getSettings } from "@/lib/erp/ops";
-import { missingRateMessage, nearestRate } from "@/lib/erp/credit";
+import { quoteStillBlocks } from "@/lib/erp/request-lock";
+import { addDays, missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { saveRfqBid } from "@/lib/erp/rfq";
 import { annualRate, financeUnit, priceSale } from "@/lib/erp/pricing";
 import { marginInvalidMessage, marginOf, marginUnit as marginUnitOf, marginValid, OFFER_LABEL, SIN_MARGEN, type Offer } from "@/lib/erp/margins";
@@ -147,6 +148,9 @@ function Page() {
   const [tiiePct, setTiiePct] = useState(0);
   const [tiieFrom, setTiieFrom] = useState<string | null>(null);
   const [spreadPct, setSpreadPct] = useState(0);
+  // Vigencia de la cotización: Ajustes la propone (vacío = sin capturar,
+  // pantalla detenida), la persona puede adelantarla o atrasarla.
+  const [validUntil, setValidUntil] = useState("");
   // Paso 3: la comisión y la base son DEL CIRCUITO (catálogo), y la tasa que
   // entra al precio sale de la tabla del circuito: TIIE en ASR, tasa de cobro
   // (tabla de dos columnas) en la Línea Santa Rosa.
@@ -228,6 +232,8 @@ function Page() {
         setTiieFrom(tiie?.date ?? null);
         // El spread del precio es el de ASR / de línea (spread de costo), no el de mora.
         setSpreadPct(Number((s.asrSpread * 100).toFixed(2)));
+        // Vigencia propuesta de Ajustes; se pisa sola solo si nadie la tocó todavía.
+        setValidUntil((v) => (v ? v : s.quoteValidityDays > 0 ? addDays(hoy, s.quoteValidityDays) : ""));
         setCircuits(s.circuits);
         setFundingRates(s.fundingRates);
         setTerms(s.quoteTerms);
@@ -258,8 +264,11 @@ function Page() {
   }
 
   const { request, lines, suppliers, quote, orders } = data;
-  // Candado: en cuanto hay cotización la solicitud queda de solo lectura.
-  const locked = Boolean(request.quote_id);
+  // Candado: en cuanto hay cotización VIVA la solicitud queda de solo
+  // lectura. Rechazada o vencida sin decidir: se libera sola, se puede
+  // cotizar de nuevo (Sesión de recotizar, 7-sep-2026).
+  const quoteDead = Boolean(quote) && !quoteStillBlocks(quote!.state, quote!.valid_until, todayMx());
+  const locked = Boolean(request.quote_id) && !quoteDead;
   // "Decidido" = ya hay un plazo real que resolver (tecleado esta sesión,
   // guardado antes, o ya cotizada). Antes de eso el circuito no existe
   // todavía — no es que sea Contado, es que nadie lo ha decidido.
@@ -910,18 +919,30 @@ function Page() {
             </p>
           ) : null;
         })()}
-        <div className="mt-3 flex justify-end">
+        {quoteDead ? (
+          <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+            {quote?.name} {quote?.state === "rejected" ? "se rechazó" : "venció sin decidirse"}. Se conserva tal cual; puedes cotizar de nuevo.
+          </p>
+        ) : null}
+        <div className="mt-3 flex flex-wrap items-end justify-end gap-3">
           {locked ? (
             <Link to="/quotes" search={{ ver: request.quote_id ?? undefined }} className="erp-btn-primary grid place-items-center">
               Ya existe {quote?.name ?? request.quote_name ?? "cotización"} — ver documento
             </Link>
           ) : (
+          <>
+          <label className="grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+            Vigencia
+            <input type="date" className="erp-input" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} />
+          </label>
           <button
             type="button"
             className="erp-btn-primary"
             disabled={
               busy ||
               Boolean(settingsError) ||
+              !validUntil ||
+              validUntil < todayMx() ||
               (days > 0 && !rateFrom) ||
               (days > 0 && sinComision) ||
               (currency === "USD" && !(fxRate > 0)) ||
@@ -940,6 +961,7 @@ function Page() {
                     tiie: ratePct / 100,
                     spread: spreadPct / 100,
                     creditDays: days,
+                    validUntil,
                     send: true,
                   },
                 });
@@ -952,8 +974,9 @@ function Page() {
               }
             }}
           >
-            Crear y enviar cotización al cliente
+            {quoteDead ? "Cotizar de nuevo" : "Crear y enviar cotización al cliente"}
           </button>
+          </>
           )}
         </div>
       </section>
