@@ -32,19 +32,34 @@ export function requestLockedMessage(quoteName: string | null) {
  */
 export function quoteStillBlocks(state: string, validUntil: string, today: string): boolean {
   if (state === "accepted" || state === "partial") return true;
-  if (state === "rejected") return false;
+  if (state === "rejected" || state === "cancelled") return false;
   // draft / sent
   return validUntil >= today;
 }
 
+/**
+ * true si la solicitud misma ya está cancelada (BLOQUE DE DESHACER, paso 1):
+ * se marca y se conserva, pero ninguna función interna vuelve a tocarla.
+ */
+export function requestCancelledMessage() {
+  return "Esta solicitud está cancelada.";
+}
+
 export async function assertRequestOpen(sql: Sql, companyId: number, requestId: number) {
-  const r = await sql<{ quote_id: number | null; quote_name: string | null; quote_state: string | null; quote_valid_until: string | null }>`
-    select r.quote_id, q.name as quote_name, q.state as quote_state, q.valid_until::text as quote_valid_until
+  const r = await sql<{
+    state: string;
+    quote_id: number | null;
+    quote_name: string | null;
+    quote_state: string | null;
+    quote_valid_until: string | null;
+  }>`
+    select r.state, r.quote_id, q.name as quote_name, q.state as quote_state, q.valid_until::text as quote_valid_until
     from customer_requests r
     left join quotes q on q.id = r.quote_id
     where r.id = ${requestId} and r.company_id = ${companyId}
   `;
   if (!r[0]) throw new Error("Solicitud no encontrada");
+  if (r[0].state === "cancelled") throw new Error(requestCancelledMessage());
   if (r[0].quote_id && r[0].quote_state != null && quoteStillBlocks(r[0].quote_state, r[0].quote_valid_until ?? "", todayMx())) {
     throw new Error(requestLockedMessage(r[0].quote_name));
   }

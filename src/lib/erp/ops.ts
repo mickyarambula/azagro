@@ -646,6 +646,8 @@ export const listQuotes = createServerFn({ method: "GET" })
       order_id: number | null;
       order_state: string | null;
       circuit_code: string | null;
+      cancelled_at: string | null;
+      cancel_reason: string | null;
     }>`
       select q.id, q.name, q.partner_id, p.name as partner, q.date::text, q.valid_until::text,
         q.currency, q.fx_rate::text, q.state, q.total::text, q.notes, q.delivery_to,
@@ -656,6 +658,7 @@ export const listQuotes = createServerFn({ method: "GET" })
         coalesce(q.spread,0)::text as spread,
         q.accepted_offer,
         q.circuit_code,
+        q.cancelled_at::text, q.cancel_reason,
         (select name from customer_requests r where r.quote_id = q.id limit 1) as request_name,
         (select name from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_name,
         (select id from sales_orders so where so.quote_id = q.id order by so.id desc limit 1) as order_id,
@@ -1744,6 +1747,48 @@ export const decideQuote = createServerFn({ method: "POST" })
       detail: `${data.decision === "partial" ? "Parcial" : "Aceptada"} · precio ${OFFER_LABEL[offer as Offer]}${days > 0 ? ` ${days} d` : ""} · ${name}${pos.length ? ` · ${pos.join(", ")}` : ""}`,
     });
     return { soId: so[0]!.id, name, state: data.decision, pos };
+  });
+
+/**
+ * BLOQUE DE DESHACER, paso 1: cancelar lo liviano. Una cotización que no
+ * movió nada (sigue en "draft"/"sent") se marca cancelada y se conserva —
+ * nunca se borra (Decisión 15). Una aceptada o parcial ya generó pedido: no
+ * se cancela así (cancela el pedido si sigue en borrador — Decisión 18, la
+ * cotización no revive). Libera la solicitud igual que una rechazada o
+ * vencida (`quoteStillBlocks`, Decisión 19 no aplica aquí — ver
+ * request-lock.ts).
+ */
+export const cancelQuote = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ quoteId: z.number(), reason: z.string().trim().min(1, "Escribe el motivo") }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const cid = await companyOf(sql, context.userId);
+    await assertCan(sql, context.userId, "quotes", "edit");
+    const q = await sql<{ id: number; name: string; state: string }>`
+      select id, name, state from quotes where id = ${data.quoteId} and company_id = ${cid}
+    `;
+    if (!q[0]) throw new Error("Cotización no encontrada");
+    if (q[0].state === "accepted" || q[0].state === "partial") {
+      throw new Error("Ya generó un pedido: no se cancela así. Si el pedido sigue en borrador, cancela el pedido.");
+    }
+    if (q[0].state === "rejected") throw new Error("Ya se cerró (rechazada).");
+    if (q[0].state === "cancelled") throw new Error("Ya está cancelada.");
+    await sql`
+      update quotes
+      set state = 'cancelled', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason}
+      where id = ${q[0].id}
+    `;
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: "cancelar-cotizacion",
+      entity: "quote",
+      entityId: q[0].id,
+      name: q[0].name,
+      detail: data.reason,
+    });
+    return { ok: true, name: q[0].name };
   });
 
 export const listBanks = createServerFn({ method: "GET" })

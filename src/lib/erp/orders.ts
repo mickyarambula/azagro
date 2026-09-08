@@ -212,6 +212,8 @@ export const getOrder = createServerFn({ method: "POST" })
       quote_id: number | null;
       accepted_offer: string | null;
       circuit_code: string | null;
+      cancelled_at: string | null;
+      cancel_reason: string | null;
     }>`
       select id, name, partner_id, date::text, state, location_id, notes, total::text, currency, fx_rate::text,
         delivery_to, term_kind, invoice_days, credit_days, invoice_due::text, credit_due::text,
@@ -223,7 +225,8 @@ export const getOrder = createServerFn({ method: "POST" })
         coalesce(guia_sign,'') as guia_sign,
         coalesce(guia_sign_name,'') as guia_sign_name,
         coalesce(guia_obs,'') as guia_obs,
-        quote_id, accepted_offer, circuit_code
+        quote_id, accepted_offer, circuit_code,
+        cancelled_at::text, cancel_reason
       from sales_orders where id = ${data.id} and company_id = ${companyId}
     `;
     if (!rows[0]) throw new Error("Pedido no encontrado");
@@ -748,6 +751,45 @@ export const saveOrder = createServerFn({ method: "POST" })
       });
     }
     return { id, name, state: data.confirm ? "confirmed" : "draft" };
+  });
+
+/**
+ * BLOQUE DE DESHACER, paso 1: cancelar lo liviano. Un pedido en BORRADOR no
+ * movió inventario ni cartera: se marca cancelado y se conserva — nunca se
+ * borra (Decisión 15). Un pedido ya confirmado sí puede haber generado OC y
+ * FP con él (`decideQuote`): cancelarlo es el paso 4, y necesita la Decisión
+ * 14 construida antes (fuera de este paso).
+ */
+export const cancelOrder = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ soId: z.number(), reason: z.string().trim().min(1, "Escribe el motivo") }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "edit");
+    const so = await sql<{ id: number; name: string; state: string }>`
+      select id, name, state from sales_orders where id = ${data.soId} and company_id = ${companyId}
+    `;
+    if (!so[0]) throw new Error("Pedido no encontrado");
+    if (so[0].state === "cancelled") throw new Error("Ya está cancelado.");
+    if (so[0].state !== "draft") {
+      throw new Error("Solo se cancela un pedido en borrador. Uno confirmado se revierte, no se cancela (todavía no construido).");
+    }
+    await sql`
+      update sales_orders
+      set state = 'cancelled', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason}
+      where id = ${so[0].id}
+    `;
+    await writeAudit(sql, {
+      companyId,
+      userId: context.userId,
+      action: "cancelar-pedido",
+      entity: "sale",
+      entityId: so[0].id,
+      name: so[0].name,
+      detail: data.reason,
+    });
+    return { ok: true, name: so[0].name };
   });
 
 export const nextOrderCode = createServerFn({ method: "GET" })

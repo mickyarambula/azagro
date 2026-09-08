@@ -206,15 +206,13 @@ test("decisión de negocio: tras confirmar, cliente y moneda quedan fijos; preci
   assert.ok(save.includes("fecha ${current[0].date} → ${data.date}"), "la fecha sigue editable con rastro");
 });
 
-test("borrar una solicitud deja el contenido completo escrito en la bitácora", () => {
+test("cancelar una solicitud ya no borra nada — se marca y el motivo queda en la bitácora (BLOQUE DE DESHACER paso 1)", () => {
   const req = src("src/lib/erp/requests.ts");
-  const del = fnBody(req, "deleteRequest");
-  assert.ok(del.includes("const contenido = await sql"), "lee las partidas ANTES de borrar");
-  assert.ok(del.includes("partidas:"), "las partidas quedan en el detalle");
-  assert.ok(del.includes("costo ${Number(l.cost)}"), "con costo");
-  assert.ok(del.includes("prov ${l.supplier}"), "con proveedor elegido");
-  assert.ok(del.includes("margen ${Number(l.margin_pct)}%"), "con margen");
-  assert.ok(del.includes(".slice(0, 900)"), "acotado para no desbordar la bitácora");
+  assert.ok(!req.includes("export const deleteRequest"), "el borrado duro se fue: Decisión 15, nunca se borra");
+  const cancel = fnBody(req, "cancelRequest");
+  assert.ok(cancel.includes("reason: z.string().trim().min(1"), "el motivo es obligatorio, no opcional");
+  assert.ok(cancel.includes("set state = 'cancelled'"), "se marca, no se borra: el contenido completo sigue en la tabla");
+  assert.ok(cancel.includes('action: "cancelar-solicitud"') && cancel.includes("detail: data.reason"), "el motivo queda en la bitácora");
 });
 
 test("los recordatorios de cobro quedan registrados (enviado vs borrador abierto)", () => {

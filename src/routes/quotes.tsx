@@ -7,12 +7,13 @@ import { OpsPipeline } from "@/components/pipeline";
 import { MoneyField, QtyField, UomSelect } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { SendButton } from "@/components/send-doc";
+import { CancelButton } from "@/components/cancel-doc";
 import { Expediente } from "@/components/expediente";
 import { addDays, missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { getDealTrail } from "@/lib/erp/deal";
 import { marginFromPrice, OFFER_LABEL, type MarginMode } from "@/lib/erp/margins";
 import { ladderFor, termLabel, type LadderStep } from "@/lib/erp/ladder";
-import { createQuote, decideQuote, duplicateQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
+import { cancelQuote, createQuote, decideQuote, duplicateQuote, getSettings, listQuotes, reviseQuote } from "@/lib/erp/ops";
 import { creditFromCash, creditFromCashLineal, linealMarginFromPrice, type FinanceBase } from "@/lib/erp/pricing";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, quoteNotes } from "@/lib/erp/doc-text";
@@ -738,6 +739,19 @@ function Page() {
                       >
                         {open ? "Cerrar" : "Ver"}
                       </button>
+                      {!closed ? (
+                        <CancelButton
+                          title="la cotización"
+                          number={qrow.name}
+                          summary={[
+                            `Cliente: ${qrow.partner}`,
+                            `Total: ${moneyIn(qrow.total, cur)}`,
+                            ...qlines.map((l) => `${l.product} ×${l.qty} ${l.uom}`),
+                          ]}
+                          onConfirm={(reason) => cancelQuote({ data: { quoteId: qrow.id, reason } })}
+                          onDone={load}
+                        />
+                      ) : null}
                       {!qrow.request_name && (qrow.state === "rejected" || qrow.state === "cancelled" || expired) ? (
                         <button
                           type="button"

@@ -27,7 +27,7 @@ function fnBody(source, name) {
 // ---------------------------------------------------------------------------
 function quoteStillBlocks(state, validUntil, today) {
   if (state === "accepted" || state === "partial") return true;
-  if (state === "rejected") return false;
+  if (state === "rejected" || state === "cancelled") return false;
   return validUntil >= today;
 }
 
@@ -46,6 +46,11 @@ test("candado — rechazada: libera, sin importar la vigencia", () => {
 test("candado — vencida sin decidir (draft/sent, valid_until < hoy): libera", () => {
   assert.equal(quoteStillBlocks("draft", "2026-08-01", "2026-09-07"), false);
   assert.equal(quoteStillBlocks("sent", "2026-09-06", "2026-09-07"), false);
+});
+
+test("candado — cancelada (BLOQUE DE DESHACER paso 1, Decisión 18): libera igual que rechazada, sin importar la vigencia", () => {
+  assert.equal(quoteStillBlocks("cancelled", "2026-12-31", "2026-09-07"), false);
+  assert.equal(quoteStillBlocks("cancelled", "2026-01-01", "2026-09-07"), false);
 });
 
 test("candado — aceptada: NUNCA libera, pase lo que pase con la vigencia (ya es un pedido)", () => {

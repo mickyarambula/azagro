@@ -9,7 +9,8 @@ import { DocFiles } from "@/components/doc-files";
 import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
 import { deliverSale, receivePurchase, returnSale } from "@/lib/azagro";
-import { changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
+import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
+import { CancelButton } from "@/components/cancel-doc";
 import { duesPreview } from "@/components/order-form";
 import { QtyField } from "@/components/fields";
 import { validateDueDates } from "@/lib/erp/credit";
@@ -36,6 +37,8 @@ function Ficha() {
   const [lookups, setLookups] = useState<OrderLookups | null>(null);
   const [form, setForm] = useState<OrderDraft | null>(null);
   const [state, setState] = useState("draft");
+  const [cancelledAt, setCancelledAt] = useState<string | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
   const [invoices, setInvoices] = useState<Array<{ id: number; name: string; due_date: string; residual: string; state: string }>>([]);
   const [purchases, setPurchases] = useState<
     Array<{ id: number; name: string; partner: string; state: string; total: string; fulfill_kind: string }>
@@ -79,6 +82,8 @@ function Ficha() {
     setLookups(l);
     setPnl(p);
     setState(o.state);
+    setCancelledAt(o.cancelled_at);
+    setCancelReason(o.cancel_reason || "");
     setInvoices(d.invoices);
     setPurchases(d.purchases ?? []);
     setSold(d.lines);
@@ -237,6 +242,17 @@ function Ficha() {
               <button className="erp-btn-primary" disabled={busy} type="button" onClick={() => void persist(true)}>
                 Confirmar
               </button>
+              <CancelButton
+                title="el pedido"
+                number={form.name}
+                summary={[
+                  `Cliente: ${lookups?.customers.find((c) => c.id === form.partnerId)?.name || ""}`,
+                  `Total: ${moneyIn(form.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0), form.currency)}`,
+                  ...sold.map((l) => `${l.code} ${l.name} ×${l.qty} ${l.uom}`),
+                ]}
+                onConfirm={(reason) => cancelOrder({ data: { soId: id, reason } })}
+                onDone={() => navigate({ to: "/sales", search: { tab: "todos", q: "" } })}
+              />
             </>
           )}
           {canEdit && state === "confirmed" && (
@@ -328,6 +344,12 @@ function Ficha() {
           />
         </div>
       </div>
+      {state === "cancelled" ? (
+        <p className="mb-3 rounded-md border border-line bg-cream px-3 py-2 text-[12px] text-ink-soft">
+          Cancelado{cancelledAt ? ` el ${cancelledAt.slice(0, 10)}` : ""}
+          {cancelReason ? ` · Motivo: ${cancelReason}` : ""}
+        </p>
+      ) : null}
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}
       {role === "admin" && error?.includes("límite de crédito") && (
         <label className="mb-3 flex items-center gap-2 text-sm">

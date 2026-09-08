@@ -9,7 +9,7 @@ import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
 import { rememberTrade } from "@/lib/erp/links";
 import { marginInvalidMessage, marginOf, marginText, marginValid, normalizeMargin, OFFER_LABEL, type StoredMargin } from "@/lib/erp/margins";
-import { assertRequestOpen, quoteStillBlocks } from "@/lib/erp/request-lock";
+import { assertRequestOpen, quoteStillBlocks, requestCancelledMessage } from "@/lib/erp/request-lock";
 import { circuitLabel, circuitTerms, inheritCircuit, isSelectableCircuit, missingPriceRateMessage, priceRateFor } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -208,11 +208,15 @@ export const getRequest = createServerFn({ method: "POST" })
       currency: string | null;
       fx_rate: string | null;
       circuit_code: string | null;
+      cancelled_at: string | null;
+      cancelled_by: string | null;
+      cancel_reason: string | null;
     }>`
       select r.id, r.name, r.partner_id, p.name as partner, r.date::text, r.delivery_mode, r.delivery_to,
         r.notes, r.state, r.quote_id, r.rfq_id,
         (select name from quotes where id = r.quote_id) as quote_name,
-        r.location_id, r.credit_days, r.currency, r.fx_rate::text, r.circuit_code
+        r.location_id, r.credit_days, r.currency, r.fx_rate::text, r.circuit_code,
+        r.cancelled_at::text, r.cancelled_by, r.cancel_reason
       from customer_requests r
       join partners p on p.id = r.partner_id
       where r.id = ${data.id} and r.company_id = ${companyId}
@@ -469,9 +473,7 @@ export const updateRequest = createServerFn({ method: "POST" })
       select id, quote_id, rfq_id, state from customer_requests where id = ${data.id} and company_id = ${companyId}
     `;
     if (!req[0]) throw new Error("Solicitud no encontrada");
-    if (req[0].quote_id) {
-      throw new Error("Ya tiene cotización. Corrige la cotización, no la solicitud.");
-    }
+    await assertRequestOpen(sql, companyId, data.id);
     await sql`
       update customer_requests
       set partner_id = ${data.partnerId}, delivery_mode = ${data.deliveryMode},
@@ -513,52 +515,41 @@ export const updateRequest = createServerFn({ method: "POST" })
     return { id: data.id };
   });
 
-export const deleteRequest = createServerFn({ method: "POST" })
+/**
+ * BLOQUE DE DESHACER, paso 1: cancelar lo liviano. Una solicitud sin
+ * inventario ni cartera movidos se marca y se conserva — nunca se borra
+ * (Decisión 15). Sustituye al único borrado duro que tenía el sistema
+ * (`deleteRequest`); mismo alcance (sin cotización viva bloqueando), verbo
+ * distinto. Lo puede hacer quien tenga el permiso del módulo, no solo quien
+ * la capturó (Decisión 24): el rastro (`cancelled_by`, bitácora) dice quién
+ * lo hizo de verdad.
+ */
+export const cancelRequest = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ id: z.number() }))
+  .validator(z.object({ id: z.number(), reason: z.string().trim().min(1, "Escribe el motivo") }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     await assertCan(sql, context.userId, "quotes", "edit");
     const companyId = await cid(sql, context.userId);
     await ensure(sql);
-    const req = await sql<{ id: number; quote_id: number | null; rfq_id: number | null; name: string }>`
-      select id, quote_id, rfq_id, name from customer_requests where id = ${data.id} and company_id = ${companyId}
+    await assertRequestOpen(sql, companyId, data.id);
+    const req = await sql<{ id: number; name: string }>`
+      select id, name from customer_requests where id = ${data.id} and company_id = ${companyId}
     `;
     if (!req[0]) throw new Error("Solicitud no encontrada");
-    if (req[0].quote_id) {
-      throw new Error("Ya tiene cotización. No se borra; ábrela en Cotizaciones.");
-    }
-    // Es el único borrado duro del sistema: el contenido completo queda
-    // escrito en la bitácora antes de desaparecer.
-    const head = await sql<{ partner: string; delivery_mode: string; notes: string }>`
-      select p.name as partner, r.delivery_mode, coalesce(r.notes,'') as notes
-      from customer_requests r join partners p on p.id = r.partner_id
-      where r.id = ${data.id}
+    await sql`
+      update customer_requests
+      set state = 'cancelled', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason}
+      where id = ${data.id} and company_id = ${companyId}
     `;
-    const contenido = await sql<{ code: string; qty: string; uom: string; cost: string; supplier: string | null; margin_pct: string }>`
-      select p.code, l.qty::text, coalesce(l.uom, p.uom) as uom, coalesce(l.cost,0)::text as cost,
-        s.name as supplier, coalesce(l.margin_pct,0)::text as margin_pct
-      from customer_request_lines l
-      join products p on p.id = l.product_id
-      left join partners s on s.id = l.supplier_id
-      where l.request_id = ${data.id}
-      order by l.id
-    `;
-    if (req[0].rfq_id) {
-      await sql`delete from vendor_rfqs where id = ${req[0].rfq_id} and company_id = ${companyId}`;
-    }
-    await sql`delete from customer_requests where id = ${data.id} and company_id = ${companyId}`;
-    const partidas = contenido
-      .map((l) => `${l.code} ×${Number(l.qty)} ${l.uom}${Number(l.cost) ? ` costo ${Number(l.cost)}` : ""}${l.supplier ? ` prov ${l.supplier}` : ""}${Number(l.margin_pct) ? ` margen ${Number(l.margin_pct)}%` : ""}`)
-      .join(" · ");
     await writeAudit(sql, {
       companyId,
       userId: context.userId,
-      action: "borrar-solicitud",
+      action: "cancelar-solicitud",
       entity: "request",
       entityId: data.id,
       name: req[0].name,
-      detail: `${head[0]?.partner ?? ""} · entrega ${head[0]?.delivery_mode ?? ""}${head[0]?.notes ? ` · notas: ${head[0].notes}` : ""} · ${contenido.length} partidas: ${partidas}`.slice(0, 900),
+      detail: data.reason,
     });
     return { ok: true, name: req[0].name };
   });
@@ -854,11 +845,21 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     if (data.currency === "USD" && !(data.fxRate > 0)) {
       throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de cotizar en dólares.");
     }
-    const req = await sql<{ id: number; name: string; partner_id: number; delivery_to: string; delivery_mode: string; quote_id: number | null; circuit_code: string | null }>`
-      select id, name, partner_id, delivery_to, delivery_mode, quote_id, circuit_code from customer_requests
+    const req = await sql<{
+      id: number;
+      name: string;
+      partner_id: number;
+      delivery_to: string;
+      delivery_mode: string;
+      quote_id: number | null;
+      circuit_code: string | null;
+      state: string;
+    }>`
+      select id, name, partner_id, delivery_to, delivery_mode, quote_id, circuit_code, state from customer_requests
       where id = ${data.requestId} and company_id = ${companyId}
     `;
     if (!req[0]) throw new Error("Solicitud no encontrada");
+    if (req[0].state === "cancelled") throw new Error(requestCancelledMessage());
     // Paso 3: el circuito de la cotización (heredado de la solicitud, igual
     // que el plazo) decide comisión, base y de qué tabla sale la tasa; los
     // tres se congelan en la cotización. En ASR la tasa es la TIIE que la

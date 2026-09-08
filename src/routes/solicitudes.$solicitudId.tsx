@@ -15,7 +15,7 @@ import { marginInvalidMessage, marginOf, marginUnit as marginUnitOf, marginValid
 import { ladderFor, termLabel } from "@/lib/erp/ladder";
 import {
   applyCheapest,
-  deleteRequest,
+  cancelRequest,
   getRequest,
   listRequests,
   pickVendor,
@@ -26,6 +26,7 @@ import {
   sendVendorRfq,
   updateRequest,
 } from "@/lib/erp/requests";
+import { CancelButton } from "@/components/cancel-doc";
 import { destText, RequestFields, type RequestDraft } from "@/components/request-form";
 import { Expediente } from "@/components/expediente";
 import { listDeliveryPoints } from "@/lib/erp/locations";
@@ -268,7 +269,12 @@ function Page() {
   // lectura. Rechazada o vencida sin decidir: se libera sola, se puede
   // cotizar de nuevo (Sesión de recotizar, 7-sep-2026).
   const quoteDead = Boolean(quote) && !quoteStillBlocks(quote!.state, quote!.valid_until, todayMx());
-  const locked = Boolean(request.quote_id) && !quoteDead;
+  const cancelled = request.state === "cancelled";
+  // Cancelada cierra todo lo que abre "cotización viva" (mismo candado,
+  // BLOQUE DE DESHACER paso 1) — las dos condiciones nunca coinciden: cancelar
+  // exige que no haya cotización viva bloqueando (assertRequestOpen).
+  const liveQuoteLock = Boolean(request.quote_id) && !quoteDead;
+  const locked = liveQuoteLock || cancelled;
   // "Decidido" = ya hay un plazo real que resolver (tecleado esta sesión,
   // guardado antes, o ya cotizada). Antes de eso el circuito no existe
   // todavía — no es que sea Contado, es que nadie lo ha decidido.
@@ -328,31 +334,28 @@ function Page() {
               >
                 {editing ? "Cerrar corrección" : "Corregir"}
               </button>
-              <button
-                type="button"
-                className="erp-btn text-danger"
-                disabled={busy}
-                onClick={async () => {
-                  if (!window.confirm(`¿Borrar ${request.name}?`)) return;
-                  setBusy(true);
-                  setError(null);
-                  try {
-                    await deleteRequest({ data: { id } });
-                    await navigate({ to: "/solicitudes" });
-                  } catch (e) {
-                    setError(humanError(e));
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                Borrar
-              </button>
+              <CancelButton
+                title="la solicitud"
+                number={request.name}
+                summary={[
+                  `Cliente: ${request.partner}`,
+                  `Entrega: ${deliveryNote}`,
+                  ...lines.map((l) => `${l.code} ${l.product} ×${l.qty} ${l.uom}`),
+                ]}
+                onConfirm={(reason) => cancelRequest({ data: { id, reason } })}
+                onDone={() => navigate({ to: "/solicitudes" })}
+              />
             </>
           )}
         </div>
       </div>
-      {locked && (
+      {cancelled ? (
+        <p className="mb-3 rounded-md border border-line bg-cream px-3 py-2 text-[12px] text-ink-soft">
+          Cancelada{request.cancelled_at ? ` el ${request.cancelled_at.slice(0, 10)}` : ""}
+          {request.cancel_reason ? ` · Motivo: ${request.cancel_reason}` : ""}
+        </p>
+      ) : null}
+      {liveQuoteLock && (
         <div className="mb-4 erp-card border-ok p-3 text-sm">
           <p>
             <strong>Esta solicitud ya generó</strong>{" "}
@@ -931,11 +934,11 @@ function Page() {
           </p>
         ) : null}
         <div className="mt-3 flex flex-wrap items-end justify-end gap-3">
-          {locked ? (
+          {liveQuoteLock ? (
             <Link to="/quotes" search={{ ver: request.quote_id ?? undefined }} className="erp-btn-primary grid place-items-center">
               Ya existe {quote?.name ?? request.quote_name ?? "cotización"} — ver documento
             </Link>
-          ) : (
+          ) : cancelled ? null : (
           <>
           <label className="grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
             Vigencia

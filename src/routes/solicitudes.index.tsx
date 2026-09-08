@@ -1,9 +1,10 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { StatusPill } from "@/components/erp";
+import { CancelButton } from "@/components/cancel-doc";
 import { OpsPipeline } from "@/components/pipeline";
 import { REQUEST_MODES } from "@/components/request-form";
-import { deleteRequest, listRequests } from "@/lib/erp/requests";
+import { cancelRequest, listRequests } from "@/lib/erp/requests";
 import { humanError, qty } from "@/lib/utils";
 
 export const Route = createFileRoute("/solicitudes/")({ component: Page });
@@ -12,7 +13,6 @@ function Page() {
   const navigate = useNavigate();
   const [data, setData] = useState<Awaited<ReturnType<typeof listRequests>> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<number | null>(null);
 
   async function load() {
     setData(await listRequests());
@@ -22,20 +22,6 @@ function Page() {
     void load().catch((e) => setError(humanError(e)));
   }, []);
 
-  async function remove(id: number, name: string) {
-    if (!window.confirm(`¿Borrar ${name}? Se puede si aún no tiene cotización.`)) return;
-    setBusyId(id);
-    setError(null);
-    try {
-      await deleteRequest({ data: { id } });
-      await load();
-    } catch (e) {
-      setError(humanError(e));
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   return (
     <>
       <OpsPipeline current="solicitud" />
@@ -43,7 +29,7 @@ function Page() {
         <div>
           <h1 className="text-xl font-semibold">Solicitudes del cliente</h1>
           <p className="text-sm text-muted">
-            Lo que pidió el cliente. Si te equivocaste al armarla, ábrela y corrige o bórrala.
+            Lo que pidió el cliente. Si te equivocaste al armarla, ábrela y corrige, o cancélala.
           </p>
         </div>
         <Link to="/solicitudes/nuevo" className="erp-btn-primary grid place-items-center">
@@ -93,15 +79,19 @@ function Page() {
                     >
                       Abrir
                     </button>
-                    {r.state !== "quoted" && (
-                      <button
-                        type="button"
-                        className="text-[12px] font-medium text-danger hover:underline disabled:opacity-50"
-                        disabled={busyId === r.id}
-                        onClick={() => void remove(r.id, r.name)}
-                      >
-                        Borrar
-                      </button>
+                    {r.state !== "quoted" && r.state !== "cancelled" && (
+                      <CancelButton
+                        title="la solicitud"
+                        number={r.name}
+                        summary={[
+                          `Cliente: ${r.partner}`,
+                          `Entrega: ${REQUEST_MODES.find((m) => m.id === r.delivery_mode)?.label ?? r.delivery_mode}`,
+                          `${qty(r.lines)} partidas`,
+                        ]}
+                        onConfirm={(reason) => cancelRequest({ data: { id: r.id, reason } })}
+                        onDone={load}
+                        label="Cancelar"
+                      />
                     )}
                   </div>
                 </td>
