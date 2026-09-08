@@ -3,7 +3,7 @@ import { todayMx } from "@/lib/utils";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
-export type StockMoveType = "receipt" | "delivery" | "internal" | "adjust" | "opening" | "return";
+export type StockMoveType = "receipt" | "delivery" | "internal" | "adjust" | "opening" | "return" | "reversal";
 
 const REF_PREFIX: Record<StockMoveType, string> = {
   receipt: "REC",
@@ -12,6 +12,10 @@ const REF_PREFIX: Record<StockMoveType, string> = {
   adjust: "AJ",
   opening: "INI",
   return: "DEV",
+  // BLOQUE DE DESHACER: una reversa de inventario no es un ajuste (eso es una
+  // corrección de conteo) ni una devolución. Tipo propio, folio propio, y la
+  // liga al movimiento original en stock_moves.reverses_id.
+  reversal: "REV",
 };
 
 /**
@@ -209,6 +213,8 @@ export async function postStock(
     locationTo?: number | null;
     unitCost?: number;
     date?: string;
+    /** BLOQUE DE DESHACER: el movimiento que este contrario revierte. */
+    reversesId?: number | null;
   },
 ) {
   await ensureStock(sql);
@@ -265,11 +271,11 @@ export async function postStock(
   await sql`
     insert into stock_moves (
       company_id, ref, move_type, date, origin, location_from, location_to,
-      product_id, quantity, unit_cost, created_by
+      product_id, quantity, unit_cost, created_by, reverses_id
     )
     values (
       ${opts.companyId}, ${ref}, ${opts.moveType}, ${day}, ${opts.origin},
-      ${fromId}, ${toId}, ${opts.productId}, ${qty}, ${unitCost}, ${opts.userId}
+      ${fromId}, ${toId}, ${opts.productId}, ${qty}, ${unitCost}, ${opts.userId}, ${opts.reversesId ?? null}
     )
   `;
 

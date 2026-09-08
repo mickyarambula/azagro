@@ -64,6 +64,8 @@ const ACTION: Record<string, string> = {
   "revertir-pago": "Revirtió cobro / pago",
   "revertir-atc": "Revirtió ajuste TC",
   "revertir-rechazado": "Reversa RECHAZADA",
+  // Paso 6: reversa de recepción.
+  "revertir-recepcion": "Revirtió recepción",
 };
 
 type Payload = Awaited<ReturnType<typeof listAudit>>;

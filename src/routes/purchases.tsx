@@ -9,8 +9,9 @@ import { SendButton } from "@/components/send-doc";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
 import { createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
-import { CancelChainButton } from "@/components/cancel-doc";
+import { CancelChainButton, ReceiptReversalButton } from "@/components/cancel-doc";
 import { cancelChainPreview, cancelPurchaseOrderChain } from "@/lib/erp/cancel";
+import { receiptReversalPreview, reverseReceipt } from "@/lib/erp/receipt-reversal";
 import { exportCsv } from "@/lib/export-csv";
 import { moneyIn, num, todayMx } from "@/lib/utils";
 
@@ -395,6 +396,14 @@ function Page() {
                           extra={destLabel ? `Entregar en: ${destLabel}` : ""}
                           lines={qlines.map((l) => ({ qty: Number(l.qty), uom: l.uom, name: `${l.product}${l.deliver_to ? ` → ${l.deliver_to}` : ""}`, unitPrice: Number(l.unit_price) }))}
                         />
+                        {o.state === "done" && o.fulfill_kind !== "direct" && (
+                          <ReceiptReversalButton
+                            poName={o.name}
+                            load={() => receiptReversalPreview({ data: { poId: o.id } })}
+                            onConfirm={(reason) => reverseReceipt({ data: { poId: o.id, reason } })}
+                            onDone={load}
+                          />
+                        )}
                         {o.state === "confirmed" && (
                           <CancelChainButton
                             title="la orden de compra"

@@ -437,3 +437,170 @@ export function ReversalButton(props: {
     </>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Paso 6: revertir una recepción. Enseña qué sale del inventario, al costo
+// con el que entró, y — Decisión 20 — cómo queda el promedio con su número,
+// incluido lo que se queda de más en el valor.
+// ---------------------------------------------------------------------------
+type ReceiptLineView = {
+  productId: number; code: string; product: string; uom: string;
+  qty: number; unitCost: number; value: number; moveRef: string; location: string;
+  qtyBefore: number; qtyAfter: number; avgNow: number;
+  avgBeforeReceipt: number | null; valueNow: number; valueAfter: number; avgLeftover: number | null;
+};
+export type ReceiptReversalView = {
+  po: { id: number; name: string; partner: string; state: string; date: string; currency: string };
+  lines: ReceiptLineView[];
+  invoice: { id: number; name: string; amount: number; residual: number; currency: string } | null;
+  blockers: string[];
+  allowed: boolean;
+  role: string;
+};
+
+export function ReceiptReversalButton(props: {
+  poName: string;
+  load: () => Promise<ReceiptReversalView>;
+  onConfirm: (reason: string) => Promise<unknown>;
+  onDone?: () => void | Promise<void>;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [chain, setChain] = useState<ReceiptReversalView | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openDialog() {
+    setError(null);
+    setChain(null);
+    setOpen(true);
+    try {
+      setChain(await props.load());
+    } catch (e) {
+      setError(humanError(e));
+    }
+  }
+  async function confirm() {
+    if (!reason.trim()) {
+      setError("El motivo es obligatorio.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await props.onConfirm(reason.trim());
+      setOpen(false);
+      setReason("");
+      await props.onDone?.();
+    } catch (e) {
+      setError(humanError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const blocked = Boolean(chain?.blockers.length);
+  const canConfirm = Boolean(chain) && !blocked && Boolean(chain?.allowed) && Boolean(reason.trim()) && !busy;
+  const m = (n: number, cur = "MXN") => `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${cur}`;
+  const m4 = (n: number) => `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+
+  return (
+    <>
+      <button type="button" className="erp-btn h-8 text-[12px] text-danger" disabled={props.disabled} onClick={() => void openDialog()}>
+        Revertir recepción
+      </button>
+      {open ? (
+        <div className="fixed inset-0 z-[90] grid place-items-center bg-ink/40 p-4" onClick={() => !busy && setOpen(false)}>
+          <div className="w-full max-w-lg rounded-xl border border-line bg-cream p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold">
+              Revertir la recepción de {props.poName}
+              {chain ? ` · ${chain.po.partner} · recibida el ${chain.po.date}` : ""}
+            </h2>
+            {!chain && !error ? <p className="mt-2 text-[12px] text-muted">Revisando qué entró con esta orden…</p> : null}
+
+            {chain && blocked ? (
+              <div className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+                <p className="font-semibold">No se puede revertir.</p>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {chain.blockers.map((b, i) => (
+                    <li key={i}>{b}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-muted">Este intento quedó en la bitácora.</p>
+              </div>
+            ) : null}
+
+            {chain && !blocked ? (
+              <>
+                <p className="mt-3 text-[12px] font-semibold">Sale del inventario (queda la entrada, la salida y la liga entre las dos):</p>
+                <ul className="list-disc space-y-1 pl-5 text-[12px] text-ink-soft">
+                  {chain.lines.map((l) => (
+                    <li key={l.productId}>
+                      {l.code} {l.product} · {l.qty} {l.uom} · {l.location} · al costo con el que entró {m(l.unitCost, chain.po.currency)} = {m(l.value, chain.po.currency)}
+                      <br />
+                      Existencia: {l.qtyBefore} → {l.qtyAfter} {l.uom} · Valor: {m(l.valueNow)} → {m(l.valueAfter)}
+                      <br />
+                      Promedio: {m4(l.avgNow)} → {m4(l.avgNow)} (no se mueve: solo las entradas lo promedian)
+                      {l.avgBeforeReceipt != null ? (
+                        <>
+                          <br />
+                          <span className="text-warn">
+                            Antes de esta recepción era {m(l.avgBeforeReceipt)}. Se quedan {m(l.avgLeftover ?? 0)} de más en el valor de las {l.qtyAfter} {l.uom} que quedan. Eso no se corrige solo.
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <br />
+                          <span className="text-muted">Entró más mercancía después, así que el promedio de antes de esta recepción no se puede reconstruir con exactitud; no se estima.</span>
+                        </>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {chain.invoice ? (
+                  <>
+                    <p className="mt-3 text-[12px] font-semibold">Se revierte también:</p>
+                    <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                      <li>
+                        {chain.invoice.name} · {m(chain.invoice.amount, chain.invoice.currency)} · saldo {m(chain.invoice.residual, chain.invoice.currency)} · sin abonos → se marca revertida
+                      </li>
+                    </ul>
+                  </>
+                ) : null}
+                <p className="mt-3 text-[12px] text-muted">
+                  La orden vuelve a &quot;confirmada, por recibir&quot;: se puede recibir otra vez, y ahí nacerá su deuda nueva.
+                </p>
+                <p className={`mt-3 text-[12px] ${chain.allowed ? "text-muted" : "text-danger"}`}>
+                  {chain.allowed
+                    ? "Esto revierte inventario: es de administrador o gerencia — tú puedes hacerlo."
+                    : "Esto revierte inventario: es solo de administrador o gerencia. Pídeselo a uno de ellos."}
+                </p>
+                <label className="mt-3 grid gap-1 text-[12px] font-medium">
+                  Motivo (obligatorio)
+                  <textarea className="erp-input mt-1 w-full" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Por qué se revierte…" />
+                </label>
+                <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+                  Lo que no se puede deshacer después: la salida también queda para siempre. No estás borrando la entrada, estás agregando el movimiento
+                  contrario — y el promedio no regresa solo.
+                </p>
+              </>
+            ) : null}
+
+            {error ? <p className="mt-2 text-[12px] text-danger">{error}</p> : null}
+            <div className="mt-4 flex gap-2">
+              {chain && !blocked ? (
+                <button type="button" className="erp-btn-primary" disabled={!canConfirm} onClick={() => void confirm()}>
+                  Confirmar reversa
+                </button>
+              ) : null}
+              <button type="button" className="erp-btn ml-auto" disabled={busy} onClick={() => setOpen(false)}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}

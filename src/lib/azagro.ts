@@ -873,10 +873,15 @@ export const listInventory = createServerFn({ method: "GET" })
       from_name: string | null;
       to_name: string | null;
       product_id: number;
+      reverses_ref: string | null;
+      reversed_by_ref: string | null;
     }>`
       select sm.id, sm.ref, sm.move_type, sm.date::text, sm.origin, p.code as product,
         sm.quantity::text, coalesce(sm.unit_cost, 0)::text as unit_cost,
-        lf.name as from_name, lt.name as to_name, sm.product_id
+        lf.name as from_name, lt.name as to_name, sm.product_id,
+        -- BLOQUE DE DESHACER: el par entrada↔reversa se ve en los dos renglones.
+        (select o.ref from stock_moves o where o.id = sm.reverses_id) as reverses_ref,
+        (select r.ref from stock_moves r where r.reverses_id = sm.id limit 1) as reversed_by_ref
       from stock_moves sm
       join products p on p.id = sm.product_id
       left join locations lf on lf.id = sm.location_from
@@ -1199,9 +1204,14 @@ export async function bornSupplierDebt(
   sql: Sql,
   opts: { companyId: number; userId: string; poId: number; poName: string; date?: string },
 ) {
+  // Una FP REVERTIDA no cuenta como "ya existe": si se revirtió la recepción
+  // (paso 6) y la mercancía se vuelve a recibir, tiene que nacer deuda nueva.
+  // Sin este filtro, la mercancía entraría sin cuenta por pagar — el mismo
+  // defecto que corrigió la Decisión 14, colándose por otra puerta.
   const already = await sql<{ id: number }>`
     select id from invoices
     where company_id = ${opts.companyId} and kind = 'supplier' and origin = ${opts.poName}
+      and state <> 'reversed'
     limit 1
   `;
   if (already[0]) return null;

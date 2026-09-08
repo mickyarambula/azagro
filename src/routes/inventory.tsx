@@ -26,6 +26,7 @@ const MOVE_LABEL: Record<string, string> = {
   adjust: "Ajuste",
   opening: "Saldo inicial",
   return: "Devolución",
+  reversal: "Reversa",
 };
 
 function isStock(t: string) {
@@ -549,7 +550,7 @@ function Page() {
             <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Entró por</p>
             <ul className="mt-1">
               {kardex
-                .filter((m) => m.inQty && (m.move_type === "receipt" || m.move_type === "return" || m.move_type === "opening" || m.move_type === "internal"))
+                .filter((m) => m.inQty && (m.move_type === "receipt" || m.move_type === "return" || m.move_type === "opening" || m.move_type === "internal" || m.move_type === "reversal"))
                 .slice(0, 8)
                 .map((m) => (
                   <li key={`in-${m.id}`} className="flex justify-between gap-2 border-t border-line py-1 first:border-0">
@@ -560,7 +561,7 @@ function Page() {
                     <span className="tabular-nums">{qty(m.inQty)}</span>
                   </li>
                 ))}
-              {kardex.filter((m) => m.inQty && (m.move_type === "receipt" || m.move_type === "return" || m.move_type === "opening" || m.move_type === "internal")).length === 0 && (
+              {kardex.filter((m) => m.inQty && (m.move_type === "receipt" || m.move_type === "return" || m.move_type === "opening" || m.move_type === "internal" || m.move_type === "reversal")).length === 0 && (
                 <li className="text-muted">Sin entradas en este kardex.</li>
               )}
             </ul>
@@ -569,7 +570,7 @@ function Page() {
             <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Salió a</p>
             <ul className="mt-1">
               {kardex
-                .filter((m) => m.outQty && (m.move_type === "delivery" || m.move_type === "internal" || m.move_type === "adjust"))
+                .filter((m) => m.outQty && (m.move_type === "delivery" || m.move_type === "internal" || m.move_type === "adjust" || m.move_type === "reversal"))
                 .slice(0, 8)
                 .map((m) => (
                   <li key={`out-${m.id}`} className="flex justify-between gap-2 border-t border-line py-1 first:border-0">
@@ -580,7 +581,7 @@ function Page() {
                     <span className="tabular-nums">{qty(m.outQty)}</span>
                   </li>
                 ))}
-              {kardex.filter((m) => m.outQty && (m.move_type === "delivery" || m.move_type === "internal" || m.move_type === "adjust")).length === 0 && (
+              {kardex.filter((m) => m.outQty && (m.move_type === "delivery" || m.move_type === "internal" || m.move_type === "adjust" || m.move_type === "reversal")).length === 0 && (
                 <li className="text-muted">Sin salidas en este kardex.</li>
               )}
             </ul>
