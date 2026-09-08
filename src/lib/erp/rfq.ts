@@ -3,7 +3,6 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
-import { addDays } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { assertRfqOpen } from "@/lib/erp/request-lock";
@@ -301,16 +300,8 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
           products: lines.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
           locationId: loc[0].id,
         });
-        const daysPay = await sql<{ payment_days: number }>`
-          select coalesce(payment_days,0) as payment_days from partners where id = ${supplierId}
-        `;
-        const due = addDays(today, daysPay[0]?.payment_days ?? 0);
-        const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${companyId} and kind = 'supplier'`;
-        const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-        await sql`
-          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency)
-          values (${companyId}, 'supplier', ${iname}, ${supplierId}, ${today}, ${due}, 'open', ${total}, ${total}, ${poName}, ${rfq[0].currency})
-        `;
+        // Decisión 14: la deuda con el proveedor no nace al adjudicar la RFQ,
+        // nace al recibir la mercancía (bornSupplierDebt, azagro.ts).
         pos.push(poName);
       }
     }

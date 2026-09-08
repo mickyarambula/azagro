@@ -49,12 +49,12 @@ export const BUSINESS_RULES = [
   {
     id: "oc",
     title: "Orden de compra",
-    body: "Se emite cuando la decisión de comprar ya es definitiva: el cliente aceptó y hay proveedor ganador, o Azagro compra para inventario. Es el documento que formaliza con el proveedor. Lleva sus días de crédito, exactos.",
+    body: "Se emite cuando la decisión de comprar ya es definitiva: el cliente aceptó y hay proveedor ganador, o Azagro compra para inventario. Es el documento que formaliza con el proveedor. La deuda todavía no nace aquí: nace cuando la mercancía llega, y ahí empiezan a correr los días de crédito del proveedor, exactos.",
   },
   {
     id: "receive",
     title: "Recibir mercancía",
-    body: "Solo en operación de inventario. Puede recibirse en bodega Azagro o en bodega del productor/proveedor: el stock es de Azagro, la ubicación física es externa. En brokeraje / directo no hay recepción: va en camino al cliente.",
+    body: "Solo en operación de inventario. Puede recibirse en bodega Azagro o en bodega del productor/proveedor: el stock es de Azagro, la ubicación física es externa. Al recibir nace la cuenta por pagar al proveedor, con su plazo contado desde ese día. En brokeraje / directo no hay recepción: va en camino al cliente, y la cuenta por pagar nace al entregar y facturar.",
   },
   {
     id: "stock",

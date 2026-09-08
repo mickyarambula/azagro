@@ -171,8 +171,11 @@ test("FV, FP, NC, FI, ATC y facturas de corte guardan quién las generó", () =>
   const stock = src("src/lib/erp/stock.ts");
   assert.ok(stock.includes("add column if not exists created_by"), "la columna de autor existe");
   assert.ok(fnBody(az, "deliverSale").includes("created_by"), "FV con autor");
-  assert.ok(fnBody(az, "createPurchase").includes("created_by"), "FP de OC con autor");
-  assert.ok(fnBody(az, "receivePurchase").includes("created_by"), "FP de recepción con autor");
+  // Decisión 14 (paso 3): la FP ya no nace con la OC — nace al recibir, o al
+  // entregar si es brokeraje. Su autor vive donde nace, en bornSupplierDebt.
+  assert.ok(!fnBody(az, "createPurchase").includes("'supplier'"), "createPurchase ya no crea la FP");
+  const nace = az.slice(az.indexOf("export async function bornSupplierDebt"), az.indexOf("export const receivePurchase"));
+  assert.ok(nace.length > 0 && nace.includes("created_by"), "FP con autor, donde nace");
   assert.ok(fnBody(az, "returnSale").includes("created_by"), "NC con autor");
   assert.ok(ops.slice(ops.indexOf("export async function issueMoraInvoice")).includes("created_by"), "FI con autor");
   assert.ok(ops.slice(ops.indexOf("export async function applyInvoicePayment"), ops.indexOf("export const addBankMove")).includes("created_by"), "ATC con autor");

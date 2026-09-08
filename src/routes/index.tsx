@@ -117,6 +117,20 @@ function Home() {
         </Link>
       )}
 
+      {Boolean(data?.fpSinRecibir) && (
+        <Link
+          to="/credit"
+          search={{ lado: "pagar" }}
+          className="mt-4 flex items-center justify-between rounded-md border border-warn bg-cream px-3 py-2 text-sm text-warn"
+        >
+          <span>
+            {data!.fpSinRecibir} factura{data!.fpSinRecibir === 1 ? "" : "s"} de proveedor de mercancía que todavía no
+            llega. Nacieron antes: hoy la deuda nace al recibir. Se limpian solas al recibir la orden o al cancelarla.
+          </span>
+          <span className="font-medium underline decoration-dotted">Ver</span>
+        </Link>
+      )}
+
       {(seeCash || seeCredit || seeStockValue) && (
         <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {seeCash && <Kpi label="Caja" value={data ? money(data.cash) : "—"} hint="Saldos bancarios" />}

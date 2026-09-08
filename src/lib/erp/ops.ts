@@ -1723,14 +1723,9 @@ export const decideQuote = createServerFn({ method: "POST" })
           products: lines.map((l) => ({ productId: l.product_id, unitPrice: Number(l.cost) })),
           locationId: data.locationId,
         });
-        const daysPay = await sql<{ payment_days: number }>`select coalesce(payment_days,0) as payment_days from partners where id = ${supplierId}`;
-        const due = addDays(today, daysPay[0]?.payment_days ?? 0);
-        const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${cid} and kind = 'supplier'`;
-        const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-        await sql`
-          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, created_by)
-          values (${cid}, 'supplier', ${iname}, ${supplierId}, ${today}, ${due}, 'open', ${poTotal}, ${poTotal}, ${poName}, ${q[0].currency}, ${context.userId})
-        `;
+        // Decisión 14: la OC nace confirmada, pero la deuda con el proveedor
+        // NO nace aquí — nace al recibir la mercancía (o al entregarla, si es
+        // directa/brokeraje). Ver bornSupplierDebt en azagro.ts.
         pos.push(poName);
       }
     }

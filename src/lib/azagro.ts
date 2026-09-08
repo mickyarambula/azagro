@@ -400,6 +400,19 @@ export const getDashboard = createServerFn({ method: "GET" })
     const orphan = await sql<{ n: number }>`
       select count(*)::int as n from partners where company_id = ${cid} and is_customer = true and seller_id is null
     `;
+    // Decisión 23: cuántas facturas de proveedor quedan del defecto viejo —
+    // deuda de órdenes que todavía no se reciben. Se deriva, no hay columna;
+    // el número baja solo conforme se reciben o se cancelan esas órdenes.
+    const fpSinRecibir = await sql<{ n: number }>`
+      select count(*)::int as n
+      from invoices i
+      where i.company_id = ${cid} and i.kind = 'supplier' and i.state <> 'reversed'
+        and exists (
+          select 1 from purchase_orders po
+          where po.company_id = i.company_id and po.name = i.origin
+            and po.state not in ('done','cancelled')
+        )
+    `;
     // Cada quien ve solo las cifras de sus módulos: sin cartera no hay saldos,
     // sin bancos no hay caja, sin permiso de costos el valor de inventario va en cero.
     const seeCredit = me.acl.credit !== "none";
@@ -420,6 +433,7 @@ export const getDashboard = createServerFn({ method: "GET" })
       pendingSo: pending[0]?.so ?? 0,
       overdueN: seeCredit ? pending[0]?.overdue_n ?? 0 : 0,
       orphanCustomers: seePartners ? orphan[0]?.n ?? 0 : 0,
+      fpSinRecibir: seeCredit ? fpSinRecibir[0]?.n ?? 0 : 0,
       aging: seeCredit ? aging.map((a) => ({ bucket: a.bucket, amount: Number(a.amount) })) : [],
       recentInv: seeCredit ? recentInv : [],
       locStock: locStock.map((l) => ({
@@ -1151,14 +1165,10 @@ export const createPurchase = createServerFn({ method: "POST" })
       products: data.lines.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
       locationId: data.locationId,
     });
-    const days = await sql<{ payment_days: number }>`select coalesce(payment_days,0) as payment_days from partners where id = ${data.partnerId}`;
-    const due = addDays(today, days[0]?.payment_days ?? 0);
-    const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'supplier'`;
-    const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-    await sql`
-      insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, created_by)
-      values (${m.company_id}, 'supplier', ${iname}, ${data.partnerId}, ${today}, ${due}, 'open', ${total}, ${total}, ${name}, ${data.currency ?? "MXN"}, ${context.userId})
-    `;
+    // Decisión 14: aquí NO nace la deuda. La FP nace cuando la mercancía se
+    // movió de verdad — al recibirla, o al entregarla si es directa/brokeraje
+    // (`bornSupplierDebt`). Pedir hoy y recibir en un mes ya no consume plazo
+    // que nunca corrió.
     await writeAudit(sql, {
       companyId: m.company_id,
       userId: context.userId,
@@ -1166,10 +1176,67 @@ export const createPurchase = createServerFn({ method: "POST" })
       entity: "purchase",
       entityId: po[0]!.id,
       name,
-      detail: `Total ${total.toFixed(2)} ${data.currency ?? "MXN"} · genera ${iname} por pagar`,
+      detail: `Total ${total.toFixed(2)} ${data.currency ?? "MXN"} · la deuda nace al recibir`,
     });
     return { id: po[0]!.id, name };
   });
+
+/**
+ * Decisión 14: la deuda con el proveedor NACE cuando la mercancía se movió de
+ * verdad — al recibirla en bodega, o al entregarla al cliente si la OC es
+ * directa / brokeraje (ésa nunca se recibe: `receivePurchase` la rechaza, así
+ * que sin este segundo camino el brokeraje quedaría sin cuenta por pagar).
+ *
+ * Antes nacía al capturar la OC, y el plazo empezaba a correr ese día aunque
+ * la mercancía llegara un mes después: la cuenta por pagar decía que se debía
+ * algo que todavía no se tenía.
+ *
+ * Devuelve el folio de la FP, o null si esa OC ya tenía la suya (idempotente:
+ * recibir dos veces no duplica la deuda, y las OC viejas que ya traen FP del
+ * defecto anterior no generan una segunda).
+ */
+export async function bornSupplierDebt(
+  sql: Sql,
+  opts: { companyId: number; userId: string; poId: number; poName: string; date?: string },
+) {
+  const already = await sql<{ id: number }>`
+    select id from invoices
+    where company_id = ${opts.companyId} and kind = 'supplier' and origin = ${opts.poName}
+    limit 1
+  `;
+  if (already[0]) return null;
+  const po = await sql<{ partner_id: number; total: string; currency: string; fx_rate: string; partner: string }>`
+    select po.partner_id, po.total::text, coalesce(po.currency,'MXN') as currency,
+      coalesce(po.fx_rate,1)::text as fx_rate, p.name as partner
+    from purchase_orders po join partners p on p.id = po.partner_id
+    where po.id = ${opts.poId} and po.company_id = ${opts.companyId}
+  `;
+  if (!po[0]) throw new Error("Orden de compra no encontrada");
+  // El plazo del proveedor es el que se capturó en su ficha (0 = contado): no
+  // hay plazo de respaldo en el código (regla 9). Quien recibe suele ser
+  // almacén, que no puede editar proveedores — el mensaje dice a quién pedirle.
+  const days = await sql<{ payment_days: number | null }>`
+    select payment_days from partners where id = ${po[0].partner_id}
+  `;
+  if (!days[0] || days[0].payment_days == null) {
+    throw new Error(
+      `Falta el plazo de pago de ${po[0].partner}. Sin ese dato no se puede saber cuándo hay que pagarle esta compra, ` +
+        `y por eso no se puede registrar la entrada. Pídele a compras, administración o gerencia que lo capture en la ` +
+        `ficha del proveedor (si es de contado, se captura 0). En cuanto esté, vuelve a recibir.`,
+    );
+  }
+  const day = (opts.date || todayMx()).slice(0, 10);
+  const due = addDays(day, days[0].payment_days);
+  const total = Number(po[0].total ?? 0);
+  const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${opts.companyId} and kind = 'supplier'`;
+  const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  await sql`
+    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, fx_agreed, created_by)
+    values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${total}, ${total},
+      ${opts.poName}, ${po[0].currency}, ${Number(po[0].fx_rate)}, ${opts.userId})
+  `;
+  return iname;
+}
 
 export const receivePurchase = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
@@ -1206,29 +1273,12 @@ export const receivePurchase = createServerFn({ method: "POST" })
       await sql`update purchase_lines set qty_received = qty where id = ${line.id}`;
     }
     await sql`update purchase_orders set state = 'done' where id = ${po[0].id}`;
-    const already = await sql<{ id: number }>`
-      select id from invoices where company_id = ${m.company_id} and kind = 'supplier' and origin = ${po[0].name} limit 1
-    `;
-    if (!already[0]) {
-      const total = await sql<{ total: string }>`select total::text from purchase_orders where id = ${po[0].id}`;
-      const partner = await sql<{ partner_id: number }>`select partner_id from purchase_orders where id = ${po[0].id}`;
-      // El plazo del proveedor es el que se capturó en su ficha (0 = contado);
-      // no hay plazo de respaldo en el código.
-      const days = await sql<{ payment_days: number | null }>`
-        select payment_days from partners where id = ${partner[0]!.partner_id}
-      `;
-      if (!days[0] || days[0].payment_days == null) {
-        throw new Error("El proveedor no tiene plazo de pago capturado. Captúralo en su ficha (0 = contado) antes de recibir.");
-      }
-      const today = todayMx();
-      const due = addDays(today, days[0].payment_days);
-      const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'supplier'`;
-      const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-      await sql`
-        insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, created_by)
-        values (${m.company_id}, 'supplier', ${iname}, ${partner[0]!.partner_id}, ${today}, ${due}, 'open', ${Number(total[0]?.total ?? 0)}, ${Number(total[0]?.total ?? 0)}, ${po[0].name}, ${context.userId})
-      `;
-    }
+    const fp = await bornSupplierDebt(sql, {
+      companyId: m.company_id,
+      userId: context.userId,
+      poId: po[0].id,
+      poName: po[0].name,
+    });
     await writeAudit(sql, {
       companyId: m.company_id,
       userId: context.userId,
@@ -1236,9 +1286,9 @@ export const receivePurchase = createServerFn({ method: "POST" })
       entity: "purchase",
       entityId: po[0].id,
       name: po[0].name,
-      detail: "Entró al kardex",
+      detail: `Entró al kardex${fp ? ` · nace ${fp} por pagar` : ""}`,
     });
-    return { ok: true };
+    return { ok: true, fp };
     });
   });
 
@@ -1435,6 +1485,28 @@ export const deliverSale = createServerFn({ method: "POST" })
       await sql`update sales_lines set qty_delivered = qty where id = ${line.id}`;
     }
     await sql`update sales_orders set state = 'done' where id = ${so[0].id}`;
+    // Decisión 14 en brokeraje: una OC directa nunca se recibe en bodega
+    // (receivePurchase la rechaza), así que su deuda nace aquí — al entregar y
+    // facturar es cuando la mercancía se movió de verdad del proveedor al
+    // cliente. Sin esto el brokeraje quedaría sin cuenta por pagar.
+    const fpsDirectas: string[] = [];
+    if (direct) {
+      const ocs = await sql<{ id: number; name: string }>`
+        select id, name from purchase_orders
+        where company_id = ${m.company_id} and so_id = ${so[0].id}
+          and coalesce(fulfill_kind,'inventory') = 'direct' and state <> 'cancelled'
+        order by id
+      `;
+      for (const oc of ocs) {
+        const fp = await bornSupplierDebt(sql, {
+          companyId: m.company_id,
+          userId: context.userId,
+          poId: oc.id,
+          poName: oc.name,
+        });
+        if (fp) fpsDirectas.push(fp);
+      }
+    }
     const today = todayMx();
     const invoiceDue = so[0].invoice_due || today;
     const creditDue = so[0].credit_due || invoiceDue;
@@ -1523,9 +1595,9 @@ export const deliverSale = createServerFn({ method: "POST" })
       entity: "sale",
       entityId: so[0].id,
       name: so[0].name,
-      detail: iname,
+      detail: `${iname}${fpsDirectas.length ? ` · brokeraje: nace ${fpsDirectas.join(", ")} por pagar` : ""}`,
     });
-    return { ok: true };
+    return { ok: true, fps: fpsDirectas };
     });
   });
 
@@ -1766,6 +1838,7 @@ export const listInvoices = createServerFn({ method: "POST" })
       folio_fiscal: string;
       uuid_fiscal: string;
       supplier_folio: string;
+      unreceived: boolean;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1783,7 +1856,17 @@ export const listInvoices = createServerFn({ method: "POST" })
         i.circuit_code,
         coalesce(i.folio_fiscal, '') as folio_fiscal,
         coalesce(i.uuid_fiscal, '') as uuid_fiscal,
-        coalesce(i.supplier_folio, '') as supplier_folio
+        coalesce(i.supplier_folio, '') as supplier_folio,
+        -- Decisión 23: las FP que nacieron con la OC (defecto que corrige la
+        -- Decisión 14) se MARCAN, no se revierten ni se dejan. La marca se
+        -- deriva, sin columna: es deuda de una orden que todavía no se recibe.
+        -- Se limpia sola al recibir o al cancelar, que es lo que pide la
+        -- decisión — sin migración ni proceso de limpieza.
+        (i.kind = 'supplier' and exists (
+          select 1 from purchase_orders po
+          where po.company_id = i.company_id and po.name = i.origin
+            and po.state not in ('done','cancelled')
+        )) as unreceived
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

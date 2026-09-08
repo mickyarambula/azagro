@@ -168,6 +168,9 @@ function Page() {
                         {[r.folio_fiscal, r.uuid_fiscal].filter(Boolean).join(" · ")}
                       </p>
                     ) : null}
+                    {r.unreceived ? (
+                      <p className="text-[11px] font-normal text-warn">Mercancía no recibida</p>
+                    ) : null}
                     {r.kind === "supplier" && r.supplier_folio ? (
                       <p className="text-[11px] font-normal text-muted">{r.supplier_folio}</p>
                     ) : null}
