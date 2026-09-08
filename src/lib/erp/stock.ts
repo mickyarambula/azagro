@@ -14,6 +14,31 @@ const REF_PREFIX: Record<StockMoveType, string> = {
   return: "DEV",
 };
 
+/**
+ * Costo ponderado de un conjunto de salidas: Σ(cantidad × costo) ÷ Σ(cantidad).
+ *
+ * Decisión 9: la mercancía devuelta regresa al costo con el que SALIÓ, no al
+ * promedio de hoy. Hoy una venta sale de bodega una sola vez (`deliverSale`
+ * exige pedido confirmado y lo deja en 'done'; nada lo regresa a confirmado),
+ * así que este ponderado casi siempre opera sobre un solo renglón y devuelve
+ * ese mismo costo. La regla queda escrita de todos modos para el día que
+ * existan entregas parciales: dos salidas a costos distintos se promedian
+ * por cantidad, no se elige una (Decisión 26). Sin renglones → null: quien
+ * llama decide, aquí no se inventa un número.
+ */
+export function weightedCost(rows: Array<{ qty: number; unitCost: number }>): number | null {
+  let qty = 0;
+  let value = 0;
+  for (const r of rows) {
+    const q = Math.max(0, Number(r.qty) || 0);
+    if (q <= 0.0000001) continue;
+    qty += q;
+    value += q * Math.max(0, Number(r.unitCost) || 0);
+  }
+  if (qty <= 0.0000001) return null;
+  return value / qty;
+}
+
 /** Promedio móvil: (existencia × costo + entrada × precio) / nueva existencia. */
 export function movingAverage(oldQty: number, oldAvg: number, qtyIn: number, unitCost: number) {
   const on = Math.max(0, oldQty);
@@ -73,6 +98,34 @@ export async function qtyFromMoves(sql: Sql, companyId: number, productId: numbe
     )::text as q
   `;
   return Number(rows[0]?.q ?? 0);
+}
+
+/**
+ * Con qué costo salió de bodega la mercancía de un pedido (Decisión 9).
+ *
+ * El amarre es por el folio del pedido, que es lo que `deliverSale` escribe en
+ * `origin` — no hay llave: `stock_moves` no guarda el id del pedido
+ * (DESHACER.md § 1). Es determinista de todos modos: los folios son únicos por
+ * empresa (0015_folios_unicos.sql) y las series no chocan (PV- vs OC-).
+ *
+ * `null` = no hay salida registrada para ese pedido y producto: quien llama
+ * avisa, no inventa. Pasa con datos anteriores a esta lógica; un pedido
+ * directo/brokeraje ni siquiera llega aquí (no movió inventario).
+ */
+export async function deliveredUnitCost(sql: Sql, companyId: number, origin: string, productId: number) {
+  const rows = await sql<{ quantity: string; unit_cost: string }>`
+    select quantity::text, coalesce(unit_cost, 0)::text as unit_cost
+    from stock_moves
+    where company_id = ${companyId} and origin = ${origin}
+      and product_id = ${productId} and move_type = 'delivery'
+    order by id
+  `;
+  return weightedCost(rows.map((r) => ({ qty: Number(r.quantity), unitCost: Number(r.unit_cost) })));
+}
+
+/** Promedio de una bodega para un producto, tal como está ahora (Decisión 20: se enseña). */
+export async function avgCostAt(sql: Sql, companyId: number, productId: number, locationId: number) {
+  return (await readQuant(sql, companyId, productId, locationId)).avg;
 }
 
 async function readQuant(sql: Sql, companyId: number, productId: number, locationId: number) {

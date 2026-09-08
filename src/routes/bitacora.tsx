@@ -49,6 +49,13 @@ const ACTION: Record<string, string> = {
   "permisos-usuario": "Cambió permisos de usuario",
   correo: "Correo enviado",
   recordatorio: "Recordatorio de cobro",
+  // BLOQUE DE DESHACER, paso 1. "borrar-solicitud" se queda arriba: ya no se
+  // escribe (el borrado duro murió), pero los renglones viejos siguen ahí.
+  "cancelar-solicitud": "Canceló solicitud",
+  "cancelar-cotizacion": "Canceló cotización",
+  "cancelar-pedido": "Canceló pedido",
+  // Paso 2: la devolución no encontró con qué costo salió la mercancía.
+  "devolucion-sin-costo-origen": "Devolución SIN costo de salida",
 };
 
 type Payload = Awaited<ReturnType<typeof listAudit>>;

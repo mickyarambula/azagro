@@ -10,7 +10,7 @@ import { seedAcl, type AppRole } from "@/lib/erp/acl";
 import { activeMember, assertCan, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
 import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate, requireRate } from "@/lib/erp/credit";
-import { ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
+import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { todayMx } from "@/lib/utils";
@@ -1579,6 +1579,14 @@ export const returnSale = createServerFn({ method: "POST" })
     const today = todayMx();
     let credit = 0;
     const posted: string[] = [];
+    const costs: Array<{
+      productId: number;
+      qty: number;
+      unitCost: number;
+      found: boolean;
+      avgBefore: number;
+      avgAfter: number;
+    }> = [];
     for (const take of data.lines) {
       const src = lines.find((l) => l.product_id === take.productId);
       if (!src) throw new Error("Esa partida no está en el pedido");
@@ -1587,6 +1595,14 @@ export const returnSale = createServerFn({ method: "POST" })
         throw new Error(`No puedes devolver más de lo entregado (${max}).`);
       }
       if (!direct) {
+        // Decisión 9: entra al costo con el que SALIÓ, no al promedio de hoy.
+        // Si entrara al de hoy, esta devolución cambiaría la utilidad de una
+        // venta ya cerrada y aparecería una pérdida o ganancia que nunca
+        // existió. Sin salida encontrada (datos viejos) no se bloquea la
+        // devolución: entra al promedio de hoy — que es lo que postStock hace
+        // solo — y se avisa en pantalla y en bitácora, con folio y número.
+        const exitCost = await deliveredUnitCost(sql, m.company_id, so[0].name, take.productId);
+        const avgBefore = await avgCostAt(sql, m.company_id, take.productId, so[0].location_id);
         const mv = await postStock(sql, {
           companyId: m.company_id,
           userId: context.userId,
@@ -1595,9 +1611,21 @@ export const returnSale = createServerFn({ method: "POST" })
           productId: take.productId,
           quantity: take.qty,
           locationTo: so[0].location_id,
+          unitCost: exitCost ?? undefined,
           date: today,
         });
+        const avgAfter = await avgCostAt(sql, m.company_id, take.productId, so[0].location_id);
         posted.push(mv.ref);
+        // Decisión 20: el promedio se acepta movido y SE MUESTRA, con el
+        // número. Que se vea, no que el sistema finja que nada pasó.
+        costs.push({
+          productId: take.productId,
+          qty: take.qty,
+          unitCost: mv.unitCost,
+          found: exitCost != null,
+          avgBefore,
+          avgAfter,
+        });
       }
       await sql`update sales_lines set qty_returned = qty_returned + ${take.qty} where id = ${src.id}`;
       credit += take.qty * Number(src.unit_price);
@@ -1659,8 +1687,31 @@ export const returnSale = createServerFn({ method: "POST" })
       entity: "sale",
       entityId: so[0].id,
       name: so[0].name,
-      detail: `${ncName}${posted.length ? ` · ${posted.join(", ")}` : ""}`,
+      detail: `${ncName}${posted.length ? ` · ${posted.join(", ")}` : ""}${
+        costs.length ? ` · costo de salida ${costs.map((c) => (c.found ? c.unitCost.toFixed(4) : "SIN SALIDA")).join(", ")}` : ""
+      }`,
     });
+    // Si alguna partida no encontró con qué costo salió, queda su propio
+    // renglón en la bitácora: si pasa alguna vez, se tiene que poder
+    // encontrar después, no solo verse una vez en la pantalla.
+    const sinSalida = costs.filter((c) => !c.found);
+    if (sinSalida.length) {
+      const codes = await sql<{ id: number; code: string }>`
+        select id, code from products where company_id = ${m.company_id} and id = any(${sinSalida.map((c) => c.productId)})
+      `;
+      const label = (pid: number) => codes.find((p) => p.id === pid)?.code ?? String(pid);
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "devolucion-sin-costo-origen",
+        entity: "sale",
+        entityId: so[0].id,
+        name: so[0].name,
+        detail: `${ncName} · sin movimiento de salida en el kardex para ${sinSalida
+          .map((c) => `${label(c.productId)} (entró al promedio de hoy ${c.unitCost.toFixed(4)})`)
+          .join(", ")}`,
+      });
+    }
     return {
       ok: true,
       nc: ncName,
@@ -1669,6 +1720,7 @@ export const returnSale = createServerFn({ method: "POST" })
       leftover,
       direct,
       note,
+      costs,
     };
     });
   });

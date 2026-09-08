@@ -698,7 +698,20 @@ function Ficha() {
                     : r.leftover
                       ? `La factura ya estaba pagada. Queda crédito ${r.nc} por ${moneyIn(r.leftover, form.currency)}.`
                       : "";
-                  setMsg(`Devolución ${r.nc}. ${stock} ${cobro}`);
+                  // Decisión 9 + Decisión 20: con qué costo entró cada partida
+                  // y cómo quedó el promedio, con el número. Y si no se
+                  // encontró la salida, se dice completo — no se disimula.
+                  const costo = (r.costs ?? [])
+                    .map((c) => {
+                      const p = sold.find((s) => s.product_id === c.productId);
+                      const nombre = p ? `${p.code}` : `#${c.productId}`;
+                      const promedio = `promedio ${money(c.avgBefore)} → ${money(c.avgAfter)}`;
+                      return c.found
+                        ? `${nombre}: entró al costo con el que salió (${money(c.unitCost)}); ${promedio}.`
+                        : `${nombre}: NO encontré con qué costo salió de ${form.name}; entró al promedio de hoy (${money(c.unitCost)}); ${promedio}.`;
+                    })
+                    .join(" ");
+                  setMsg(`Devolución ${r.nc}. ${stock} ${cobro} ${costo}`.trim());
                   setRetQty({});
                   setRetReason("");
                   await load();
