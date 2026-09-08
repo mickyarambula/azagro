@@ -391,24 +391,31 @@ saldo"; `credit.ts:191` (estado de cuenta); `issueMoraInvoice` factura con
 (`src/lib/erp/doc-text.ts`, `statementPaperRow`). Decisión en HANDOFF.
 
 ### L3a. Devoluciones: ¿la mercancía regresa al costo al que salió o al promedio de hoy? (LOGICA h.9)
-**ABIERTA.** Hoy regresa al promedio actual de la bodega: `returnSale` llama a
-`postStock` sin costo (`azagro.ts:1556-1565`) y `postStock` toma el promedio
-del destino cuando no recibe uno (`src/lib/erp/stock.ts:184-186`). Nadie lo
-decidió. *Para el dueño: cuando un cliente devuelve producto, ¿lo contamos al
-precio que nos costó cuando se lo vendimos, o al precio promedio que tiene hoy
-el almacén?*
+**RESUELTA EN DOCUMENTO (Decisión 9 del dueño, 7-sep-2026), no construida.**
+Al costo con el que salió, no al promedio de hoy: si entrara al promedio de
+hoy, la devolución movería la utilidad de una venta ya cerrada y aparecería
+una ganancia o pérdida que nunca existió. Hoy sigue regresando al promedio
+actual de la bodega: `returnSale` llama a `postStock` sin costo
+(`azagro.ts:1590-1591`) y `postStock` toma el promedio del destino cuando no
+recibe uno (`src/lib/erp/stock.ts:191-194`) — falta construir que `returnSale`
+pase el costo original de la venta en vez de dejarlo en blanco.
 
 ### L3b. ¿La mora ya facturada se ajusta si el cliente devuelve parte del producto? (LOGICA h.11)
-**ABIERTA.** La devolución no toca las FI ni el cargo sobre el que corre el
-interés (la NC es un documento aparte). *Para el dueño: si un cliente ya debe
-intereses y luego devuelve la mitad de la mercancía, ¿los intereses se quedan
-como están o se reducen en proporción?*
+**RESUELTA EN DOCUMENTO (Decisión 10 del dueño, 7-sep-2026), no construida.**
+Se ajusta en proporción a lo devuelto — pero es el comportamiento **por
+omisión**, no una regla fija: quien tenga permiso puede decidir lo contrario
+caso por caso, con bitácora (depende de por qué devolvió: error de Azagro no
+es lo mismo que sobrante del cliente). Hoy la devolución no toca las FI ni el
+cargo sobre el que corre el interés (la NC es un documento aparte) — falta
+construir el ajuste y la opción de anularlo caso por caso.
 
 ### L3c. ¿Qué se hace con el saldo a favor de una nota de crédito sobre una factura ya pagada? (LOGICA h.10)
-**ABIERTA.** HANDOFF "Qué falta" lo lista entre los INCOMPLETOS "sin tocar".
-*Para el dueño: si un cliente ya pagó y devuelve producto, ¿ese dinero se le
-descuenta de su siguiente factura, se le regresa, o las dos cosas según el
-caso?*
+**RESUELTA EN DOCUMENTO (Decisión 11 del dueño, 7-sep-2026), no construida.**
+Se aplica a otras facturas del cliente **por omisión** — con un cliente
+recurrente lo normal es aplicarlo a lo que sigue debiendo; devolver el dinero
+queda como opción disponible, no como regla. HANDOFF "Qué falta" lo listaba
+entre los INCOMPLETOS "sin tocar" — sigue sin construirse: hoy la NC sobre una
+factura pagada queda atrapada, sin aplicarse a nada (LOGICA h.10, Sesión D).
 
 ### L4a. En un pedido en dólares, ¿el precio se captura en dólares o en pesos? (LOGICA h.14)
 **La parte de MODELO quedó RESUELTA por la Decisión 2 del dueño (5-sep-2026,
@@ -443,19 +450,27 @@ y reparte con `fxPaymentSplit` (`credit.ts:380`). Decisión en HANDOFF ("El
 tipo de cambio pactado manda").
 
 ### L5. ¿Qué pasa con un pago mayor al saldo, y quién decide a qué facturas se aplica un depósito? (LOGICA h.7)
-**ABIERTA.** Hoy el sobrante se descarta: `ops.ts:1542` `applied =
-Math.min(opts.amount, residual)` y el banco registra solo lo aplicado
-(`:1543`); no hay anticipo ni saldo a favor. La aplicación es factura por
-factura, a mano. *Para el dueño: si un cliente deposita más de lo que debe en
-una factura, ¿lo guardamos como saldo a su favor, lo aplicamos a su siguiente
-factura, o no lo aceptamos? Y con un solo depósito para varias facturas, ¿lo
-reparte la persona o el sistema empezando por la más vieja?*
+**RESUELTA EN DOCUMENTO (Decisiones 12 y 13 del dueño, 7-sep-2026), no
+construida.** El sobrante se guarda como **anticipo** del cliente, visible
+como saldo a favor; alguien lo aplica después, el sistema no decide a qué
+factura va (Decisión 12 — corrige un defecto real: hoy el sobrante se
+descarta sin avisar, `ops.ts:1912-1913` `applied = Math.min(opts.amount,
+residual)`, verificado en la Sesión D). Un depósito para varias facturas lo
+reparte **la persona**, con propuesta del sistema de la más vieja a la más
+nueva (Decisión 13 — misma regla del circuito: el sistema propone, la persona
+confirma o cambia, porque el cliente a veces dice cuál factura está pagando).
+Falta construir el anticipo (tabla, saldo visible, aplicación manual) y la
+pantalla de repartir un depósito entre varias facturas.
 
 ### L6. ¿Cuándo nace la deuda con el proveedor: al capturar la OC, al recibir, o con su factura real? (LOGICA h.16)
-**ABIERTA.** Hoy nace al capturar la OC: `createPurchase` inserta la FP en el
-mismo momento (`azagro.ts:1144-1148`). Nadie lo decidió. *Para el dueño: ¿le
-debemos al proveedor desde que le pedimos, desde que nos entrega, o desde que
-nos manda su factura?*
+**RESUELTA EN DOCUMENTO (Decisión 14 del dueño, 7-sep-2026), no construida.**
+Nace al **recibir** la mercancía, no al capturar la orden de compra; si el
+proveedor factura después, la fecha de su factura puede ajustar el plazo —
+corrige un defecto real: hoy nace al capturar la OC (`createPurchase` inserta
+la FP en el mismo momento, `azagro.ts:1153-1159`) y el plazo corre desde ese
+día aunque la mercancía llegue un mes después, así que la cuenta por pagar
+dice que se debe algo que todavía no se tiene. Falta mover la creación de la
+FP de `createPurchase` a `receivePurchase`.
 
 ### L7. ¿El pronto pago se bonifica de verdad o solo se informa? (LOGICA h.19)
 **RESUELTA EN CÓDIGO.** Se aplica de verdad como descuento al cobrar:
@@ -494,13 +509,24 @@ no la programa. *Para el dueño: ¿se hace ese barrido antes de pegar el corte
 de Compaq, o después?*
 
 ### H4a. Revertir un pago capturado por error (LOGICA h.8)
-**ABIERTA.** No existe; HANDOFF lo lista "sin tocar". *Para el dueño: ¿cómo se
-corrige un cobro que se capturó mal — se borra con rastro, o se registra el
-movimiento contrario?*
+**RESUELTA EN DOCUMENTO (Decisión 16 del dueño, 7-sep-2026), no construida.**
+Nunca se borra un movimiento de dinero: se mete uno contrario que lo cancela,
+y quedan los tres — el error, la reversa y el correcto. Razón del dueño: el
+día que alguien pregunte por qué un cliente aparecía pagado en marzo y ahora
+no, tiene que haber rastro. Sigue sin existir; HANDOFF lo listaba "sin tocar"
+— falta construir la reversa.
 
 ### H4b. Cancelaciones (pedido entregado, OC recibida, factura cobrada) (LOGICA h.15)
-**ABIERTA.** No existen. *Para el dueño: ¿qué documentos se pueden cancelar,
-quién puede, y qué pasa con la mercancía y el dinero que ya se movieron?*
+**RESUELTA EN DOCUMENTO (Decisión 15 del dueño, 7-sep-2026), no construida.**
+La regla depende de si el documento ya movió inventario o cartera. Lo que
+**no** ha movido nada (solicitud, cotización, pedido sin confirmar) se
+**cancela**: se marca cancelado, se conserva, nunca se borra — lo puede hacer
+quien lo capturó. Lo que **ya** movió inventario o cartera (factura emitida,
+entrega, recepción) no se cancela, se **revierte**: se meten los movimientos
+contrarios y quedan los dos, el original y la reversa — solo admin y
+gerencia. Sigue sin existir ninguna de las dos — falta construir el candado
+de cancelar (documentos livianos) y la reversa (documentos que ya movieron
+algo, comparte mecánica con H4a).
 
 **Nota (5-sep-2026):** en la base de producción quedan **dos pedidos de
 prueba, confirmados por el dueño**, que sirven como casos de referencia para
@@ -641,12 +667,15 @@ código de hoy sigue usando una sola tasa de la tabla (`ops.ts:1954`,
 `credit.ts:156`); falta construir la tabla de dos columnas y aplicar esta
 regla.
 
-**ABIERTAS en esta lista: 16** (llegaron a ser 19, luego 17 con N1 abierta;
-el 5-sep-2026 se cerraron D-A, H8b, E2 y, más tarde el mismo día, N1 — las
-cuatro en documento, ninguna construida) — L3a, L3b, L3c, L4a (solo la parte
-de captura; el modelo ya se cerró), L5, L6, L8a, H3, H4a, H4b, H4c, H4d, H5,
-H6, D-B, D-C. (H2 y H7 están decididas en documento; D-A, E2, H8b y N1 se
-movieron a "resuelta en documento" hoy; el resto está en código.)
+**ABIERTAS en esta lista: 9** (llegaron a ser 19, luego 17 con N1 abierta; el
+5-sep-2026 se cerraron D-A, H8b, E2 y, más tarde el mismo día, N1 — las
+cuatro en documento, ninguna construida; el 7-sep-2026 se cerraron otras
+siete — L3a, L3b, L3c, L5, L6, H4a, H4b — Decisiones 9 a 16 en
+`DECISIONES.md`, también en documento, ninguna construida) — L4a (solo la
+parte de captura; el modelo ya se cerró), L8a, H3, H4c, H4d, H5, H6, D-B,
+D-C. (H2 y H7 están decididas en documento; D-A, E2, H8b, N1, y ahora L3a,
+L3b, L3c, L5, L6, H4a y H4b, se movieron a "resuelta en documento"; el resto
+está en código.)
 
 ### N2. La tasa de mora no se puede pactar por cliente hoy — VERIFICADO el 5-sep-2026, requisito confirmado de la Fase 1 (no pregunta abierta)
 Al contestar N1 el dueño dijo que la tasa moratoria "depende del acuerdo con
@@ -994,7 +1023,7 @@ construir el paso 10 ("espejo").
 
 ## 5. Qué hacer con esto
 
-- Las **16 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
+- Las **9 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
   punto 4 se contestan en `DECISIONES.md` conforme el dueño decida, un
   renglón por decisión, con fecha.
 - El 5-sep-2026 el dueño cerró las **cuatro** preguntas que gateaban la Fase
@@ -1006,6 +1035,13 @@ construir el paso 10 ("espejo").
   camino para una cuarta ni para una tasa propia). No es una pregunta — es un
   requisito ya fijado para la Fase 1, confirmado como necesidad real de
   operación por el dueño.
+- El 7-sep-2026 el dueño cerró otras **siete**: **L3a, L3b, L3c, L5, L6, H4a,
+  H4b** (Decisiones 9 a 16 en `DECISIONES.md`) — toda la familia de "algo
+  salió mal": devoluciones, pago de más, cuándo nace la deuda con el
+  proveedor, cancelaciones y reversas. También decididas en documento,
+  ninguna construida. Un solo principio las une y queda anotado aparte en
+  `DECISIONES.md`: el sistema no borra y no decide solo — deja rastro y le
+  pregunta a la persona.
 - Nada de lo verificado hoy encontró una razón para **no empezar a construir**
   la Fase 0 del § 14 del diseño: las cuatro preguntas que la Fase 2 necesitaba
   cerradas ya están cerradas en documento, y N2 solo agrega alcance a una fase
