@@ -1839,6 +1839,8 @@ export const listInvoices = createServerFn({ method: "POST" })
       uuid_fiscal: string;
       supplier_folio: string;
       unreceived: boolean;
+      last_payment_id: number | null;
+      last_payment_name: string | null;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1866,7 +1868,17 @@ export const listInvoices = createServerFn({ method: "POST" })
           select 1 from purchase_orders po
           where po.company_id = i.company_id and po.name = i.origin
             and po.state not in ('done','cancelled')
-        )) as unreceived
+        )) as unreceived,
+        -- Paso 5: el último abono VIVO de la factura (sin reversas ni revertidos)
+        -- es el único que se puede revertir desde aquí (regla del último abono).
+        (select p.id from payment_allocs pa join payments p on p.id = pa.payment_id
+          where pa.invoice_id = i.id and p.reverses_id is null
+            and not exists (select 1 from payments r where r.reverses_id = p.id)
+          order by p.id desc limit 1) as last_payment_id,
+        (select p.name from payment_allocs pa join payments p on p.id = pa.payment_id
+          where pa.invoice_id = i.id and p.reverses_id is null
+            and not exists (select 1 from payments r where r.reverses_id = p.id)
+          order by p.id desc limit 1) as last_payment_name
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

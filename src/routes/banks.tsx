@@ -5,6 +5,8 @@ import { Field, FinanceNav, StatusPill } from "@/components/erp";
 import { MoneyField } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { addBankMove, listBanks, reconcileMove, saveBankOpening } from "@/lib/erp/ops";
+import { ReversalButton } from "@/components/cancel-doc";
+import { reversalPreview, reversePayment } from "@/lib/erp/reversal";
 import { exportCsv } from "@/lib/export-csv";
 import { cn, money, todayMx } from "@/lib/utils";
 
@@ -335,18 +337,41 @@ function Page() {
                         <p className="text-[11px] text-muted">{m.invoice || m.so_name || m.po_name}</p>
                       ) : null}
                     </td>
-                    <td className="px-3 py-3 text-muted">{m.memo || "—"}</td>
+                    <td className="px-3 py-3 text-muted">
+                      {m.memo || "—"}
+                      {m.reverses_id ? (
+                        <p className="text-[11px] text-warn">
+                          Reversa de #{m.reverses_id} ({m.reverses_date}, {money(m.reverses_amount ?? 0)})
+                        </p>
+                      ) : null}
+                      {m.reversed_by_id ? (
+                        <p className="text-[11px] text-warn">
+                          Revertido por #{m.reversed_by_id} el {m.reversed_by_date}
+                        </p>
+                      ) : null}
+                    </td>
                     <td className={cn("px-3 py-3 text-right tabular-nums", Number(m.amount) < 0 ? "text-danger" : "text-ok")}>
                       {money(m.amount)}
                     </td>
                     <td className="px-4 py-3">
-                      <button
-                        type="button"
-                        className="text-[13px] font-semibold text-forest"
-                        onClick={() => reconcileMove({ data: { moveId: m.id } }).then(load)}
-                      >
-                        {m.reconciled ? "Conciliado" : "Marcar"}
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          className="text-[13px] font-semibold text-forest"
+                          onClick={() => reconcileMove({ data: { moveId: m.id } }).then(load)}
+                        >
+                          {m.reconciled ? "Conciliado" : "Marcar"}
+                        </button>
+                        {m.payment_id && !m.reverses_id && !m.reversed_by_id ? (
+                          <ReversalButton
+                            compact
+                            paymentName={m.invoice ? `de ${m.invoice}` : ""}
+                            load={() => reversalPreview({ data: { paymentId: m.payment_id! } })}
+                            onConfirm={(reason) => reversePayment({ data: { paymentId: m.payment_id!, reason } })}
+                            onDone={load}
+                          />
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}

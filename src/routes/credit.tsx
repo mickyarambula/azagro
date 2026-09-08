@@ -12,6 +12,8 @@ import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, fxAdjustmentNote, interestInvoiceFallback, invoiceLineLabel, invoicePaperTitle } from "@/lib/erp/doc-text";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 import { circuitLabel } from "@/lib/erp/circuits";
+import { ReversalButton } from "@/components/cancel-doc";
+import { reversalPreview, reversePayment } from "@/lib/erp/reversal";
 
 export const Route = createFileRoute("/credit")({
   validateSearch: (raw: Record<string, unknown>) => ({
@@ -259,6 +261,15 @@ function Page() {
                           </button>
                         </>
                       )}
+                      {r.last_payment_id ? (
+                        <ReversalButton
+                          paymentName={r.last_payment_name ?? ""}
+                          label="Revertir último abono"
+                          load={() => reversalPreview({ data: { paymentId: r.last_payment_id! } })}
+                          onConfirm={(reason) => reversePayment({ data: { paymentId: r.last_payment_id!, reason } })}
+                          onDone={load}
+                        />
+                      ) : null}
                       <button
                         type="button"
                         className="erp-btn h-8 text-[12px]"

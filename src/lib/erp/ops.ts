@@ -1824,9 +1824,22 @@ export const listBanks = createServerFn({ method: "GET" })
       invoice: string | null;
       so_name: string | null;
       po_name: string | null;
+      payment_id: number | null;
+      reverses_id: number | null;
+      reverses_date: string | null;
+      reverses_amount: string | null;
+      reversed_by_id: number | null;
+      reversed_by_date: string | null;
     }>`
       select m.id, b.name as bank, m.date::text, m.amount::text, m.memo, p.name as partner, m.reconciled,
-        coalesce(m.kind, 'ajuste') as kind, i.name as invoice, s.name as so_name, po.name as po_name
+        coalesce(m.kind, 'ajuste') as kind, i.name as invoice, s.name as so_name, po.name as po_name,
+        m.payment_id, m.reverses_id,
+        -- BLOQUE DE DESHACER, paso 5: el par original↔reversa se ve en los dos
+        -- renglones. Nunca se esconde ninguno; la etiqueta hace que se encuentren.
+        (select o.date::text from bank_moves o where o.id = m.reverses_id) as reverses_date,
+        (select o.amount::text from bank_moves o where o.id = m.reverses_id) as reverses_amount,
+        (select r.id from bank_moves r where r.reverses_id = m.id limit 1) as reversed_by_id,
+        (select r.date::text from bank_moves r where r.reverses_id = m.id limit 1) as reversed_by_date
       from bank_moves m
       join banks b on b.id = m.bank_id
       left join partners p on p.id = m.partner_id

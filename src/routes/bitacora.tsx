@@ -60,6 +60,10 @@ const ACTION: Record<string, string> = {
   "cancelar-oc": "Canceló orden de compra",
   "revertir-fp": "Revirtió factura de proveedor",
   "cancelar-rechazado": "Cancelación RECHAZADA (algo ya se movió)",
+  // Paso 5: reversa de cobro/pago. Quedan los tres: el error, la reversa y el correcto.
+  "revertir-pago": "Revirtió cobro / pago",
+  "revertir-atc": "Revirtió ajuste TC",
+  "revertir-rechazado": "Reversa RECHAZADA",
 };
 
 type Payload = Awaited<ReturnType<typeof listAudit>>;

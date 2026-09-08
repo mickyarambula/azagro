@@ -266,3 +266,174 @@ export function CancelChainButton(props: {
     </>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Paso 5: reversa de cobro/pago. La cadena la calcula el servidor
+// (reversalPreview): qué se revierte (con importes), qué vuelve a deber, qué
+// se queda, y los números de banco y cartera antes/después. Una vez. Y al
+// final, lo que NO se puede deshacer después — la Decisión 16 dicha en el
+// momento en que importa, no en un documento.
+// ---------------------------------------------------------------------------
+type ReversalLine = { name: string; detail: string; amount: number; currency: string };
+export type ReversalPreviewView = {
+  payment: { id: number; name: string; kind: "inbound" | "outbound"; amount: number; date: string; partner: string; bank: string | null; memo: string };
+  invoice: { id: number; name: string; currency: string; residualNow: number; residualAfter: number; dueDate: string; moraDue: string | null };
+  reverts: ReversalLine[];
+  keeps: ReversalLine[];
+  bank: { name: string; before: number; after: number; reconciled: boolean } | null;
+  partnerDebt: { name: string; before: number; after: number };
+  blockers: string[];
+  allowed: boolean;
+  role: string;
+};
+
+export function ReversalButton(props: {
+  paymentName: string;
+  load: () => Promise<ReversalPreviewView>;
+  onConfirm: (reason: string) => Promise<unknown>;
+  onDone?: () => void | Promise<void>;
+  label?: string;
+  disabled?: boolean;
+  compact?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [chain, setChain] = useState<ReversalPreviewView | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openDialog() {
+    setError(null);
+    setChain(null);
+    setOpen(true);
+    try {
+      setChain(await props.load());
+    } catch (e) {
+      setError(humanError(e));
+    }
+  }
+  async function confirm() {
+    if (!reason.trim()) {
+      setError("El motivo es obligatorio.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await props.onConfirm(reason.trim());
+      setOpen(false);
+      setReason("");
+      await props.onDone?.();
+    } catch (e) {
+      setError(humanError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const blocked = Boolean(chain?.blockers.length);
+  const canConfirm = Boolean(chain) && !blocked && Boolean(chain?.allowed) && Boolean(reason.trim()) && !busy;
+  const money = (n: number, cur: string) =>
+    `${n < 0 ? "−" : ""}$${Math.abs(n).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${cur}`;
+  const verbo = chain?.payment.kind === "outbound" ? "el pago" : "el cobro";
+
+  return (
+    <>
+      <button
+        type="button"
+        className={props.compact ? "text-[12px] font-medium text-danger hover:underline" : "erp-btn h-8 text-[12px] text-danger"}
+        disabled={props.disabled}
+        onClick={() => void openDialog()}
+      >
+        {props.label ?? "Revertir"}
+      </button>
+      {open ? (
+        <div className="fixed inset-0 z-[90] grid place-items-center bg-ink/40 p-4" onClick={() => !busy && setOpen(false)}>
+          <div className="w-full max-w-lg rounded-xl border border-line bg-cream p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold">
+              Revertir {chain ? verbo : ""} {props.paymentName}
+              {chain ? ` · ${chain.payment.partner} · ${money(chain.payment.amount, chain.invoice.currency)} · ${chain.payment.date}${chain.payment.bank ? ` · ${chain.payment.bank}` : ""}` : ""}
+            </h2>
+            {!chain && !error ? <p className="mt-2 text-[12px] text-muted">Revisando qué se movió con este {verbo}…</p> : null}
+
+            {chain && blocked ? (
+              <div className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+                <p className="font-semibold">No se puede revertir.</p>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {chain.blockers.map((b, i) => (
+                    <li key={i}>{b}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-muted">Este intento quedó en la bitácora.</p>
+              </div>
+            ) : null}
+
+            {chain && !blocked ? (
+              <>
+                <p className="mt-3 text-[12px] font-semibold">Se revierte (quedan el original, la reversa y la liga entre los dos):</p>
+                <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                  {chain.reverts.map((d, i) => (
+                    <li key={i}>
+                      {d.name} · {d.detail} · {money(d.amount, d.currency)}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-3 text-[12px] font-semibold">Vuelve a deber:</p>
+                <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                  <li>
+                    {chain.invoice.name}: saldo {money(chain.invoice.residualNow, chain.invoice.currency)} → {money(chain.invoice.residualAfter, chain.invoice.currency)} · vencía {chain.invoice.dueDate}
+                    {chain.payment.kind === "inbound"
+                      ? ` · la mora vuelve a correr desde el plazo financiero${chain.invoice.moraDue ? ` (${chain.invoice.moraDue})` : ""}; lo ya facturado se queda`
+                      : ""}
+                  </li>
+                </ul>
+                {chain.keeps.length ? (
+                  <>
+                    <p className="mt-3 text-[12px] font-semibold">Se queda:</p>
+                    <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                      {chain.keeps.map((d, i) => (
+                        <li key={i}>
+                          {d.name} · {money(d.amount, d.currency)} · {d.detail}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : null}
+                <p className="mt-3 text-[12px] text-ink-soft">
+                  <span className="font-semibold">Después:</span>
+                  {chain.bank ? ` ${chain.bank.name} ${money(chain.bank.before, "MXN")} → ${money(chain.bank.after, "MXN")} ·` : ""}
+                  {` ${chain.partnerDebt.name} debe ${money(chain.partnerDebt.before, chain.invoice.currency)} → ${money(chain.partnerDebt.after, chain.invoice.currency)}`}
+                </p>
+                <p className={`mt-3 text-[12px] ${chain.allowed ? "text-muted" : "text-danger"}`}>
+                  {chain.allowed
+                    ? "Esto revierte cartera y banco: es de administrador o gerencia — tú puedes hacerlo."
+                    : "Esto revierte cartera y banco: es solo de administrador o gerencia. Pídeselo a uno de ellos."}
+                </p>
+                <label className="mt-3 grid gap-1 text-[12px] font-medium">
+                  Motivo (obligatorio)
+                  <textarea className="erp-input mt-1 w-full" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Por qué se revierte…" />
+                </label>
+                <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+                  Lo que no se puede deshacer después: la reversa también queda para siempre. No estás borrando este {verbo}, estás agregando un movimiento
+                  contrario. Si la reversa resulta ser el error, no se deshace: se captura el {verbo} correcto, y quedan los tres.
+                </p>
+              </>
+            ) : null}
+
+            {error ? <p className="mt-2 text-[12px] text-danger">{error}</p> : null}
+            <div className="mt-4 flex gap-2">
+              {chain && !blocked ? (
+                <button type="button" className="erp-btn-primary" disabled={!canConfirm} onClick={() => void confirm()}>
+                  Confirmar reversa
+                </button>
+              ) : null}
+              <button type="button" className="erp-btn ml-auto" disabled={busy} onClick={() => setOpen(false)}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
