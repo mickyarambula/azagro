@@ -561,12 +561,18 @@ function Ficha() {
                 <span>
                   {po.name} · {po.partner} · {money(po.total)}
                   <span className="ml-2">
-                    <StatusPill tone={po.state === "done" ? "ok" : "warn"}>
-                      {po.fulfill_kind === "direct" ? "Directo" : po.state === "done" ? "Recibida" : "Por recibir"}
+                    <StatusPill tone={po.state === "done" ? "ok" : po.state === "cancelled" ? "muted" : "warn"}>
+                      {po.fulfill_kind === "direct"
+                        ? "Directo"
+                        : po.state === "done"
+                          ? "Recibida"
+                          : po.state === "cancelled"
+                            ? "Cancelada"
+                            : "Por recibir"}
                     </StatusPill>
                   </span>
                 </span>
-                {canEdit && canReceive && po.state !== "done" && po.fulfill_kind !== "direct" && (
+                {canEdit && canReceive && po.state !== "done" && po.state !== "cancelled" && po.fulfill_kind !== "direct" && (
                   <button
                     type="button"
                     className="erp-btn h-8 text-[12px]"

@@ -131,6 +131,15 @@ export function noMoraMessage(name?: string) {
 }
 
 /**
+ * ¿Sigue siendo deuda? `false` para 'paid' y para 'reversed' (BLOQUE DE
+ * DESHACER, paso 0): una factura revertida no es cartera abierta, aunque no
+ * esté "pagada" — no cuenta en saldos, mora, límite de crédito ni vencimientos.
+ */
+export function invoiceStillOwed(state: string) {
+  return state !== "paid" && state !== "reversed";
+}
+
+/**
  * Mora a facturar (FI):
  *   Interés = Capital × (TIIE vencimiento + spread de cobro) × días vencidos / 360   (nunca negativo)
  *   FEGA    = Capital × tasa «comisión + FEGA» de Ajustes  (una sola vez, si ya venció y no se ha facturado)

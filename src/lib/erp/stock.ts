@@ -276,6 +276,9 @@ export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
     `;
     return 0;
   }
-  await sql`update invoices set residual = ${residual}, state = 'open' where id = ${invoiceId}`;
+  // Al reabrir, paid_date se limpia: mora (estado de cuenta) y P&L la leen
+  // como fin de los días vencidos, y un pago revertido dejaría el interés
+  // sin correr si se quedara puesta (DESHACER.md § 2.1, hueco confirmado).
+  await sql`update invoices set residual = ${residual}, state = 'open', paid_date = null where id = ${invoiceId}`;
   return residual;
 }

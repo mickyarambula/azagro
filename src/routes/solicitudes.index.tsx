@@ -80,7 +80,7 @@ function Page() {
                 <td className="px-3 py-3">{REQUEST_MODES.find((m) => m.id === r.delivery_mode)?.label ?? r.delivery_mode}</td>
                 <td className="px-3 py-3">
                   <StatusPill tone={r.state === "quoted" ? "ok" : r.state === "rfq" ? "warn" : "muted"}>
-                    {r.state === "quoted" ? "Cotizada" : r.state === "rfq" ? "Con proveedores" : "Abierta"}
+                    {r.state === "quoted" ? "Cotizada" : r.state === "rfq" ? "Con proveedores" : r.state === "cancelled" ? "Cancelada" : "Abierta"}
                   </StatusPill>
                 </td>
                 <td className="px-3 py-3 text-right tabular-nums">{qty(r.lines)}</td>

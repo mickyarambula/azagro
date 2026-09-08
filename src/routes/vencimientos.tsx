@@ -6,7 +6,7 @@ import { listInvoices } from "@/lib/azagro";
 import { getAlertDigest, sendDueAlerts, sendPartnerReminders } from "@/lib/erp/alerts";
 import { getSettings } from "@/lib/erp/ops";
 import { getUpcomingDue } from "@/lib/erp/reports";
-import { exactClock, validateDueDates } from "@/lib/erp/credit";
+import { exactClock, invoiceStillOwed, validateDueDates } from "@/lib/erp/credit";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/vencimientos")({ component: Page });
@@ -48,7 +48,7 @@ function Page() {
   const open = useMemo(
     () =>
       rows
-        .filter((r) => r.state !== "paid")
+        .filter((r) => invoiceStillOwed(r.state))
         .filter((r) => (lado === "all" ? true : r.kind === lado))
         .map((r) => {
           const clock = exactClock(r.due_date, asOf);

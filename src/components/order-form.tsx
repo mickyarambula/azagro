@@ -612,6 +612,7 @@ export function stateLabel(state: string) {
   if (state === "draft") return "Borrador";
   if (state === "confirmed") return "Confirmado";
   if (state === "done") return "Entregado";
+  if (state === "cancelled") return "Cancelado";
   return state;
 }
 

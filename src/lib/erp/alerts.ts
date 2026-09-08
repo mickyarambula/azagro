@@ -65,7 +65,7 @@ async function buildDigest(sql: Sql, companyId: number) {
     select i.name, i.kind, p.name as partner, i.due_date::text, i.residual::text
     from invoices i
     join partners p on p.id = i.partner_id
-    where i.company_id = ${companyId} and i.state <> 'paid' and i.residual > 0.009
+    where i.company_id = ${companyId} and i.state not in ('paid','reversed') and i.residual > 0.009
     order by i.due_date, i.id
   `;
   const items = rows
@@ -362,7 +362,7 @@ export const sendPartnerReminders = createServerFn({ method: "POST" })
       const rows = await sql<{ name: string; email: string; residual: string; due_date: string; partner: string }>`
         select i.name, coalesce(p.email,'') as email, i.residual::text, i.due_date::text, p.name as partner
         from invoices i join partners p on p.id = i.partner_id
-        where i.company_id = ${companyId} and i.kind = 'customer' and i.state <> 'paid' and i.residual > 0.009
+        where i.company_id = ${companyId} and i.kind = 'customer' and i.state not in ('paid','reversed') and i.residual > 0.009
       `;
       for (const r of rows) {
         if (!customers.some((c) => c.name === r.name)) continue;

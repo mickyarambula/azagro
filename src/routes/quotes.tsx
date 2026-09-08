@@ -655,12 +655,12 @@ function Page() {
               const cust = data.customers.find((c) => c.name === qrow.partner);
               const qlines = (data.lines ?? []).filter((l) => l.quote_id === qrow.id);
               const open = viewId === qrow.id;
-              const closed = qrow.state === "accepted" || qrow.state === "rejected" || qrow.state === "partial";
+              const closed = qrow.state === "accepted" || qrow.state === "rejected" || qrow.state === "partial" || qrow.state === "cancelled";
               // Aceptada pero con el pedido todavía en borrador: se puede
               // revisar (es donde se agrega una partida a ese pedido). Con el
               // pedido confirmado, no: se levanta un pedido nuevo.
               const borrador = Boolean(qrow.order_id) && qrow.order_state === "draft";
-              const revisable = qrow.state !== "rejected" && (!closed || borrador);
+              const revisable = qrow.state !== "rejected" && qrow.state !== "cancelled" && (!closed || borrador);
               const cur = qrow.currency;
               const both = (qrow.price_offer || "both") === "both";
               const paperOffer = paperOfferOf(qrow);
@@ -677,8 +677,30 @@ function Page() {
                   <td className="px-3 py-3">{offerLabel(qrow.price_offer)}{qrow.credit_days && qrow.price_offer !== "cash" ? ` · ${qrow.credit_days} d` : ""}</td>
                   <td className="px-3 py-3">{cur === "USD" ? `USD · dólar pactado ${Number(qrow.fx_rate)}` : "MXN"}</td>
                   <td className="px-3 py-3">
-                    <StatusPill tone={qrow.state === "accepted" || qrow.state === "partial" ? "ok" : qrow.state === "rejected" ? "danger" : expired ? "warn" : "muted"}>
-                      {qrow.state === "accepted" ? "Aceptada" : qrow.state === "partial" ? "Parcial" : qrow.state === "rejected" ? "Rechazada" : expired ? "Vigencia vencida" : "Vigente"}
+                    <StatusPill
+                      tone={
+                        qrow.state === "accepted" || qrow.state === "partial"
+                          ? "ok"
+                          : qrow.state === "rejected"
+                            ? "danger"
+                            : qrow.state === "cancelled"
+                              ? "muted"
+                              : expired
+                                ? "warn"
+                                : "muted"
+                      }
+                    >
+                      {qrow.state === "accepted"
+                        ? "Aceptada"
+                        : qrow.state === "partial"
+                          ? "Parcial"
+                          : qrow.state === "rejected"
+                            ? "Rechazada"
+                            : qrow.state === "cancelled"
+                              ? "Cancelada"
+                              : expired
+                                ? "Vigencia vencida"
+                                : "Vigente"}
                     </StatusPill>
                   </td>
                   <td className="px-3 py-3 text-right tabular-nums">{moneyIn(qrow.total, cur)}</td>
@@ -716,7 +738,7 @@ function Page() {
                       >
                         {open ? "Cerrar" : "Ver"}
                       </button>
-                      {!qrow.request_name && (qrow.state === "rejected" || expired) ? (
+                      {!qrow.request_name && (qrow.state === "rejected" || qrow.state === "cancelled" || expired) ? (
                         <button
                           type="button"
                           className="erp-btn h-8 text-[12px]"

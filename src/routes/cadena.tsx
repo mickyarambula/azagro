@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { FinanceNav, StatusPill } from "@/components/erp";
 import { listInvoices } from "@/lib/azagro";
-import { exactClock } from "@/lib/erp/credit";
+import { exactClock, invoiceStillOwed } from "@/lib/erp/credit";
 import { money, num } from "@/lib/utils";
 
 export const Route = createFileRoute("/cadena")({ component: Page });
@@ -18,8 +18,8 @@ function Page() {
       .catch((e) => setError(e instanceof Error ? e.message : "Error"));
   }, []);
 
-  const ar = rows.filter((r) => r.kind === "customer" && r.state !== "paid");
-  const ap = rows.filter((r) => r.kind === "supplier" && r.state !== "paid");
+  const ar = rows.filter((r) => r.kind === "customer" && invoiceStillOwed(r.state));
+  const ap = rows.filter((r) => r.kind === "supplier" && invoiceStillOwed(r.state));
   const arDue = ar.filter((r) => r.days_overdue > 0).reduce((s, r) => s + num(r.residual), 0);
   const arOpen = ar.reduce((s, r) => s + num(r.residual), 0);
   const apDue = ap.filter((r) => r.days_overdue > 0).reduce((s, r) => s + num(r.residual), 0);
@@ -29,7 +29,7 @@ function Page() {
   const byPartner = useMemo(() => {
     const map = new Map<string, { ar: number; ap: number; arOver: number; apOver: number }>();
     for (const r of rows) {
-      if (r.state === "paid") continue;
+      if (!invoiceStillOwed(r.state)) continue;
       const cur = map.get(r.partner) ?? { ar: 0, ap: 0, arOver: 0, apOver: 0 };
       const amt = num(r.residual);
       if (r.kind === "customer") {
@@ -141,7 +141,8 @@ function Col({
                 {r.partner}
               </Link>
               <p className="text-[11px] text-muted">
-                {r.name} · vence {r.due_date} · {r.state === "paid" ? "pagada" : exactClock(r.due_date).label}
+                {r.name} · vence {r.due_date} ·{" "}
+                {r.state === "paid" ? "pagada" : r.state === "reversed" ? "revertida" : exactClock(r.due_date).label}
               </p>
             </div>
             <div className="text-right">

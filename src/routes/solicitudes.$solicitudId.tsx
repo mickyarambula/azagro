@@ -304,7 +304,13 @@ function Page() {
           <h1 className="text-xl font-semibold">
             {request.name}{" "}
             <StatusPill tone={request.state === "quoted" ? "ok" : request.state === "rfq" ? "warn" : "muted"}>
-              {request.state === "quoted" ? "Cotizada al cliente" : request.state === "rfq" ? "Con proveedores" : "Abierta"}
+              {request.state === "quoted"
+                ? "Cotizada al cliente"
+                : request.state === "rfq"
+                  ? "Con proveedores"
+                  : request.state === "cancelled"
+                    ? "Cancelada"
+                    : "Abierta"}
             </StatusPill>
           </h1>
           <p className="mt-1 text-sm text-muted">

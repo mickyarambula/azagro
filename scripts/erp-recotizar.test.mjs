@@ -182,7 +182,10 @@ test("pantalla de la solicitud: quoteDead se calcula con quoteStillBlocks y libe
 
 test("pantalla de cotizaciones: Duplicar solo para cotizaciones directas muertas", () => {
   const ui = src("src/routes/quotes.tsx");
-  assert.ok(ui.includes("!qrow.request_name && (qrow.state === \"rejected\" || expired)"), "el botón debe filtrar directa + muerta");
+  assert.ok(
+    ui.includes('!qrow.request_name && (qrow.state === "rejected" || qrow.state === "cancelled" || expired)'),
+    "el botón debe filtrar directa + muerta (rechazada, cancelada o vencida — BLOQUE DE DESHACER paso 0)",
+  );
   assert.ok(ui.includes("duplicateQuote({ data: { quoteId: qrow.id } })"), "debe llamar duplicateQuote");
 });
 

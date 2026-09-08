@@ -1276,8 +1276,9 @@ export const reviseQuote = createServerFn({ method: "POST" })
     `;
     const borradores = ordenes.filter((o) => o.state === "draft");
     if (q[0].state === "rejected") throw new Error("Ya se cerró. Abre una cotización nueva.");
+    if (q[0].state === "cancelled") throw new Error("Esta cotización está cancelada.");
     if (q[0].state === "accepted" && !borradores.length) {
-      const firme = ordenes.find((o) => o.state !== "draft");
+      const firme = ordenes.find((o) => o.state !== "draft" && o.state !== "cancelled");
       throw new Error(
         firme
           ? `${firme.name} ya está confirmado: la cotización ya no se revisa. Si falta algo, levanta un pedido nuevo.`
@@ -1571,7 +1572,7 @@ export const decideQuote = createServerFn({ method: "POST" })
         valid_until::text, circuit_code
       from quotes where id = ${data.quoteId} and company_id = ${cid}
     `;
-    if (!q[0] || q[0].state === "accepted" || q[0].state === "rejected") {
+    if (!q[0] || q[0].state === "accepted" || q[0].state === "rejected" || q[0].state === "cancelled") {
       throw new Error("Esta cotización ya se cerró");
     }
     if (data.decision !== "reject") {
@@ -1801,7 +1802,7 @@ export const listBanks = createServerFn({ method: "GET" })
     `;
     const invoices = await sql<{ id: number; name: string; partner_id: number; kind: string; residual: string; currency: string }>`
       select id, name, partner_id, kind, residual::text, coalesce(currency,'MXN') as currency from invoices
-      where company_id = ${cid} and state <> 'paid' order by id desc limit 80
+      where company_id = ${cid} and state not in ('paid','reversed') order by id desc limit 80
     `;
     const sales = await sql<{ id: number; name: string; partner_id: number }>`
       select id, name, partner_id from sales_orders where company_id = ${cid} order by id desc limit 80

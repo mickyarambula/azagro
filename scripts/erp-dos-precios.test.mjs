@@ -451,7 +451,10 @@ test("la revisión acepta partidas nuevas, les resuelve costo y actualiza el ped
 test("el panel de la cotización deja agregar partida mientras el pedido siga en borrador", () => {
   const q = src("src/routes/quotes.tsx");
   assert.ok(q.includes('const borrador = Boolean(qrow.order_id) && qrow.order_state === "draft";'), "sabe si el pedido es borrador");
-  assert.ok(q.includes("const revisable = qrow.state !== \"rejected\" && (!closed || borrador);"), "revisable = abierta, o aceptada con pedido en borrador");
+  assert.ok(
+    q.includes('const revisable = qrow.state !== "rejected" && qrow.state !== "cancelled" && (!closed || borrador);'),
+    "revisable = abierta, o aceptada con pedido en borrador (y nunca una cancelada — BLOQUE DE DESHACER paso 0)",
+  );
   assert.ok(q.includes("setAddLines((ls) => [...ls, { productId: data.products[0]?.id ?? 0, qty: 1 }])"), "botón de agregar partida");
   assert.ok(q.includes("Entra al guardar la revisión: ahí pasa por costo, margen y financiamiento"), "explica cuándo entra");
   const ops = src("src/lib/erp/ops.ts");

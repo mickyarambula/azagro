@@ -383,8 +383,8 @@ export const getDashboard = createServerFn({ method: "GET" })
     `;
     const pending = await sql<{ po: number; so: number; overdue_n: number }>`
       select
-        (select count(*)::int from purchase_orders where company_id = ${cid} and state <> 'done') as po,
-        (select count(*)::int from sales_orders where company_id = ${cid} and state <> 'done') as so,
+        (select count(*)::int from purchase_orders where company_id = ${cid} and state not in ('done','cancelled')) as po,
+        (select count(*)::int from sales_orders where company_id = ${cid} and state not in ('done','cancelled')) as so,
         (select count(*)::int from invoices where company_id = ${cid} and kind = 'customer' and state = 'open' and due_date < ${today}::date) as overdue_n
     `;
     const cash = await sql<{ total: string }>`
@@ -888,7 +888,7 @@ export const listInventory = createServerFn({ method: "GET" })
       join products p on p.id = pl.product_id
       join locations l on l.id = po.location_id
       where po.company_id = ${m.company_id}
-        and po.state <> 'done'
+        and po.state not in ('done','cancelled')
         and coalesce(po.fulfill_kind,'inventory') <> 'direct'
         and pl.qty - pl.qty_received > 0.0001
       order by po.id desc
@@ -1183,7 +1183,7 @@ export const receivePurchase = createServerFn({ method: "POST" })
       where id = ${data.poId} and company_id = ${m.company_id}
       for update
     `;
-    if (!po[0] || po[0].state === "done") throw new Error("Orden no disponible");
+    if (!po[0] || po[0].state === "done" || po[0].state === "cancelled") throw new Error("Orden no disponible");
     if (po[0].fulfill_kind === "direct") {
       throw new Error("Esta OC es directa / brokeraje: no se recibe en bodega. La mercancía va en camino al cliente.");
     }
@@ -1412,7 +1412,7 @@ export const deliverSale = createServerFn({ method: "POST" })
       where id = ${data.soId} and company_id = ${m.company_id}
       for update
     `;
-    if (!so[0] || so[0].state === "done") throw new Error("Pedido no disponible");
+    if (!so[0] || so[0].state === "done" || so[0].state === "cancelled") throw new Error("Pedido no disponible");
     if (so[0].state !== "confirmed") throw new Error("Confirma el pedido antes de entregar");
     const lines = await sql<{ id: number; product_id: number; qty: string; qty_delivered: string }>`
       select id, product_id, qty::text, qty_delivered::text from sales_lines where so_id = ${so[0].id}

@@ -7,7 +7,7 @@ import { SendButton } from "@/components/send-doc";
 import { getDealTrail } from "@/lib/erp/deal";
 import { listInvoices, registerPayment, saveInvoiceReference } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
-import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, missingChargesMessage, missingRateMessage, nearestRate, noMoraMessage, policyChargesInterest, validateDueDates } from "@/lib/erp/credit";
+import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, invoiceStillOwed, missingChargesMessage, missingRateMessage, nearestRate, noMoraMessage, policyChargesInterest, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, fxAdjustmentNote, interestInvoiceFallback, invoiceLineLabel, invoicePaperTitle } from "@/lib/erp/doc-text";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
@@ -73,8 +73,8 @@ function Page() {
     const needle = q.trim().toLowerCase();
     return rows.filter((r) => {
       if (status === "paid" && r.state !== "paid") return false;
-      if (status === "open" && r.state === "paid") return false;
-      if (status === "overdue" && !(r.state !== "paid" && r.days_overdue > 0)) return false;
+      if (status === "open" && !invoiceStillOwed(r.state)) return false;
+      if (status === "overdue" && !(invoiceStillOwed(r.state) && r.days_overdue > 0)) return false;
       if (!needle) return true;
       // Buscar en las dos direcciones: el folio que dio Compaq/el proveedor,
       // o el nuestro, encuentra el mismo documento.
@@ -84,7 +84,7 @@ function Page() {
   }, [rows, status, q]);
 
   const kpis = useMemo(() => {
-    const open = rows.filter((r) => r.state !== "paid");
+    const open = rows.filter((r) => invoiceStillOwed(r.state));
     const total = rows.reduce((s, r) => s + num(r.amount), 0);
     const balance = open.reduce((s, r) => s + num(r.residual), 0);
     const paid = rows.reduce((s, r) => s + Math.max(0, num(r.amount) - num(r.residual)), 0);
@@ -155,7 +155,7 @@ function Page() {
           <tbody>
             {filtered.map((r) => {
               const paid = Math.max(0, num(r.amount) - num(r.residual));
-              const overdue = r.state !== "paid" && r.days_overdue > 0;
+              const overdue = invoiceStillOwed(r.state) && r.days_overdue > 0;
               const clock = exactClock(r.due_date);
               const cur = r.currency === "USD" ? "USD" : "MXN";
               const terms = (r.credit_days ?? 0) === 0 ? "Contado" : `${r.credit_days} d exactos`;
@@ -181,7 +181,7 @@ function Page() {
                   <td className="px-3 py-3 tabular-nums">{dateDMY(r.date)}</td>
                   <td className="px-3 py-3">
                     <p className="tabular-nums">{dateDMY(r.due_date)}</p>
-                    {r.state !== "paid" ? <p className="text-[11px] text-muted">{clock.label}</p> : null}
+                    {invoiceStillOwed(r.state) ? <p className="text-[11px] text-muted">{clock.label}</p> : null}
                     {validateDueDates({ issue: r.date, due: r.due_date, days: r.credit_days || undefined, allowPast: true }).errors[0] ? (
                       <p className="text-[11px] text-danger">Fecha inválida</p>
                     ) : null}
@@ -194,8 +194,20 @@ function Page() {
                   <td className="px-3 py-3 text-right tabular-nums">{moneyIn(paid, cur)}</td>
                   <td className="px-3 py-3 text-right tabular-nums">{moneyIn(r.residual, cur)}</td>
                   <td className="px-3 py-3">
-                    <StatusPill tone={r.state === "paid" ? "ok" : overdue ? "danger" : clock.status === "today" ? "warn" : "ok"}>
-                      {r.state === "paid" ? "Pagada" : clock.label}
+                    <StatusPill
+                      tone={
+                        r.state === "paid"
+                          ? "ok"
+                          : r.state === "reversed"
+                            ? "muted"
+                            : overdue
+                              ? "danger"
+                              : clock.status === "today"
+                                ? "warn"
+                                : "ok"
+                      }
+                    >
+                      {r.state === "paid" ? "Pagada" : r.state === "reversed" ? "Revertida" : clock.label}
                     </StatusPill>
                   </td>
                   <td className="px-4 py-3 text-right">
@@ -221,7 +233,7 @@ function Page() {
                           Mora
                         </button>
                       )}
-                      {r.state !== "paid" && (
+                      {invoiceStillOwed(r.state) && (
                         <>
                           <button type="button" className="erp-btn h-8 text-[12px]" onClick={() => setPay({ id: r.id, amount: num(r.residual), bankId: banks[0]?.id ?? 0, memo: "", date: todayMx() })}>
                             Pago

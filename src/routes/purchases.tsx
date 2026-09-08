@@ -321,8 +321,14 @@ function Page() {
                     <td className="px-3 py-3 text-muted">{destLabel}</td>
                     <td className="px-3 py-3">{o.fulfill_kind === "direct" ? "Directo" : "Inventario"}</td>
                     <td className="px-3 py-3">
-                      <StatusPill tone={o.state === "done" ? "ok" : "warn"}>
-                        {o.fulfill_kind === "direct" ? "En camino" : o.state === "done" ? "Recibida" : "Por recibir"}
+                      <StatusPill tone={o.state === "done" ? "ok" : o.state === "cancelled" ? "muted" : "warn"}>
+                        {o.fulfill_kind === "direct"
+                          ? "En camino"
+                          : o.state === "done"
+                            ? "Recibida"
+                            : o.state === "cancelled"
+                              ? "Cancelada"
+                              : "Por recibir"}
                       </StatusPill>
                     </td>
                     <td className="px-3 py-3 text-right tabular-nums">{moneyIn(o.total, o.currency)}</td>
@@ -387,7 +393,7 @@ function Page() {
                           extra={destLabel ? `Entregar en: ${destLabel}` : ""}
                           lines={qlines.map((l) => ({ qty: Number(l.qty), uom: l.uom, name: `${l.product}${l.deliver_to ? ` → ${l.deliver_to}` : ""}`, unitPrice: Number(l.unit_price) }))}
                         />
-                        {o.state !== "done" && o.fulfill_kind !== "direct" && (
+                        {o.state !== "done" && o.state !== "cancelled" && o.fulfill_kind !== "direct" && (
                           <button
                             type="button"
                             className="erp-btn h-8 text-[12px]"
