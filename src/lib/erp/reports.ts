@@ -550,6 +550,7 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
       select coalesce(sum(amount),0)::text as amount
       from invoices
       where company_id = ${companyId} and kind = 'supplier'
+        and state <> 'reversed'
         and date between ${from} and ${to}
     `;
     let expOp = 0;

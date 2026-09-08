@@ -39,6 +39,18 @@ export function weightedCost(rows: Array<{ qty: number; unitCost: number }>): nu
   return value / qty;
 }
 
+/**
+ * A qué estado va una factura después de recalcular su saldo. Regla pura,
+ * separada del SQL para poder probarla con datos: 'reversed' es terminal —
+ * una factura revertida se queda revertida aunque su saldo recalculado dé
+ * mayor que cero (BLOQUE DE DESHACER, paso 4). Lo demás es lo de siempre:
+ * saldo cero → 'paid', saldo vivo → 'open'.
+ */
+export function nextInvoiceState(current: string, residual: number): "reversed" | "paid" | "open" {
+  if (current === "reversed") return "reversed";
+  return residual <= 0.009 ? "paid" : "open";
+}
+
 /** Promedio móvil: (existencia × costo + entrada × precio) / nueva existencia. */
 export function movingAverage(oldQty: number, oldAvg: number, qtyIn: number, unitCost: number) {
   const on = Math.max(0, oldQty);
@@ -309,9 +321,10 @@ export async function seedOpeningLedger(sql: Sql, companyId: number, userId: str
 export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
   await sql`alter table invoices add column if not exists paid_date date`;
   await sql`alter table invoices add column if not exists opening_paid numeric(14,2) not null default 0`;
-  const row = await sql<{ amount: string; opening_paid: string; paid: string }>`
+  const row = await sql<{ amount: string; opening_paid: string; paid: string; state: string }>`
     select i.amount::text, coalesce(i.opening_paid, 0)::text as opening_paid,
-      coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid
+      coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid,
+      i.state
     from invoices i
     where i.id = ${invoiceId}
   `;
@@ -319,7 +332,16 @@ export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
   // opening_paid = abonos que la factura traía desde el corte de Compaq; no
   // existen como pagos aquí, pero el saldo debe respetarlos siempre.
   const residual = Math.max(0, Number(row[0].amount) - Number(row[0].opening_paid) - Number(row[0].paid));
-  const paid = residual <= 0.009;
+  const next = nextInvoiceState(row[0].state, residual);
+  if (next === "reversed") {
+    // Una factura revertida NO revive por aquí. Sin este candado, cualquier
+    // cosa que tocara sus abonos la regresaría a 'open' con todo su saldo, y
+    // la deuda que alguien revirtió a propósito volvería a la vida sin que
+    // nadie lo pidiera — rompería el principio completo del BLOQUE DE
+    // DESHACER (Decisión 16: queda rastro, no se decide solo).
+    return 0;
+  }
+  const paid = next === "paid";
   if (paid) {
     await sql`
       update invoices

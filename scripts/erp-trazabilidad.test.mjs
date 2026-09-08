@@ -157,7 +157,10 @@ test("reconstrucción histórica: saldo al corte = cargo − abono Compaq − pa
   assert.ok(ops.includes("const historico = asOf <"), "detecta el corte histórico");
   assert.ok(ops.includes("historico ? allocsAll.filter((p) => p.date <= asOf) : allocsAll"), "solo pagos hasta la fecha");
   assert.ok(ops.includes("cargo - Number(inv.opening_paid) - abono"), "saldo reconstruido de ese día");
-  assert.ok(ops.includes("historico ? invoices.filter((i) => i.date <= asOf)"), "solo facturas que ya existían");
+  // Paso 4 del BLOQUE DE DESHACER: la lista parte de las facturas VIVAS (una
+  // revertida no es cartera), y de ahí solo las que ya existían ese día.
+  assert.ok(ops.includes('const vivas = invoices.filter((i) => i.state !== "reversed");'), "una revertida no entra al estado de cuenta");
+  assert.ok(ops.includes("historico ? vivas.filter((i) => i.date <= asOf)"), "solo facturas que ya existían");
   assert.ok(ops.includes("misFis.reduce((s, f) => s + Number(f.int_part), 0)"), "FI hasta la fecha, con su desglose guardado");
 });
 

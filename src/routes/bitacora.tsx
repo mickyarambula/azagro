@@ -56,6 +56,10 @@ const ACTION: Record<string, string> = {
   "cancelar-pedido": "Canceló pedido",
   // Paso 2: la devolución no encontró con qué costo salió la mercancía.
   "devolucion-sin-costo-origen": "Devolución SIN costo de salida",
+  // Paso 4: cancelar en cascada. Un intento que se detuvo también queda.
+  "cancelar-oc": "Canceló orden de compra",
+  "revertir-fp": "Revirtió factura de proveedor",
+  "cancelar-rechazado": "Cancelación RECHAZADA (algo ya se movió)",
 };
 
 type Payload = Awaited<ReturnType<typeof listAudit>>;

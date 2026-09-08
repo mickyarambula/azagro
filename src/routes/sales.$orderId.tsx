@@ -10,7 +10,8 @@ import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
 import { deliverSale, receivePurchase, returnSale } from "@/lib/azagro";
 import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
-import { CancelButton } from "@/components/cancel-doc";
+import { CancelButton, CancelChainButton } from "@/components/cancel-doc";
+import { cancelChainPreview, cancelSalesOrderChain } from "@/lib/erp/cancel";
 import { duesPreview } from "@/components/order-form";
 import { QtyField } from "@/components/fields";
 import { validateDueDates } from "@/lib/erp/credit";
@@ -256,9 +257,19 @@ function Ficha() {
             </>
           )}
           {canEdit && state === "confirmed" && (
-            <button className="erp-btn-primary" disabled={busy} type="button" onClick={() => void deliver()}>
-              Entregar y facturar{form.routeKind !== "own" ? " (directo, sin inventario Azagro)" : ""}
-            </button>
+            <>
+              <button className="erp-btn-primary" disabled={busy} type="button" onClick={() => void deliver()}>
+                Entregar y facturar{form.routeKind !== "own" ? " (directo, sin inventario Azagro)" : ""}
+              </button>
+              <CancelChainButton
+                title="el pedido"
+                number={form.name}
+                label="Cancelar pedido"
+                load={() => cancelChainPreview({ data: { kind: "sale", id } })}
+                onConfirm={(reason) => cancelSalesOrderChain({ data: { soId: id, reason } })}
+                onDone={() => navigate({ to: "/sales", search: { tab: "todos", q: "" } })}
+              />
+            </>
           )}
           {canEdit && state === "done" && !receivedAt && (
             <button

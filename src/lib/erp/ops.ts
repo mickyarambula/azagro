@@ -1916,14 +1916,19 @@ export async function applyInvoicePayment(
     order_id: number | null;
     credit_days: number;
     circuit_code: string | null;
+    state: string;
   }>`
     select id, kind, residual::text, amount::text, coalesce(inv_class,'product') as inv_class,
       coalesce(currency,'MXN') as currency, coalesce(amount_fx,0)::text as amount_fx, coalesce(fx_agreed,0)::text as fx_agreed,
-      partner_id, name, date::text, due_date::text, order_id, coalesce(credit_days,0)::int as credit_days, circuit_code from invoices
+      partner_id, name, date::text, due_date::text, order_id, coalesce(credit_days,0)::int as credit_days, circuit_code, state from invoices
     where id = ${opts.invoiceId} and company_id = ${opts.companyId}
     for update
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
+  // BLOQUE DE DESHACER, paso 4: una factura revertida conserva su importe
+  // como historia, pero ya no es deuda — no se le cobra ni se le paga. La
+  // pantalla esconde el botón; este candado es para el servidor.
+  if (inv[0].state === "reversed") throw new Error(`${inv[0].name} está revertida: ya no es deuda, no se le puede abonar.`);
   const residual = Number(inv[0].residual);
   if (residual <= 0.009) throw new Error("Esta factura ya está saldada");
   // Factura de cliente en dólares: el libro está en pesos al TC pactado; el
@@ -2362,7 +2367,10 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         order by p.date, pa.id
       `;
 
-      const visibles = historico ? invoices.filter((i) => i.date <= asOf) : invoices;
+      // Una factura revertida (BLOQUE DE DESHACER) no es cartera: no aparece
+      // en el estado de cuenta ni suma al saldo. Su historia está en bitácora.
+      const vivas = invoices.filter((i) => i.state !== "reversed");
+      const visibles = historico ? vivas.filter((i) => i.date <= asOf) : vivas;
       const rows = visibles.map((inv) => {
         // Dos fechas por factura: due_date es el vencimiento VISIBLE al cliente
         // (120 d); credit_due es el plazo financiero real (150 d) desde el que

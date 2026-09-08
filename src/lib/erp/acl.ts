@@ -274,6 +274,17 @@ export async function assertAdmin(sql: Sql, userId: string) {
   return m;
 }
 
+/** Decisión 15: revertir lo que ya movió cartera es solo de administrador o gerencia. */
+export function canRevert(role: string) {
+  return role === "admin" || role === "gerencia";
+}
+
+export async function assertAdminOrGerencia(sql: Sql, userId: string) {
+  const m = await activeMember(sql, userId);
+  if (!canRevert(m.role)) throw new Error("Solo un administrador o gerencia puede revertir una deuda ya registrada");
+  return m;
+}
+
 // Quién ve costos de compra (por proveedor) y quién ve márgenes/utilidad.
 // Almacén y ventas nunca; contabilidad (administracion) ve márgenes pero no
 // costos por proveedor; costos completos solo administración del negocio.
