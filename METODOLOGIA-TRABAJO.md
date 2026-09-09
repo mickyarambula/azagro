@@ -77,11 +77,11 @@ Con el OK, Claude Code construye y entrega:
 
 Miguel prueba en el navegador. Tú le dices **qué número es el que más importa** de esa prueba, para que sepa dónde poner la atención.
 
-### Paso 6 — Merge
+### Paso 6 — Push a main
 
-Miguel mergea desde GitHub con botones. Tú le pasas la liga.
+Claude Code sube directo a `main` sin pull request. No hay revisión en GitHub; todo sale en un solo commit.
 
-**Aviso que costó una prueba completa:** Claude Code corre sus pruebas contra la misma base de producción, así que las migraciones se aplican al probar. Pero el **código** solo llega a producción cuando Miguel mergea y el deploy termina. Si Miguel prueba antes de mergear, corre código viejo contra una base ya migrada, y los resultados son basura. Siempre confirma el merge y espera el deploy antes de que pruebe.
+**Aviso crítico — más relevante que antes:** Claude Code corre sus pruebas contra la misma base de producción, así que las migraciones se aplican al probar. Pero el **código** solo llega a producción cuando el deploy de Vercel termina. Si Miguel prueba antes de que el deploy termine, corre código viejo contra una base ya migrada, y los resultados son basura. **Siempre confirma que el deploy entró (Vercel mostrará "Deployment successful") antes de que Miguel pruebe en producción.** En preview (antes del deploy), el code y la base están siempre en sincronía y es seguro probar.
 
 ---
 
@@ -112,7 +112,7 @@ Estos salieron de errores reales, no de teoría.
 Estas son de Cosecha. **Adáptalas a Azagro, pero la forma es la misma: una lista corta de invariantes que nunca se negocian.**
 
 - **Migraciones solo aditivas:** tablas nuevas y columnas nullable. Cero drops, renames o cambios de tipo. Si hace falta una excepción, se pide con argumento y se demuestra que no rompe nada.
-- **Anclas numéricas:** tres cifras que deben seguir intactas después de cada bloque. Se verifican antes y después, siempre. Si una se mueve, se para todo.
+- **Red de seguridad — congelación de motor y pruebas invariantes:** En Azagro los datos son de prueba, inventados; no hay "anclas numéricas" reales. La red es otra: (1) Se congela una copia del motor de antes del cambio y se compara contra el de después, caso por caso, al centavo. (2) Ninguna prueba existente puede cambiar de resultado. Si una prueba vieja tiene que actualizarse es la señal de que el comportamiento anterior se movió — ahí se para. Ejemplos en producción: `scripts/erp-circuito-lineal.test.mjs` compara +2,000 casos del motor ASR; `scripts/erp-reportes-circuito.test.mjs` compara +1,000 casos del P&L; el bloque de deshacer paso 2 cerró con 490/490 sin actualizar una prueba.
 - **Prefijos de folio nunca cambian.**
 - **UI en español. SQL, nombres de columna y código de servidor en inglés.**
 - **Datos de prueba se borran** con una función de la propia app, y las anclas se verifican después del borrado.
@@ -124,12 +124,14 @@ Estas son de Cosecha. **Adáptalas a Azagro, pero la forma es la misma: una list
 Estructura que funcionó:
 
 ```
+MODELO: Haiku 4.5 (o el que corresponda, ver § 8)
+
 NOMBRE DEL BLOQUE
 Repo: <ruta>
-Rama nueva desde main: <nombre-rama>
+Rama: main (push directo, sin PR)
 
 CONTEXTO
-Qué ya está hecho y probado. Anclas actuales.
+Qué ya está hecho y probado.
 
 REGLAS QUE NO SE ROMPEN
 La lista corta de invariantes.
@@ -150,9 +152,7 @@ PUNTO DE PARO OBLIGATORIO
 Qué debe mostrar antes de aplicar nada.
 
 AL TERMINAR
-Archivos tocados, anclas, y guía de prueba para Miguel.
-
-No hagas merge. Miguel lo hace desde GitHub.
+Archivos tocados, red de seguridad (congelación/comparación), y guía de prueba para Miguel.
 ```
 
 ---
@@ -184,18 +184,14 @@ Se le dice a Miguel antes de cada tarea, siempre.
 
 ---
 
-## 9. Lo que falta llenar para Azagro
+## 9. Lo que está resuelto en Azagro
 
-Este documento describe el método. Lo que **no** puedo darte porque no lo conozco:
-
-- Qué es Azagro y qué problema resuelve
-- Dónde vive el repo y cómo se despliega
-- Qué base de datos usa y si preview y producción comparten datos
-- **Cuáles son las anclas numéricas de Azagro** — las cifras que nunca deben moverse. Sin esto, no hay red de seguridad. Es lo primero que hay que definir.
-- Qué está construido y qué falta
-- Si existe una auditoría o lista de hallazgos como la que guió Cosecha
-
-**Primera tarea sugerida para el chat de Azagro:** una investigación de lectura del estado actual, con el mismo formato del paso 1. Que Claude Code reporte qué existe, qué está a medias, y qué decisiones faltan. De ahí sale el plan.
+- **Qué es Azagro:** ERP operativo de AZ Insumos Agrícolas (Los Mochis). Reemplaza Compaq + Excel de cartera, no el timbrado SAT.
+- **Dónde vive:** GitHub `mickyarambula/azagro`. Se despliega en Vercel con Neon (producción) o PGLite (preview/local).
+- **Base de datos:** Postgres. Preview y producción comparten esquema; datos de prueba se borran con la app.
+- **Qué existe:** stack completo (TanStack Start + React + Postgres), ocho módulos de navegación, kardex, cartera, circuitos de financiamiento, decisiones 1-45 anotadas en `DECISIONES.md`.
+- **Auditorías:** `LOGICA.md` (20 hallazgos), `EXCEL_VS_SISTEMA.md` (comparación contra Excel real), `ESTADO.md` (contradicciones resueltas), `DISENO_FINANCIAMIENTO.md` (diseño vigente), `DESHACER.md` (bloques 0-8 de cancelación y reversa).
+- **Red de seguridad:** congelación de motor y pruebas invariantes (§ 5, no anclas numéricas).
 
 ---
 

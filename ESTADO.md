@@ -541,6 +541,13 @@ limpieza dedicado, porque tocan cartera, kardex y bitácora a la vez
 mercancía equivocada, ¿cómo se regresa y cómo se baja la deuda con el
 proveedor?*
 
+**Aclaración (9-sep-2026):** Revertir una recepción (paso 6, `DESHACER.md`) **no
+es** lo mismo que devolver mercancía al proveedor. La reversa de recepción es
+un ajuste de kardex/contabilidad (la mercancía nunca llegó o se registró por
+error). Una devolución es una venta real de regreso: la mercancía llegó, la
+recibimos, la pasamos a bodega, y **después** descubrimos que está equivocada o
+defectuosa. Los dos casos necesitan documentos distintos. H4c sigue abierta.
+
 ### H4d. Recepciones y entregas parciales (LOGICA h.17)
 **ABIERTA.** Siempre completas. *Para el dueño: si el proveedor manda 20 de 50
 tambos, o si al cliente se le entrega en dos viajes, ¿se registra por partes?*
@@ -569,6 +576,17 @@ caminos, cada uno con su costo:*
   solo para este caso, y cada función que hoy es un solo `assertCan` pasaría a
   aceptar dos permisos válidos (el fino o el de módulo completo).
 No se construye hasta que el dueño elija uno.
+
+### H4f. Candado sin salida: reversa de devolución con amarre incompleto (DESHACER § 7)
+**ABIERTA.** En el paso 8 (reversa de devolución), si el movimiento `return`
+viejo no puede amarrarse exacto (por falta del folio de la NC en `origin`, como
+antes de la Decisión 42), la reversa se bloquea sin ofrecer un camino legítimo
+(`return-reversal.ts:180-182`). Esto choca con el patrón **B3 de
+PATRONES-DISENO.md**: "Un candaco sin salida es peor que el bug que tapa."
+*Para el dueño: ¿qué se debe hacer con una devolución de prueba cuya reversa
+no se puede calcular de forma segura?* Los dos datos de prueba de referencia
+(`PV-0003`, `PV-0004`, DESHACER § 4.5) pueden quedarse atrapados aquí si hay
+devoluciones previas sin amarre.
 
 ### H5. Lotes y caducidad
 **ABIERTA.** CLAUDE.md los pone "después"; nadie ha dicho cuándo ni cómo.
@@ -667,15 +685,16 @@ código de hoy sigue usando una sola tasa de la tabla (`ops.ts:1954`,
 `credit.ts:156`); falta construir la tabla de dos columnas y aplicar esta
 regla.
 
-**ABIERTAS en esta lista: 9** (llegaron a ser 19, luego 17 con N1 abierta; el
+**ABIERTAS en esta lista: 10** (llegaron a ser 19, luego 17 con N1 abierta; el
 5-sep-2026 se cerraron D-A, H8b, E2 y, más tarde el mismo día, N1 — las
 cuatro en documento, ninguna construida; el 7-sep-2026 se cerraron otras
 siete — L3a, L3b, L3c, L5, L6, H4a, H4b — Decisiones 9 a 16 en
-`DECISIONES.md`, también en documento, ninguna construida) — L4a (solo la
-parte de captura; el modelo ya se cerró), L8a, H3, H4c, H4d, H5, H6, D-B,
-D-C. (H2 y H7 están decididas en documento; D-A, E2, H8b, N1, y ahora L3a,
-L3b, L3c, L5, L6, H4a y H4b, se movieron a "resuelta en documento"; el resto
-está en código.)
+`DECISIONES.md`, también en documento, ninguna construida; el 9-sep-2026 se
+agregó H4f, y se aclaró que H4c es ortogonal a la reversa de recepción) — L4a
+(solo la parte de captura; el modelo ya se cerró), L8a, H3, H4c, H4d, H4f, H5,
+H6, D-B, D-C. (H2 y H7 están decididas en documento; D-A, E2, H8b, N1, y ahora
+L3a, L3b, L3c, L5, L6, H4a y H4b, se movieron a "resuelta en documento"; el
+resto está en código.)
 
 ### N2. La tasa de mora no se puede pactar por cliente hoy — VERIFICADO el 5-sep-2026, requisito confirmado de la Fase 1 (no pregunta abierta)
 Al contestar N1 el dueño dijo que la tasa moratoria "depende del acuerdo con
