@@ -333,8 +333,8 @@ export const getOrder = createServerFn({ method: "POST" })
         },
       };
     });
-    const invoices = await sql<{ id: number; name: string; due_date: string; residual: string; state: string }>`
-      select id, name, due_date::text, residual::text, state
+    const invoices = await sql<{ id: number; name: string; due_date: string; residual: string; state: string; reverses_id: number | null }>`
+      select id, name, due_date::text, residual::text, state, reverses_id
       from invoices where company_id = ${companyId} and order_id = ${data.id}
       order by id
     `;

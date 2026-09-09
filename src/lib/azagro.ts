@@ -411,6 +411,14 @@ export const getDashboard = createServerFn({ method: "GET" })
       where company_id = ${cid} and kind = 'customer' and name like 'NC-%' and reverses_id is not null
         and coalesce(folio_fiscal,'') = '' and coalesce(uuid_fiscal,'') = ''
     `;
+    // Paso 8 (Decisión 41): NC de devolución revertidas que estaban timbradas
+    // y siguen sin cancelarse ante el SAT. Para el SAT esa devolución sigue
+    // viva hasta que alguien la cancele en Compaq y capture aquí la fecha.
+    const ncPendientesSat = await sql<{ n: number }>`
+      select count(*)::int as n from invoices
+      where company_id = ${cid} and kind = 'customer' and name like 'NC-%' and state = 'reversed' and reverses_id is null
+        and (coalesce(folio_fiscal,'') <> '' or coalesce(uuid_fiscal,'') <> '') and sat_cancelled_at is null
+    `;
     const fpSinRecibir = await sql<{ n: number }>`
       select count(*)::int as n
       from invoices i
@@ -443,6 +451,7 @@ export const getDashboard = createServerFn({ method: "GET" })
       orphanCustomers: seePartners ? orphan[0]?.n ?? 0 : 0,
       fpSinRecibir: seeCredit ? fpSinRecibir[0]?.n ?? 0 : 0,
       ncSinTimbrar: seeCredit ? ncSinTimbrar[0]?.n ?? 0 : 0,
+      ncPendientesSat: seeCredit ? ncPendientesSat[0]?.n ?? 0 : 0,
       aging: seeCredit ? aging.map((a) => ({ bucket: a.bucket, amount: Number(a.amount) })) : [],
       recentInv: seeCredit ? recentInv : [],
       locStock: locStock.map((l) => ({
@@ -1668,6 +1677,12 @@ export const returnSale = createServerFn({ method: "POST" })
     `;
     const direct = so[0].route_kind === "supplier" || so[0].route_kind === "asr";
     const today = todayMx();
+    // Decisión 42: el folio de la NC se calcula antes de mover inventario, para
+    // que el movimiento `return` lleve en `origin` la NC que lo causó — como el
+    // `receipt` lleva la OC y el `delivery` el pedido. Así, dentro de un año,
+    // se sabe de cuál devolución fue cada movimiento sin leer bitácora.
+    const ncN = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and name like 'NC-%'`;
+    const ncName = `NC-${String((ncN[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     let credit = 0;
     const posted: string[] = [];
     const costs: Array<{
@@ -1698,7 +1713,7 @@ export const returnSale = createServerFn({ method: "POST" })
           companyId: m.company_id,
           userId: context.userId,
           moveType: "return",
-          origin: so[0].name,
+          origin: ncName,
           productId: take.productId,
           quantity: take.qty,
           locationTo: so[0].location_id,
@@ -1723,8 +1738,6 @@ export const returnSale = createServerFn({ method: "POST" })
     }
     if (credit <= 0.009) throw new Error("La devolución no tiene importe");
 
-    const ncN = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and name like 'NC-%'`;
-    const ncName = `NC-${String((ncN[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const note = (data.reason || "").trim() || `Devolución de ${so[0].name}`;
     const nc = await sql<{ id: number }>`
       insert into invoices (
@@ -1862,6 +1875,8 @@ export const listInvoices = createServerFn({ method: "POST" })
       last_payment_name: string | null;
       sin_timbrar: boolean;
       reverses_name: string | null;
+      pendiente_sat: boolean;
+      sat_cancelled_at: string | null;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1902,7 +1917,12 @@ export const listInvoices = createServerFn({ method: "POST" })
           order by p.id desc limit 1) as last_payment_name,
         -- Paso 7: la NC contraria de una reversa sin folio fiscal capturado.
         (i.kind = 'customer' and i.reverses_id is not null and coalesce(i.folio_fiscal,'') = '' and coalesce(i.uuid_fiscal,'') = '') as sin_timbrar,
-        (select o.name from invoices o where o.id = i.reverses_id) as reverses_name
+        (select o.name from invoices o where o.id = i.reverses_id) as reverses_name,
+        -- Paso 8 (Decisión 41): NC de devolución revertida que estaba timbrada y
+        -- todavía no se cancela ante el SAT. Se limpia al capturar la fecha.
+        (i.kind = 'customer' and i.name like 'NC-%' and i.state = 'reversed' and i.reverses_id is null
+          and (coalesce(i.folio_fiscal,'') <> '' or coalesce(i.uuid_fiscal,'') <> '') and i.sat_cancelled_at is null) as pendiente_sat,
+        i.sat_cancelled_at::text
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}
@@ -1927,6 +1947,8 @@ export const saveInvoiceReference = createServerFn({ method: "POST" })
       folioFiscal: z.string().optional(),
       uuidFiscal: z.string().optional(),
       supplierFolio: z.string().optional(),
+      /** Decisión 41: cuándo se canceló ante el SAT un CFDI que este sistema revirtió. Vacío = pendiente. */
+      satCancelledAt: z.string().optional(),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -1941,9 +1963,11 @@ export const saveInvoiceReference = createServerFn({ method: "POST" })
       folio_fiscal: string;
       uuid_fiscal: string;
       supplier_folio: string;
+      state: string;
+      sat_cancelled_at: string | null;
     }>`
       select id, kind, name, coalesce(folio_fiscal,'') as folio_fiscal, coalesce(uuid_fiscal,'') as uuid_fiscal,
-        coalesce(supplier_folio,'') as supplier_folio
+        coalesce(supplier_folio,'') as supplier_folio, state, sat_cancelled_at::text
       from invoices where id = ${data.invoiceId} and company_id = ${m.company_id} limit 1
     `;
     if (!inv[0]) throw new Error("Factura no encontrada");
@@ -1956,8 +1980,19 @@ export const saveInvoiceReference = createServerFn({ method: "POST" })
     const folioFiscal = data.folioFiscal !== undefined ? data.folioFiscal.trim() : inv[0].folio_fiscal;
     const uuidFiscal = data.uuidFiscal !== undefined ? data.uuidFiscal.trim() : inv[0].uuid_fiscal;
     const supplierFolio = data.supplierFolio !== undefined ? data.supplierFolio.trim() : inv[0].supplier_folio;
+    // La fecha de cancelación ante el SAT solo tiene sentido en un documento de
+    // cliente que este sistema revirtió y que estaba timbrado.
+    let satCancelledAt: string | null = inv[0].sat_cancelled_at;
+    if (data.satCancelledAt !== undefined) {
+      const v = data.satCancelledAt.trim();
+      if (v && inv[0].kind !== "customer") throw new Error("La cancelación ante el SAT solo aplica a documentos de cliente.");
+      if (v && inv[0].state !== "reversed") throw new Error(`${inv[0].name} no está revertida: no hay cancelación ante el SAT que registrar.`);
+      if (v && !folioFiscal && !uuidFiscal) throw new Error(`${inv[0].name} no tiene folio fiscal ni UUID: no estaba timbrada, no hay nada que cancelar ante el SAT.`);
+      satCancelledAt = v || null;
+    }
     await sql`
-      update invoices set folio_fiscal = ${folioFiscal}, uuid_fiscal = ${uuidFiscal}, supplier_folio = ${supplierFolio}
+      update invoices set folio_fiscal = ${folioFiscal}, uuid_fiscal = ${uuidFiscal}, supplier_folio = ${supplierFolio},
+        sat_cancelled_at = ${satCancelledAt}
       where id = ${inv[0].id}
     `;
     const describe = (folio: string, uuid: string, supplier: string) =>
@@ -1971,7 +2006,9 @@ export const saveInvoiceReference = createServerFn({ method: "POST" })
       entity: "invoice",
       entityId: inv[0].id,
       name: inv[0].name,
-      detail: `${describe(inv[0].folio_fiscal, inv[0].uuid_fiscal, inv[0].supplier_folio)} → ${describe(folioFiscal, uuidFiscal, supplierFolio)}`,
+      detail: `${describe(inv[0].folio_fiscal, inv[0].uuid_fiscal, inv[0].supplier_folio)} → ${describe(folioFiscal, uuidFiscal, supplierFolio)}${
+        satCancelledAt !== inv[0].sat_cancelled_at ? ` · cancelada ante el SAT: ${inv[0].sat_cancelled_at ?? "pendiente"} → ${satCancelledAt ?? "pendiente"}` : ""
+      }`,
     });
     return { ok: true };
   });

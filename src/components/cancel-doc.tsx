@@ -773,3 +773,193 @@ export function DeliveryReversalButton(props: {
     </>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Paso 8: revertir una devolución. Enseña qué sale del inventario (al costo
+// con el que regresó), el contra-abono, la FV que vuelve a deber, la FI que
+// se queda, y — si la NC estaba timbrada — que hay que CANCELARLA ante el SAT
+// desde Compaq y capturar aquí la fecha (Decisión 41).
+// ---------------------------------------------------------------------------
+type RLine = { name: string; detail: string; amount: number; currency: string };
+export type ReturnReversalView = {
+  nc: { id: number; name: string; date: string; amount: number; residual: number; state: string; timbrada: { folio: string; uuid: string } | null };
+  so: { id: number; name: string; partner: string; currency: string; direct: boolean };
+  fv: { id: number; name: string; residualNow: number; residualAfter: number; dueDate: string } | null;
+  virtualPayment: { id: number; name: string; amount: number } | null;
+  stock: Array<{ code: string; product: string; uom: string; qty: number; unitCost: number; value: number; location: string; qtyBefore: number; qtyAfter: number; avg: number; moveRef: string; matchedBy: "nc" | "legacy" }>;
+  keeps: RLine[];
+  partnerDebt: { name: string; before: number; after: number };
+  blockers: string[];
+  allowed: boolean;
+  role: string;
+};
+
+export function ReturnReversalButton(props: {
+  ncName: string;
+  load: () => Promise<ReturnReversalView>;
+  onConfirm: (reason: string) => Promise<unknown>;
+  onDone?: () => void | Promise<void>;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [chain, setChain] = useState<ReturnReversalView | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openDialog() {
+    setError(null);
+    setChain(null);
+    setOpen(true);
+    try {
+      setChain(await props.load());
+    } catch (e) {
+      setError(humanError(e));
+    }
+  }
+  async function confirm() {
+    if (!reason.trim()) {
+      setError("El motivo es obligatorio.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await props.onConfirm(reason.trim());
+      setOpen(false);
+      setReason("");
+      await props.onDone?.();
+    } catch (e) {
+      setError(humanError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const blocked = Boolean(chain?.blockers.length);
+  const canConfirm = Boolean(chain) && !blocked && Boolean(chain?.allowed) && Boolean(reason.trim()) && !busy;
+  const m = (n: number, cur = "MXN") => `${n < 0 ? "−" : ""}$${Math.abs(n).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${cur}`;
+  const m4 = (n: number) => `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+
+  return (
+    <>
+      <button type="button" className="text-[12px] font-medium text-danger hover:underline" disabled={props.disabled} onClick={() => void openDialog()}>
+        Revertir devolución
+      </button>
+      {open ? (
+        <div className="fixed inset-0 z-[90] grid place-items-center bg-ink/40 p-4" onClick={() => !busy && setOpen(false)}>
+          <div className="w-full max-w-lg rounded-xl border border-line bg-cream p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold">
+              Revertir la devolución {props.ncName}
+              {chain ? ` · ${chain.so.name} · ${chain.so.partner} · ${chain.nc.date}` : ""}
+            </h2>
+            {!chain && !error ? <p className="mt-2 text-[12px] text-muted">Revisando qué se movió con esta devolución…</p> : null}
+
+            {chain && blocked ? (
+              <div className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+                <p className="font-semibold">No se puede revertir.</p>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {chain.blockers.map((b, i) => (
+                    <li key={i}>{b}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-muted">Este intento quedó en la bitácora.</p>
+              </div>
+            ) : null}
+
+            {chain && !blocked ? (
+              <>
+                {chain.stock.length ? (
+                  <>
+                    <p className="mt-3 text-[12px] font-semibold">Sale del inventario (queda la entrada, la salida y la liga):</p>
+                    <ul className="list-disc space-y-1 pl-5 text-[12px] text-ink-soft">
+                      {chain.stock.map((l) => (
+                        <li key={l.moveRef}>
+                          {l.code} {l.product} · {l.qty} {l.uom} · {l.location} · al costo con el que regresó {m(l.unitCost)} = {m(l.value)}
+                          <br />
+                          Existencia {l.qtyBefore} → {l.qtyAfter} {l.uom} · Promedio {m4(l.avg)} → {m4(l.avg)} (no se mueve)
+                          {l.matchedBy === "legacy" ? <span className="text-muted"> · amarrado por producto, cantidad y fecha (devolución anterior a la liga por folio)</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <p className="mt-3 text-[12px] text-muted">Pedido directo / brokeraje: la devolución no movió inventario de Azagro.</p>
+                )}
+                <p className="mt-3 text-[12px] font-semibold">Se revierte:</p>
+                <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                  <li>
+                    {chain.nc.name} · {m(chain.nc.amount, chain.so.currency)} → se marca revertida (no tiene documento contrario)
+                  </li>
+                  {chain.virtualPayment ? (
+                    <li>
+                      {chain.virtualPayment.name} · abono de la devolución {m(chain.virtualPayment.amount, chain.so.currency)} aplicado a {chain.fv?.name} → contra-abono{" "}
+                      {m(-chain.virtualPayment.amount, chain.so.currency)}, sin banco (nunca lo tuvo)
+                    </li>
+                  ) : null}
+                </ul>
+                {chain.nc.timbrada ? (
+                  <p className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+                    <span className="font-semibold">{chain.nc.name} está timbrada</span> ({chain.nc.timbrada.uuid || chain.nc.timbrada.folio}). Este sistema no cancela ante el SAT: hay que
+                    cancelar ese CFDI desde Compaq y capturar aquí la fecha (Cartera → Folio fiscal). Hasta entonces, para el SAT la devolución sigue viva.
+                  </p>
+                ) : null}
+                {chain.fv ? (
+                  <>
+                    <p className="mt-3 text-[12px] font-semibold">Vuelve a deber:</p>
+                    <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                      <li>
+                        {chain.fv.name}: saldo {m(chain.fv.residualNow, chain.so.currency)} → {m(chain.fv.residualAfter, chain.so.currency)} · vencía {chain.fv.dueDate} · si el abono la había cerrado, la mora vuelve a
+                        correr; lo ya facturado se queda
+                      </li>
+                    </ul>
+                  </>
+                ) : null}
+                {chain.keeps.length ? (
+                  <>
+                    <p className="mt-3 text-[12px] font-semibold">Se queda:</p>
+                    <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                      {chain.keeps.map((d, i) => (
+                        <li key={i}>
+                          {d.name} · {m(d.amount, d.currency)} · {d.detail}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : null}
+                <p className="mt-2 text-[12px] text-ink-soft">
+                  <span className="font-semibold">Después:</span> {chain.partnerDebt.name} debe {m(chain.partnerDebt.before, chain.so.currency)} → {m(chain.partnerDebt.after, chain.so.currency)}
+                </p>
+                <p className={`mt-3 text-[12px] ${chain.allowed ? "text-muted" : "text-danger"}`}>
+                  {chain.allowed
+                    ? "Esto revierte inventario y cartera: es de administrador o gerencia — tú puedes hacerlo."
+                    : "Esto revierte inventario y cartera: es solo de administrador o gerencia. Pídeselo a uno de ellos."}
+                </p>
+                <label className="mt-3 grid gap-1 text-[12px] font-medium">
+                  Motivo (obligatorio)
+                  <textarea className="erp-input mt-1 w-full" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Por qué se revierte…" />
+                </label>
+                <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+                  Lo que no se puede deshacer después: la salida del inventario y el contra-abono también quedan para siempre. No estás borrando la devolución, estás
+                  agregando los movimientos contrarios.
+                </p>
+              </>
+            ) : null}
+
+            {error ? <p className="mt-2 text-[12px] text-danger">{error}</p> : null}
+            <div className="mt-4 flex gap-2">
+              {chain && !blocked ? (
+                <button type="button" className="erp-btn-primary" disabled={!canConfirm} onClick={() => void confirm()}>
+                  Confirmar reversa
+                </button>
+              ) : null}
+              <button type="button" className="erp-btn ml-auto" disabled={busy} onClick={() => setOpen(false)}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}

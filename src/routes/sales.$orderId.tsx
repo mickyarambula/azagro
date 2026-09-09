@@ -10,7 +10,8 @@ import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
 import { deliverSale, receivePurchase, returnSale } from "@/lib/azagro";
 import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
-import { CancelButton, CancelChainButton, DeliveryReversalButton } from "@/components/cancel-doc";
+import { CancelButton, CancelChainButton, DeliveryReversalButton, ReturnReversalButton } from "@/components/cancel-doc";
+import { returnReversalPreview, reverseReturn } from "@/lib/erp/return-reversal";
 import { deliveryReversalPreview, reverseDelivery } from "@/lib/erp/delivery-reversal";
 import { cancelChainPreview, cancelSalesOrderChain } from "@/lib/erp/cancel";
 import { duesPreview } from "@/components/order-form";
@@ -41,7 +42,7 @@ function Ficha() {
   const [state, setState] = useState("draft");
   const [cancelledAt, setCancelledAt] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState("");
-  const [invoices, setInvoices] = useState<Array<{ id: number; name: string; due_date: string; residual: string; state: string }>>([]);
+  const [invoices, setInvoices] = useState<Array<{ id: number; name: string; due_date: string; residual: string; state: string; reverses_id: number | null }>>([]);
   const [purchases, setPurchases] = useState<
     Array<{ id: number; name: string; partner: string; state: string; total: string; fulfill_kind: string }>
   >([]);
@@ -645,8 +646,16 @@ function Ficha() {
                 <span>
                   {inv.name} · vence {fmtDate(inv.due_date)}
                 </span>
-                <span className="tabular-nums">
+                <span className="flex items-center gap-2 tabular-nums">
                   {moneyIn(inv.residual, form.currency)} · {inv.state}
+                  {canEdit && inv.name.startsWith("NC-") && !inv.reverses_id && inv.state !== "reversed" ? (
+                    <ReturnReversalButton
+                      ncName={inv.name}
+                      load={() => returnReversalPreview({ data: { ncId: inv.id } })}
+                      onConfirm={(reason) => reverseReturn({ data: { ncId: inv.id, reason } })}
+                      onDone={load}
+                    />
+                  ) : null}
                 </span>
               </li>
             ))}

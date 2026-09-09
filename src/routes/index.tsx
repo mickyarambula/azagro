@@ -117,6 +117,20 @@ function Home() {
         </Link>
       )}
 
+      {Boolean(data?.ncPendientesSat) && (
+        <Link
+          to="/credit"
+          search={{ lado: "cobrar" }}
+          className="mt-4 flex items-center justify-between rounded-md border border-danger bg-cream px-3 py-2 text-sm text-danger"
+        >
+          <span>
+            {data!.ncPendientesSat} nota{data!.ncPendientesSat === 1 ? "" : "s"} de crédito revertida{data!.ncPendientesSat === 1 ? "" : "s"} que estaba{data!.ncPendientesSat === 1 ? "" : "n"} timbrada{data!.ncPendientesSat === 1 ? "" : "s"}. Para el SAT esa devolución
+            sigue viva: hay que cancelar el CFDI en Compaq y capturar aquí la fecha.
+          </span>
+          <span className="font-medium underline decoration-dotted">Ver</span>
+        </Link>
+      )}
+
       {Boolean(data?.ncSinTimbrar) && (
         <Link
           to="/credit"

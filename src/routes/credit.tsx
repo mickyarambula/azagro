@@ -34,6 +34,8 @@ function Page() {
     folioFiscal: string;
     uuidFiscal: string;
     supplierFolio: string;
+    satCancelledAt: string;
+    pendienteSat: boolean;
   } | null>(null);
   const [pay, setPay] = useState<{
     id: number;
@@ -173,6 +175,10 @@ function Page() {
                     {r.unreceived ? (
                       <p className="text-[11px] font-normal text-warn">Mercancía no recibida</p>
                     ) : null}
+                    {r.pendiente_sat ? (
+                      <p className="text-[11px] font-normal text-danger">Revertida y timbrada: cancelar ante el SAT en Compaq y capturar aquí la fecha</p>
+                    ) : null}
+                    {r.sat_cancelled_at ? <p className="text-[11px] font-normal text-muted">Cancelada ante el SAT el {r.sat_cancelled_at}</p> : null}
                     {r.reverses_name ? (
                       <p className={`text-[11px] font-normal ${r.sin_timbrar ? "text-danger" : "text-muted"}`}>
                         Reversa de {r.reverses_name}{r.sin_timbrar ? " · SIN TIMBRAR: para el SAT la venta sigue viva" : ""}
@@ -285,6 +291,8 @@ function Page() {
                             folioFiscal: r.folio_fiscal || "",
                             uuidFiscal: r.uuid_fiscal || "",
                             supplierFolio: r.supplier_folio || "",
+                            satCancelledAt: r.sat_cancelled_at || "",
+                            pendienteSat: Boolean(r.pendiente_sat) || Boolean(r.sat_cancelled_at),
                           })
                         }
                       >
@@ -596,6 +604,7 @@ function Page() {
                         invoiceId: folioEdit.id,
                         folioFiscal: folioEdit.folioFiscal.trim(),
                         uuidFiscal: folioEdit.uuidFiscal.trim(),
+                        ...(folioEdit.pendienteSat ? { satCancelledAt: folioEdit.satCancelledAt.trim() } : {}),
                       }
                     : { invoiceId: folioEdit.id, supplierFolio: folioEdit.supplierFolio.trim() },
               });
@@ -633,6 +642,21 @@ function Page() {
                     onChange={(e) => setFolioEdit({ ...folioEdit, uuidFiscal: e.target.value })}
                   />
                 </label>
+                {folioEdit.pendienteSat ? (
+                  <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+                    Cancelada ante el SAT el
+                    <input
+                      type="date"
+                      className="erp-input"
+                      value={folioEdit.satCancelledAt}
+                      onChange={(e) => setFolioEdit({ ...folioEdit, satCancelledAt: e.target.value })}
+                    />
+                    <span className="normal-case tracking-normal text-muted">
+                      Este documento se revirtió aquí y estaba timbrado. Este sistema no cancela ante el SAT: se cancela desde Compaq y aquí se registra
+                      la fecha. En blanco = pendiente.
+                    </span>
+                  </label>
+                ) : null}
               </>
             ) : (
               <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
