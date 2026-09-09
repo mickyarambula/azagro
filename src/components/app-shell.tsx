@@ -6,6 +6,9 @@ import {
   ClipboardList,
   ChevronDown,
   HelpCircle,
+  Home,
+  Landmark,
+  ShoppingCart,
   Menu,
   Moon,
   Search,
@@ -14,7 +17,6 @@ import {
   Sun,
   Users,
   Warehouse,
-  Wallet,
   X,
 } from "lucide-react";
 import { RedirectToSignIn, SignOutButton, UserButton } from "@/lib/auth/gates";
@@ -24,9 +26,10 @@ import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { AccessProvider } from "@/lib/access";
 import { createCompany } from "@/lib/azagro";
 import { getAlertDigest } from "@/lib/erp/alerts";
+import { listFavorites, toggleFavorite } from "@/lib/erp/favorites";
 import { getAccessState, requestAccess } from "@/lib/erp/users";
 import { pathModule, type AclLevel, type ModuleId } from "@/lib/erp/acl";
-import { MODULES, moduleForPath, sectionForPath, tabTone, type ModuleDef } from "@/lib/nav";
+import { MODULES, moduleForPath, sectionByKey, sectionForPath, tabTone, type ModuleDef, type SectionDef } from "@/lib/nav";
 import { applyTheme, readThemePref, resolvedTheme, type ThemePref } from "@/lib/theme";
 import { rememberPath } from "@/lib/trail";
 import { cn } from "@/lib/utils";
@@ -35,11 +38,12 @@ const DocPreviewHost = lazy(() =>
   import("@/components/doc-preview").then((m) => ({ default: m.DocPreviewHost })),
 );
 const RAIL_ICONS: Record<string, typeof Star> = {
-  favorites: Star,
-  orders: ClipboardList,
+  home: Home,
+  sales: ShoppingCart,
+  purchases: ClipboardList,
   warehouse: Warehouse,
+  credit: Landmark,
   contacts: Users,
-  finance: Wallet,
   reports: BarChart3,
   settings: Settings,
 };
@@ -64,6 +68,8 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
   const [open, setOpen] = useState(false);
   const [modOpen, setModOpen] = useState(false);
   const [secOpen, setSecOpen] = useState(false);
+  // Favoritos del menú de esta persona (member_favorites, migración 0031).
+  const [favs, setFavs] = useState<string[]>([]);
   const [find, setFind] = useState(false);
   const [digest, setDigest] = useState(digestCache?.data ?? null);
   const [navHover, setNavHover] = useState("");
@@ -119,6 +125,13 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
     void refresh().finally(() => window.clearTimeout(t));
     return () => window.clearTimeout(t);
   }, [user]);
+
+  useEffect(() => {
+    if (!state || state.status !== "ok") return;
+    listFavorites()
+      .then(setFavs)
+      .catch(() => setFavs([]));
+  }, [state]);
 
   useEffect(() => {
     if (!state || state.status !== "ok") return;
@@ -209,12 +222,21 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
     const mod = pathModule(to);
     return (acl[mod] ?? "none") !== "none";
   };
+  // Patrón B1 (decisión del dueño, 9-sep-2026): una sección que el rol no
+  // puede abrir no se lista — antes salía y al clic daba "Sin permiso".
+  const visibleSections = (m: ModuleDef) => {
+    const own = m.sections.filter((s) => canSeePath(s.to));
+    if (m.id !== "home") return own;
+    // Inicio lista lo que la persona marcó con la estrella (solo lo que puede abrir).
+    const starred = favs.map(sectionByKey).filter((s): s is SectionDef => !!s && canSeePath(s.to));
+    return [...own, ...starred];
+  };
   const visibleModules = MODULES.filter((m) => {
-    if (m.id === "favorites") return (acl.dashboard ?? "none") !== "none";
+    if (m.id === "home") return (acl.dashboard ?? "none") !== "none";
     if (m.id === "settings") return (acl.settings ?? "none") !== "none" || (acl.users ?? "none") !== "none";
     return m.sections.some((s) => canSeePath(s.to));
   });
-  const mod = moduleForPath(pathname);
+  const mod = moduleForPath(pathname, search);
   const section = sectionForPath(pathname, search);
   const tone = tabTone(pathname);
   const searchTab = tabFromSearch(search);
@@ -282,7 +304,7 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
             <ChevronDown className={cn("size-3.5 text-muted transition", openFolder && "rotate-180")} />
           </button>
           {openFolder
-            ? m.sections.map((s) => (
+            ? visibleSections(m).map((s) => (
                 <Link
                   key={s.to + s.label + JSON.stringify(s.search ?? {})}
                   to={s.to as "/"}
@@ -351,7 +373,7 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
               {modOpen ? (
                 <MenuList
                   items={visibleModules
-                    .filter((m) => m.id !== "favorites" && m.id !== "settings")
+                    .filter((m) => m.id !== "home" && m.id !== "settings")
                     .map((m) => ({ to: m.to, label: m.label }))}
                   onClose={() => setModOpen(false)}
                 />
@@ -366,13 +388,25 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
                 }}
               >
                 <span className="truncate">{section.label}</span>
-                <Star className={cn("size-3.5", section.starred ? "fill-warn text-warn" : "text-muted")} />
                 <ChevronDown className="size-4 text-muted" />
+              </button>
+              <button
+                type="button"
+                className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted hover:bg-paper"
+                aria-label={favs.includes(section.key) ? "Quitar de favoritos" : "Marcar como favorito"}
+                title={favs.includes(section.key) ? "Quitar de favoritos" : "Marcar como favorito"}
+                onClick={() => {
+                  void toggleFavorite({ data: { key: section.key } })
+                    .then(setFavs)
+                    .catch((e) => console.error(e));
+                }}
+              >
+                <Star className={cn("size-3.5", favs.includes(section.key) && "fill-warn text-warn")} />
               </button>
               {secOpen ? (
                 <MenuList
                   className="left-16"
-                  items={mod.sections.map((s) => ({ to: s.to, label: s.label, search: s.search }))}
+                  items={visibleSections(mod).map((s) => ({ to: s.to, label: s.label, search: s.search }))}
                   onClose={() => setSecOpen(false)}
                 />
               ) : null}

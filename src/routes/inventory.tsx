@@ -1,11 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { Field, HeadBox, StatusPill } from "@/components/erp";
+import { HeadBox, StatusPill } from "@/components/erp";
 import { QtyField } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
-import { adjustStock, listInventory, listPartners, listProducts, transferStock } from "@/lib/azagro";
-import { deleteLocation, saveLocation } from "@/lib/erp/locations";
+import { adjustStock, listInventory, listProducts, transferStock } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { OriginFolio } from "@/components/origin-folio";
 import { money, num, qty } from "@/lib/utils";
@@ -36,7 +35,6 @@ function isStock(t: string) {
 function Page() {
   const [data, setData] = useState<Awaited<ReturnType<typeof listInventory>> | null>(null);
   const [products, setProducts] = useState<Awaited<ReturnType<typeof listProducts>>>([]);
-  const [partners, setPartners] = useState<Awaited<ReturnType<typeof listPartners>>>([]);
   const [form, setForm] = useState({ productId: 0, fromId: 0, toId: 0, quantity: 0 });
   const [adj, setAdj] = useState({ productId: 0, locationId: 0, quantity: 0, note: "" });
   const [find, setFind] = useState("");
@@ -45,14 +43,11 @@ function Page() {
   const [error, setError] = useState<string | null>(null);
   const [locFilter, setLocFilter] = useState(0);
   const [kindFilter, setKindFilter] = useState<"all" | "internal" | "supplier" | "transit">("all");
-  const [editing, setEditing] = useState<number | "new" | null>(null);
-  const [locForm, setLocForm] = useState({ name: "", locType: "internal" as "internal" | "supplier" | "transit" | "customer", partnerId: 0, address: "" });
 
   async function load() {
-    const [inv, prods, pts] = await Promise.all([listInventory(), listProducts(), listPartners()]);
+    const [inv, prods] = await Promise.all([listInventory(), listProducts()]);
     setData(inv);
     setProducts(prods);
-    setPartners(pts);
     const stock = inv.locations.filter((l) => isStock(l.loc_type));
     setForm((f) => ({
       ...f,
@@ -124,9 +119,9 @@ function Page() {
           <Link to="/rfq/nuevo" className="erp-btn grid place-items-center">
             Pedir para inventario
           </Link>
-          <button type="button" className="erp-btn" onClick={() => { setEditing("new"); setLocForm({ name: "", locType: "internal", partnerId: 0, address: "" }); }}>
-            Nueva bodega
-          </button>
+          <Link to="/bodegas" search={{ tab: "bodegas" }} className="erp-btn grid place-items-center">
+            Bodegas
+          </Link>
           <Link to="/products" search={{ tab: "catalogo", tipo: "", q: "" }} className="erp-btn grid place-items-center">
             Catálogo
           </Link>
@@ -319,122 +314,20 @@ function Page() {
         </div>
       </form>
 
-      <div className="mb-6 erp-card p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Catálogo de bodegas y puntos</h2>
-          <button type="button" className="text-[12px] font-semibold text-accent" onClick={() => { setEditing("new"); setLocForm({ name: "", locType: "internal", partnerId: 0, address: "" }); }}>
-            + Alta
-          </button>
+      {/* Un solo lugar para crear y editar bodegas y puntos: /bodegas (patrón D,
+          parte 1 del bloque de diseño). Un dato que se crea en dos lados acaba
+          con dos criterios distintos. */}
+      <div className="mb-6 erp-card flex flex-wrap items-center justify-between gap-2 p-4">
+        <div>
+          <h2 className="text-sm font-semibold">Bodegas y puntos de entrega</h2>
+          <p className="text-[12px] text-muted">
+            {(data?.locations ?? []).length} ubicaciones. Se dan de alta, se corrigen y se borran en Almacén → Bodegas; los destinos de cada
+            cliente, en Contactos → Destinos.
+          </p>
         </div>
-        {editing !== null && (
-          <form
-            className="mb-4 grid gap-3 md:grid-cols-4"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              setError(null);
-              try {
-                await saveLocation({
-                  data: {
-                    id: editing === "new" ? undefined : editing,
-                    name: locForm.name,
-                    locType: locForm.locType,
-                    partnerId: locForm.partnerId || undefined,
-                    address: locForm.address,
-                  },
-                });
-                setEditing(null);
-                await load();
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "No se pudo guardar");
-              }
-            }}
-          >
-            <Field label="Nombre">
-              <input className="erp-input" value={locForm.name} onChange={(e) => setLocForm({ ...locForm, name: e.target.value })} placeholder="Bodega Central, Greenhow…" />
-            </Field>
-            <Field label="Tipo">
-              <select className="erp-input" value={locForm.locType} onChange={(e) => setLocForm({ ...locForm, locType: e.target.value as typeof locForm.locType })}>
-                <option value="internal">Bodega Azagro</option>
-                <option value="supplier">Bodega de proveedor</option>
-                <option value="transit">En tránsito</option>
-                <option value="customer">Punto de entrega</option>
-              </select>
-            </Field>
-            {(locForm.locType === "supplier" || locForm.locType === "customer") && (
-              <Field label={locForm.locType === "supplier" ? "Proveedor" : "Cliente"}>
-                <SearchSelect
-                  value={locForm.partnerId ? String(locForm.partnerId) : ""}
-                  options={asOpts(
-                    partners.filter((p) => (locForm.locType === "supplier" ? p.is_supplier : p.is_customer)),
-                    (p) => p.id,
-                    (p) => p.name,
-                  )}
-                  onChange={(v) => setLocForm({ ...locForm, partnerId: Number(v) })}
-                  placeholder="Vincular…"
-                />
-              </Field>
-            )}
-            <Field label="Dirección">
-              <input className="erp-input" value={locForm.address} onChange={(e) => setLocForm({ ...locForm, address: e.target.value })} />
-            </Field>
-            <div className="flex items-end gap-2 md:col-span-4">
-              <button className="erp-btn-primary">{editing === "new" ? "Crear" : "Guardar"}</button>
-              <button type="button" className="erp-btn" onClick={() => setEditing(null)}>Cancelar</button>
-            </div>
-          </form>
-        )}
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-left text-[13px]">
-            <thead className="text-[11px] uppercase tracking-wide text-muted">
-              <tr>
-                <th className="px-2 py-2 font-medium">Clave</th>
-                <th className="px-2 py-2 font-medium">Nombre</th>
-                <th className="px-2 py-2 font-medium">Tipo</th>
-                <th className="px-2 py-2 font-medium">Vinculado</th>
-                <th className="px-2 py-2" />
-              </tr>
-            </thead>
-            <tbody>
-              {(data?.locations ?? []).map((l) => (
-                <tr key={l.id} className="border-t border-line">
-                  <td className="px-2 py-2 font-mono text-xs">{l.code}</td>
-                  <td className="px-2 py-2 font-medium">{l.name}</td>
-                  <td className="px-2 py-2">
-                    <StatusPill tone={l.loc_type === "customer" ? "muted" : l.loc_type === "supplier" ? "warn" : "ok"}>{TYPE_LABEL[l.loc_type]}</StatusPill>
-                  </td>
-                  <td className="px-2 py-2 text-muted">{l.partner_name ?? "—"}</td>
-                  <td className="px-2 py-2 text-right">
-                    <button
-                      type="button"
-                      className="mr-2 text-[12px] font-semibold text-accent"
-                      onClick={() => {
-                        setEditing(l.id);
-                        setLocForm({ name: l.name, locType: l.loc_type as typeof locForm.locType, partnerId: l.partner_id ?? 0, address: l.address ?? "" });
-                      }}
-                    >
-                      Editar
-                    </button>
-                    <button
-                      type="button"
-                      className="text-[12px] font-semibold text-danger"
-                      onClick={async () => {
-                        if (!confirm(`¿Eliminar ${l.name}?`)) return;
-                        try {
-                          await deleteLocation({ data: { id: l.id } });
-                          await load();
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : "No se pudo borrar");
-                        }
-                      }}
-                    >
-                      Eliminar
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Link to="/bodegas" search={{ tab: "bodegas" }} className="erp-btn grid place-items-center">
+          Bodegas
+        </Link>
       </div>
 
       {(data?.incoming.length || data?.outgoing.length) ? (

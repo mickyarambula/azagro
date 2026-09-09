@@ -401,3 +401,19 @@ test("0026 congela la comisión en las cotizaciones existentes con la del Circui
   assert.equal(nulos.n, 0, "la migración no inventa lo desembolsado de partidas viejas: se escribe al cotizar de aquí en adelante");
   await db.close();
 });
+
+test("0031 member_favorites: por persona, sin duplicar, se va con el miembro", async () => {
+  const db = new PGlite();
+  const files = pendingMigrations(readdirSync(dir), []);
+  for (const { path } of files) await db.exec(readFileSync(join(dir, path), "utf8"));
+  await db.exec(`insert into companies (id, name, join_code, created_by) values (1, 'AZ', 'AZ1', 'u1')`);
+  await db.exec(`insert into members (id, company_id, user_id, role) values (7, 1, 'u1', 'ventas'), (8, 1, 'u2', 'cobranza')`);
+  assert.equal((await db.query(`select count(*)::int as n from member_favorites`)).rows[0].n, 0, "nace vacía");
+  await db.exec(`insert into member_favorites (member_id, section_key) values (7, 'quotes'), (7, 'sales'), (8, 'quotes')`);
+  await assert.rejects(db.exec(`insert into member_favorites (member_id, section_key) values (7, 'quotes')`), /duplicate|unique|primary/i);
+  assert.equal((await db.query(`select count(*)::int as n from member_favorites where member_id = 7`)).rows[0].n, 2);
+  await db.exec(`delete from members where id = 7`);
+  const left = (await db.query(`select member_id, section_key from member_favorites`)).rows;
+  assert.deepEqual(left, [{ member_id: 8, section_key: "quotes" }], "los del miembro borrado se van; los del otro se quedan");
+  await db.close();
+});

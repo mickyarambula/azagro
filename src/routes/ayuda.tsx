@@ -44,19 +44,19 @@ function Page() {
         </Step>
       </ol>
 
-      <h2 className="mt-8 text-base font-semibold">Correos: Azagro vs Plein Produce</h2>
+      <h2 className="mt-8 text-base font-semibold">Correos de Azagro</h2>
       <ol className="mt-3 max-w-2xl space-y-2 text-sm text-muted">
         <li><strong>1.</strong> Ajustes → Correo de Azagro → Guardar.</li>
-        <li><strong>2.</strong> Outlook → Configuración → Cuentas → agregar el correo de Azagro (el de Plein se queda).</li>
+        <li><strong>2.</strong> Outlook → Configuración → Cuentas → agregar el correo de Azagro.</li>
         <li><strong>3.</strong> En el ERP, Enviar → en Outlook cambia <em>De:</em> a Azagro → Enviar.</li>
       </ol>
       <p className="mt-2 max-w-2xl text-sm text-muted">
-        “Resend / API” es un cartero automático opcional. Hoy no se configura. No lo mezcles con Plein Produce.
+        “Resend / API” es un cartero automático opcional. Hoy no se configura.
       </p>
       <ul className="mt-2 space-y-2 text-sm">
-        <li><strong>Cuánto me deben y cuándo vence:</strong> Finanzas → <em>Por cobrar</em> y <em>Vencimientos</em>.</li>
-        <li><strong>Cuánto debo y cuándo pago:</strong> Finanzas → <em>Por pagar</em> (FP de las OC). Registrar pago ahí.</li>
-        <li><strong>Estado de cuenta para revisar y mandar:</strong> Finanzas → Estados de cuenta. No es el export crudo de Compaq (código, serie, folio, cargo, abono, saldo). Azagro le agrega lo del Excel de trabajo: plazo, fecha de pago, días vence, días vencidos, interés s/ días, comisión + FEGA (lo que diga Ajustes) y total. MXN y USD en bloques aparte; si filtras un grupo, sale el consolidado. Interés = Cargo × (TIIE del vencimiento, de la tabla + spread de Ajustes) × días vencidos / 360, y solo desde el día que vence: lo que no ha vencido sale sin interés, sin comisión y sin FEGA, con los días que faltan. La columna «Pronto pago (est.)» es aparte: lo que se bonificaría si pagara en la fecha del corte, a tasa de costo (TIIE de la emisión + spread ASR) y solo antes del umbral de Ajustes. Toca la cifra para ver el desglose. Documento / Enviar cuando ya cuadra. Los saldos pagados de 2024–2026 no se pegan; el saldo abierto entra después por Importar.</li>
+        <li><strong>Cuánto me deben y cuándo vence:</strong> Cartera → <em>Por cobrar</em>; Reportes → <em>Vencimientos</em>.</li>
+        <li><strong>Cuánto debo y cuándo pago:</strong> Cartera → <em>Por pagar</em> (FP de las OC). Registrar pago ahí.</li>
+        <li><strong>Estado de cuenta para revisar y mandar:</strong> Cartera → Estados de cuenta. No es el export crudo de Compaq (código, serie, folio, cargo, abono, saldo). Azagro le agrega lo del Excel de trabajo: plazo, fecha de pago, días vence, días vencidos, interés s/ días, comisión + FEGA (lo que diga Ajustes) y total. MXN y USD en bloques aparte; si filtras un grupo, sale el consolidado. Interés = Cargo × (TIIE del vencimiento, de la tabla + spread de Ajustes) × días vencidos / 360, y solo desde el día que vence: lo que no ha vencido sale sin interés, sin comisión y sin FEGA, con los días que faltan. La columna «Pronto pago (est.)» es aparte: lo que se bonificaría si pagara en la fecha del corte, a tasa de costo (TIIE de la emisión + spread ASR) y solo antes del umbral de Ajustes. Toca la cifra para ver el desglose. Documento / Enviar cuando ya cuadra. Los saldos pagados de 2024–2026 no se pegan; el saldo abierto entra después por Importar.</li>
         <li><strong>Cuánto debo y cuándo pago:</strong> Facturas (Proveedor) y Cadena de crédito (columna derecha).</li>
         <li><strong>Alertas de vencimiento:</strong> en Cartera (pastilla roja), Cadena, Inicio (facturas vencidas). No hay correo automático todavía: hay que entrar al tablero.</li>
         <li><strong>P&L de un pedido:</strong> dentro del PV, abajo. Utilidad para el periodo.</li>

@@ -1021,6 +1021,29 @@ construir el paso 10 ("espejo").
 
 ---
 
+### 4.13 Reportes no tiene módulo de permiso propio (anotado el 9-sep-2026, parte 1 del bloque de diseño)
+El menú nuevo tiene una sección **Reportes** (`/reportes`, `/vencimientos`,
+`/cadena`, `src/lib/nav.ts`), pero en permisos no existe un módulo "reportes":
+las tres rutas se ven con **Cartera** (`pathModule` en `src/lib/erp/acl.ts` las
+manda a `credit`) y `/reportes` exige además ver márgenes (`canSeeMargins`).
+Quien tiene Cartera ve la sección aunque no vea márgenes; y no se puede dar
+"solo reportes" sin dar cartera. Los permisos **no se tocaron** en la parte 1
+(decisión del dueño). *Para el dueño, cuando toque permisos: ¿Reportes es un
+módulo propio con su nivel, o sigue colgado de Cartera + márgenes?*
+
+### 4.14 Pestañas internas de Cartera y Reportes con el orden viejo (parte 3)
+`/credit`, `/vencimientos`, `/cadena`, `/statements`, `/banks`, `/gastos` y
+`/reportes` comparten una tira de pestañas (Por cobrar · Por pagar ·
+Vencimientos · Cadena · Estados de cuenta · Bancos · Gastos) heredada del
+módulo "Finanzas". El menú ya pone Vencimientos y Cadena en Reportes; la tira
+sigue igual. Se corrige en la parte 3 (pestañas), decisión del dueño 9-sep-2026.
+
+### 4.15 No existe borrado de datos de prueba (patrón C4)
+Azagro no tiene una función que borre lo capturado de prueba respetando el
+corte. `member_favorites` (0031) nació sin entrar a ningún borrado porque no
+hay dónde. Cuando se construya el borrado, esta tabla entra por `member_id`
+(cascada desde `members`).
+
 ## 5. Qué hacer con esto
 
 - Las **9 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del

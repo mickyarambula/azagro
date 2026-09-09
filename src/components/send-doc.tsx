@@ -179,7 +179,7 @@ export function SendButton({
               {toPhone ? `WhatsApp: ${toPhone}` : "Sin teléfono"}
             </p>
             <p className="mt-2 rounded-md bg-paper px-3 py-2 text-[12px] text-ink-soft">
-              El programa de correo abre con tu cuenta de siempre (ahora Plein Produce). En el campo <strong>De:</strong> elige el correo de Azagro
+              El programa de correo abre con tu cuenta de siempre. En el campo <strong>De:</strong> elige el correo de Azagro
               {fromMail ? ` (${fromMail})` : ""}. En Outlook Mac: Configuración → Cuentas → agregar el de Azagro; al redactar, clic en De: y cámbialo.
               {mailReady ? " También puedes enviar directo desde Azagro, sin abrir Outlook." : ""}
             </p>

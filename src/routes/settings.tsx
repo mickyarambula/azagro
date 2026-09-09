@@ -271,16 +271,16 @@ function SettingsBody() {
       </Panel>
 
       <Panel className="mb-4">
-        <h2 className="text-sm font-semibold">Cómo mandar correos de Azagro (sin mezclar con Plein Produce)</h2>
+        <h2 className="text-sm font-semibold">Cómo mandar correos de Azagro</h2>
         <ol className="mt-3 space-y-2 text-[13px] leading-snug text-ink-soft">
           <li>
             <strong>1.</strong> Más abajo, en “Correo de Azagro”, escribe el correo de esta empresa (ej. cobranza@azagro.com) y pulsa Guardar al final de la página.
           </li>
           <li>
-            <strong>2.</strong> En tu Mac, abre Outlook → Configuración → Cuentas → el + para agregar cuenta. Entra el correo de Azagro (el de Plein Produce se queda; no lo borres).
+            <strong>2.</strong> En tu Mac, abre Outlook → Configuración → Cuentas → el + para agregar cuenta. Entra el correo de Azagro. Si ya hay otras cuentas en Outlook, se quedan; no hace falta borrar ninguna.
           </li>
           <li>
-            <strong>3.</strong> En el ERP pulsa Enviar. Se abre Outlook. Arriba, en <strong>De:</strong>, cambia Plein Produce por Azagro. Luego Enviar.
+            <strong>3.</strong> En el ERP pulsa Enviar. Se abre Outlook. Arriba, en <strong>De:</strong>, elige el correo de Azagro. Luego Enviar.
           </li>
         </ol>
         <p className="mt-3 text-[13px] text-muted">
@@ -330,7 +330,7 @@ function SettingsBody() {
             onChange={(e) => setForm({ ...form, emailFrom: e.target.value })}
           />
           <p className="mt-1 text-[11px] font-normal normal-case tracking-normal text-muted">
-            Este es el correo de la empresa. Plein Produce y Azagro pueden convivir: en Outlook agregas las dos cuentas y, al mandar, eliges De: Azagro.
+            Este es el correo de la empresa. Si en Outlook hay más de una cuenta, al mandar eliges De: Azagro.
           </p>
         </Field>
         <Field label="Teléfono">
@@ -372,7 +372,7 @@ function SettingsBody() {
             onChange={(e) => setForm({ ...form, resendKey: e.target.value })}
           />
           <p className="mt-1 text-[11px] font-normal normal-case tracking-normal text-muted">
-            Solo si un día quieren que el ERP mande solo. Se saca en resend.com, se verifica el dominio de Azagro y se pega aquí. No uses una clave de Plein Produce. Mientras esté vacío, Enviar sigue abriendo Outlook.
+            Solo si un día quieren que el ERP mande solo. Se saca en resend.com, se verifica el dominio de Azagro y se pega aquí. Mientras esté vacío, Enviar sigue abriendo Outlook.
           </p>
         </Field>
         <Field label="Alertas por correo">
