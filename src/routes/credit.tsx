@@ -173,6 +173,11 @@ function Page() {
                     {r.unreceived ? (
                       <p className="text-[11px] font-normal text-warn">Mercancía no recibida</p>
                     ) : null}
+                    {r.reverses_name ? (
+                      <p className={`text-[11px] font-normal ${r.sin_timbrar ? "text-danger" : "text-muted"}`}>
+                        Reversa de {r.reverses_name}{r.sin_timbrar ? " · SIN TIMBRAR: para el SAT la venta sigue viva" : ""}
+                      </p>
+                    ) : null}
                     {r.kind === "supplier" && r.supplier_folio ? (
                       <p className="text-[11px] font-normal text-muted">{r.supplier_folio}</p>
                     ) : null}

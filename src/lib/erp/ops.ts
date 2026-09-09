@@ -2684,13 +2684,19 @@ export async function issueMoraInvoice(
     order_id: number | null;
     policy_code: string;
     circuit_code: string | null;
+    state: string;
   }>`
     select id, partner_id, residual::text, amount::text, due_date::text, credit_due::text, paid_date::text,
       fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class, order_id,
-      coalesce(policy_code, '') as policy_code, circuit_code
+      coalesce(policy_code, '') as policy_code, circuit_code, state
     from invoices where id = ${invoiceId} and company_id = ${companyId}
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
+  // BLOQUE DE DESHACER: una factura revertida no genera mora — ya no es deuda.
+  if (inv[0].state === "reversed") {
+    if (opts?.requireCharge !== false) throw new Error(`${inv[0].name} está revertida: no genera mora.`);
+    return { name: null as string | null, charge: 0, formula: `${inv[0].name} está revertida.` };
+  }
   // Solo documentos de producto generan mora (ni FI de intereses ni ajustes de TC).
   if (inv[0].kind !== "customer" || inv[0].inv_class !== "product" || Number(inv[0].amount) <= 0) {
     return { name: null as string | null, charge: 0, formula: "" };

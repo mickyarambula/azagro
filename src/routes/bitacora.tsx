@@ -66,6 +66,9 @@ const ACTION: Record<string, string> = {
   "revertir-rechazado": "Reversa RECHAZADA",
   // Paso 6: reversa de recepción.
   "revertir-recepcion": "Revirtió recepción",
+  // Paso 7: reversa de entrega con su factura (NC por el total de lo timbrado).
+  "revertir-entrega": "Revirtió entrega",
+  "revertir-fv": "Revirtió factura de cliente (NC)",
 };
 
 type Payload = Awaited<ReturnType<typeof listAudit>>;

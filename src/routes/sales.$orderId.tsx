@@ -10,7 +10,8 @@ import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
 import { deliverSale, receivePurchase, returnSale } from "@/lib/azagro";
 import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
-import { CancelButton, CancelChainButton } from "@/components/cancel-doc";
+import { CancelButton, CancelChainButton, DeliveryReversalButton } from "@/components/cancel-doc";
+import { deliveryReversalPreview, reverseDelivery } from "@/lib/erp/delivery-reversal";
 import { cancelChainPreview, cancelSalesOrderChain } from "@/lib/erp/cancel";
 import { duesPreview } from "@/components/order-form";
 import { QtyField } from "@/components/fields";
@@ -270,6 +271,14 @@ function Ficha() {
                 onDone={() => navigate({ to: "/sales", search: { tab: "todos", q: "" } })}
               />
             </>
+          )}
+          {canEdit && state === "done" && (
+            <DeliveryReversalButton
+              soName={form.name}
+              load={() => deliveryReversalPreview({ data: { soId: id } })}
+              onConfirm={(reason) => reverseDelivery({ data: { soId: id, reason } })}
+              onDone={load}
+            />
           )}
           {canEdit && state === "done" && !receivedAt && (
             <button

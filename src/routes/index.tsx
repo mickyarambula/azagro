@@ -117,6 +117,20 @@ function Home() {
         </Link>
       )}
 
+      {Boolean(data?.ncSinTimbrar) && (
+        <Link
+          to="/credit"
+          search={{ lado: "cobrar" }}
+          className="mt-4 flex items-center justify-between rounded-md border border-danger bg-cream px-3 py-2 text-sm text-danger"
+        >
+          <span>
+            {data!.ncSinTimbrar} nota{data!.ncSinTimbrar === 1 ? "" : "s"} de crédito de una reversa sin timbrar. Para el SAT esa venta sigue
+            viva: hay que timbrarla en Compaq y capturar aquí su folio fiscal.
+          </span>
+          <span className="font-medium underline decoration-dotted">Ver</span>
+        </Link>
+      )}
+
       {Boolean(data?.fpSinRecibir) && (
         <Link
           to="/credit"

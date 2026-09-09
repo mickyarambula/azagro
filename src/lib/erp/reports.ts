@@ -71,6 +71,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
       coalesce(params_snap,'') as params_snap, coalesce(credit_days,0)::int as credit_days
     from invoices
     where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
+      and state <> 'reversed'
     order by id desc limit 1
   `;
   const today = todayMx();
@@ -309,6 +310,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     const mi = await sql<{ a: string; r: string }>`
       select coalesce(sum(amount),0)::text as a, coalesce(sum(residual),0)::text as r from invoices
       where company_id = ${companyId} and order_id = ${soId} and inv_class = 'interest'
+        and state <> 'reversed' and reverses_id is null
     `;
     mora = Number(mi[0]?.a ?? 0);
     moraPendiente = Number(mi[0]?.r ?? 0);
@@ -538,12 +540,14 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
       select count(*)::int as n, coalesce(sum(amount),0)::text as amount
       from invoices
       where company_id = ${companyId} and kind = 'customer' and coalesce(inv_class,'product') = 'product'
+        and state <> 'reversed' and reverses_id is null
         and date between ${from} and ${to}
     `;
     const mora = await sql<{ amount: string }>`
       select coalesce(sum(amount),0)::text as amount
       from invoices
       where company_id = ${companyId} and kind = 'customer' and inv_class = 'interest'
+        and state <> 'reversed' and reverses_id is null
         and date between ${from} and ${to}
     `;
     const purchases = await sql<{ amount: string }>`
@@ -712,11 +716,13 @@ export const getPanorama = createServerFn({ method: "GET" })
       select coalesce(sum(amount),0)::text as facturado, coalesce(sum(residual),0)::text as pendiente
       from invoices
       where company_id = ${companyId} and kind = 'customer' and coalesce(inv_class,'product') = 'product' and amount > 0
+        and state <> 'reversed'
     `;
     const morat = await sql<{ total: string; pendiente: string }>`
       select coalesce(sum(amount),0)::text as total, coalesce(sum(residual),0)::text as pendiente
       from invoices
       where company_id = ${companyId} and kind = 'customer' and inv_class = 'interest'
+        and state <> 'reversed' and reverses_id is null
     `;
     const fxDocs = await sql<{ por_cobrar: string; por_devolver: string }>`
       select

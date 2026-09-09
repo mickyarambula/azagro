@@ -403,6 +403,14 @@ export const getDashboard = createServerFn({ method: "GET" })
     // Decisión 23: cuántas facturas de proveedor quedan del defecto viejo —
     // deuda de órdenes que todavía no se reciben. Se deriva, no hay columna;
     // el número baja solo conforme se reciben o se cancelan esas órdenes.
+    // Paso 7 (Decisión 39): NC que nacieron de una reversa y siguen sin folio
+    // fiscal. Para el SAT esa venta sigue viva hasta que alguien la timbre en
+    // Compaq y capture aquí su folio. Se deriva; se limpia sola al capturarlo.
+    const ncSinTimbrar = await sql<{ n: number }>`
+      select count(*)::int as n from invoices
+      where company_id = ${cid} and kind = 'customer' and name like 'NC-%' and reverses_id is not null
+        and coalesce(folio_fiscal,'') = '' and coalesce(uuid_fiscal,'') = ''
+    `;
     const fpSinRecibir = await sql<{ n: number }>`
       select count(*)::int as n
       from invoices i
@@ -434,6 +442,7 @@ export const getDashboard = createServerFn({ method: "GET" })
       overdueN: seeCredit ? pending[0]?.overdue_n ?? 0 : 0,
       orphanCustomers: seePartners ? orphan[0]?.n ?? 0 : 0,
       fpSinRecibir: seeCredit ? fpSinRecibir[0]?.n ?? 0 : 0,
+      ncSinTimbrar: seeCredit ? ncSinTimbrar[0]?.n ?? 0 : 0,
       aging: seeCredit ? aging.map((a) => ({ bucket: a.bucket, amount: Number(a.amount) })) : [],
       recentInv: seeCredit ? recentInv : [],
       locStock: locStock.map((l) => ({
@@ -1851,6 +1860,8 @@ export const listInvoices = createServerFn({ method: "POST" })
       unreceived: boolean;
       last_payment_id: number | null;
       last_payment_name: string | null;
+      sin_timbrar: boolean;
+      reverses_name: string | null;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -1888,7 +1899,10 @@ export const listInvoices = createServerFn({ method: "POST" })
         (select p.name from payment_allocs pa join payments p on p.id = pa.payment_id
           where pa.invoice_id = i.id and p.reverses_id is null
             and not exists (select 1 from payments r where r.reverses_id = p.id)
-          order by p.id desc limit 1) as last_payment_name
+          order by p.id desc limit 1) as last_payment_name,
+        -- Paso 7: la NC contraria de una reversa sin folio fiscal capturado.
+        (i.kind = 'customer' and i.reverses_id is not null and coalesce(i.folio_fiscal,'') = '' and coalesce(i.uuid_fiscal,'') = '') as sin_timbrar,
+        (select o.name from invoices o where o.id = i.reverses_id) as reverses_name
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

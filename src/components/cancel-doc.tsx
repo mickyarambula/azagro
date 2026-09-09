@@ -604,3 +604,172 @@ export function ReceiptReversalButton(props: {
     </>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Paso 7: revertir una entrega con su factura. Antes de preguntar, la
+// distinción que la persona tiene que hacer (Decisión 38): revertir no es
+// devolver. Y si la FV ya está timbrada, el aviso de que la NC hay que
+// timbrarla en Compaq (Decisión 39).
+// ---------------------------------------------------------------------------
+type DLine = { name: string; detail: string; amount: number; currency: string };
+export type DeliveryReversalView = {
+  so: { id: number; name: string; partner: string; date: string; currency: string; circuit: string | null; creditDays: number; direct: boolean };
+  stock: Array<{ code: string; product: string; uom: string; qty: number; unitCost: number; value: number; location: string; qtyBefore: number; qtyAfter: number; avgBefore: number; avgAfter: number }>;
+  reverts: DLine[];
+  fiscal: { name: string; folio: string; uuid: string } | null;
+  partnerDebt: { name: string; before: number; after: number };
+  blockers: string[];
+  allowed: boolean;
+  role: string;
+};
+
+export function DeliveryReversalButton(props: {
+  soName: string;
+  load: () => Promise<DeliveryReversalView>;
+  onConfirm: (reason: string) => Promise<unknown>;
+  onDone?: () => void | Promise<void>;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [chain, setChain] = useState<DeliveryReversalView | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openDialog() {
+    setError(null);
+    setChain(null);
+    setOpen(true);
+    try {
+      setChain(await props.load());
+    } catch (e) {
+      setError(humanError(e));
+    }
+  }
+  async function confirm() {
+    if (!reason.trim()) {
+      setError("El motivo es obligatorio.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await props.onConfirm(reason.trim());
+      setOpen(false);
+      setReason("");
+      await props.onDone?.();
+    } catch (e) {
+      setError(humanError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const blocked = Boolean(chain?.blockers.length);
+  const canConfirm = Boolean(chain) && !blocked && Boolean(chain?.allowed) && Boolean(reason.trim()) && !busy;
+  const m = (n: number, cur = "MXN") => `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${cur}`;
+  const m4 = (n: number) => `$${n.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+
+  return (
+    <>
+      <button type="button" className="erp-btn h-8 text-[12px] text-danger" disabled={props.disabled} onClick={() => void openDialog()}>
+        Revertir entrega
+      </button>
+      {open ? (
+        <div className="fixed inset-0 z-[90] grid place-items-center bg-ink/40 p-4" onClick={() => !busy && setOpen(false)}>
+          <div className="w-full max-w-lg rounded-xl border border-line bg-cream p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold">
+              Revertir la entrega de {props.soName}
+              {chain ? ` · ${chain.so.partner} · entregada el ${chain.so.date}${chain.so.creditDays > 0 ? ` · ${chain.so.creditDays} d` : " · contado"}` : ""}
+            </h2>
+            <p className="mt-2 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+              <span className="font-semibold">Revertir no es devolver.</span> Usa esto solo si la entrega no debió registrarse: pedido equivocado, cliente
+              equivocado, capturada dos veces. Si la mercancía sí salió y el cliente la está regresando, eso es una <span className="font-semibold">devolución</span>.
+              Si la mercancía está en casa del cliente y la venta fue real, revertir es mentir: el inventario diría que está en bodega.
+            </p>
+            {!chain && !error ? <p className="mt-2 text-[12px] text-muted">Revisando qué se movió con esta entrega…</p> : null}
+
+            {chain && blocked ? (
+              <div className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+                <p className="font-semibold">No se puede revertir.</p>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {chain.blockers.map((b, i) => (
+                    <li key={i}>{b}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-muted">Este intento quedó en la bitácora.</p>
+              </div>
+            ) : null}
+
+            {chain && !blocked ? (
+              <>
+                {chain.stock.length ? (
+                  <>
+                    <p className="mt-3 text-[12px] font-semibold">Regresa al inventario (queda la salida, la entrada y la liga):</p>
+                    <ul className="list-disc space-y-1 pl-5 text-[12px] text-ink-soft">
+                      {chain.stock.map((l) => (
+                        <li key={l.code}>
+                          {l.code} {l.product} · {l.qty} {l.uom} · {l.location} · al costo con el que salió {m(l.unitCost)} = {m(l.value)}
+                          <br />
+                          Existencia {l.qtyBefore} → {l.qtyAfter} {l.uom} · Promedio {m4(l.avgBefore)} → {m4(l.avgAfter)}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <p className="mt-3 text-[12px] text-muted">Pedido directo / brokeraje: no movió inventario de Azagro.</p>
+                )}
+                <p className="mt-3 text-[12px] font-semibold">Se revierte:</p>
+                <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-ink-soft">
+                  {chain.reverts.map((d, i) => (
+                    <li key={i}>
+                      {d.name} · {m(d.amount, d.currency)} · {d.detail}
+                    </li>
+                  ))}
+                </ul>
+                {chain.fiscal ? (
+                  <p className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+                    <span className="font-semibold">{chain.fiscal.name} está timbrada</span> ({chain.fiscal.uuid || chain.fiscal.folio}). Este sistema no cancela ante el SAT: la
+                    nota de crédito que nace aquí hay que timbrarla en Compaq como nota de crédito de esa factura, y capturar aquí su folio fiscal. Hasta entonces, para
+                    el SAT la venta sigue viva.
+                  </p>
+                ) : null}
+                <p className="mt-3 text-[12px] text-muted">
+                  El pedido vuelve a &quot;confirmado, por entregar&quot;. Si se vuelve a entregar, la factura nueva toma la tasa de la tabla a esa fecha.
+                </p>
+                <p className="mt-2 text-[12px] text-ink-soft">
+                  <span className="font-semibold">Después:</span> {chain.partnerDebt.name} debe {m(chain.partnerDebt.before, chain.so.currency)} → {m(chain.partnerDebt.after, chain.so.currency)}
+                </p>
+                <p className={`mt-3 text-[12px] ${chain.allowed ? "text-muted" : "text-danger"}`}>
+                  {chain.allowed
+                    ? "Esto revierte inventario y cartera: es de administrador o gerencia — tú puedes hacerlo."
+                    : "Esto revierte inventario y cartera: es solo de administrador o gerencia. Pídeselo a uno de ellos."}
+                </p>
+                <label className="mt-3 grid gap-1 text-[12px] font-medium">
+                  Motivo (obligatorio)
+                  <textarea className="erp-input mt-1 w-full" rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Por qué se revierte…" />
+                </label>
+                <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+                  Lo que no se puede deshacer después: la nota de crédito y la entrada al inventario también quedan para siempre. No estás borrando la entrega, estás
+                  agregando los movimientos contrarios.
+                </p>
+              </>
+            ) : null}
+
+            {error ? <p className="mt-2 text-[12px] text-danger">{error}</p> : null}
+            <div className="mt-4 flex gap-2">
+              {chain && !blocked ? (
+                <button type="button" className="erp-btn-primary" disabled={!canConfirm} onClick={() => void confirm()}>
+                  Confirmar reversa
+                </button>
+              ) : null}
+              <button type="button" className="erp-btn ml-auto" disabled={busy} onClick={() => setOpen(false)}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
