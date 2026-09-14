@@ -103,7 +103,7 @@ test("CENTRAL: una OC que ya se recibió, con dinero amarrado, o directa con ped
   assert.ok(body.includes("ya tiene dinero amarrado"), "gasto o banco ligado detiene");
   assert.ok(body.includes('Number(fp.paid) > 0.009 || fp.state === "paid"'), "FP con un solo abono detiene");
   assert.ok(body.includes("ya se le pagó al proveedor"), "y lo dice claro");
-  assert.ok(body.includes("todavía no está construido"), "nombra que revertir eso es otro paso");
+  assert.ok(body.includes("«Revertir recepción»") && body.includes("«Revertir último abono»"), "nombra el camino real de cada bloqueo (B3), no dice 'no construido'");
 });
 
 test("CENTRAL: un pedido entregado, con FV, con kardex de salida o con dinero amarrado, NO se cancela; en borrador tampoco por aquí", () => {

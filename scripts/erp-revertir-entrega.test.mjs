@@ -107,7 +107,7 @@ test("bloqueos: abonos en FV/FI/ATC/FP mandan al paso 5; devolución previa se b
   assert.ok(chain.includes("(mora facturada de ${fv.name}) tiene abonos"), "FI con abonos");
   assert.ok(chain.includes("(ajuste de tipo de cambio de ${fv.name}) tiene abonos"), "ATC con abonos");
   assert.ok(chain.includes("brokeraje) tiene abonos: revierte ese pago primero"), "FP con abonos");
-  assert.ok(chain.includes("ya tiene una devolución (") && chain.includes("Primero habría que revertir esa devolución, y eso todavía no está construido."), "devolución previa → paso 8, seis documentos");
+  assert.ok(chain.includes("ya tiene una devolución (") && chain.includes("Primero revierte esa devolución: botón «Revertir devolución»"), "devolución previa → paso 8, seis documentos, con el camino nombrado (B3)");
   assert.ok(chain.includes("qty_returned"), "también por cantidad devuelta, no solo por NC");
   assert.ok(chain.includes("ya está revertida (${alreadyReversed.reversed_by})"), "no se revierte dos veces");
   assert.ok(chain.includes("no se ha entregado: no hay entrega que revertir"), "sin entrega");

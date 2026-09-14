@@ -81,7 +81,7 @@ Miguel prueba en el navegador. Tú le dices **qué número es el que más import
 
 Claude Code sube directo a `main` sin pull request. No hay revisión en GitHub; todo sale en un solo commit.
 
-**Aviso crítico — más relevante que antes:** Claude Code corre sus pruebas contra la misma base de producción, así que las migraciones se aplican al probar. Pero el **código** solo llega a producción cuando el deploy de Vercel termina. Si Miguel prueba antes de que el deploy termine, corre código viejo contra una base ya migrada, y los resultados son basura. Siempre confirma que el deploy terminó antes de que Miguel pruebe en producción.
+**Aviso crítico, corregido:** las pruebas (`npm test`) **no** tocan la base de producción — corren sobre PGlite en memoria (`scripts/migrations-apply.test.mjs:1`, "sobre un Postgres real (PGLite)") o leen los archivos fuente. Código y migraciones llegan a producción **juntos**, en el mismo build: `npm run build` termina con `npm run db:migrate` → `scripts/migrate.mjs`, que corre "on every Vercel deploy" (`migrate.mjs:5`), después de que el código ya compiló. El riesgo real es otro: si el build compila bien pero una migración falla a la mitad, las anteriores ya quedaron aplicadas — cada una en su propia transacción (`migrate.mjs:56-63`) — mientras el deploy entero se marca fallido y el código viejo se queda vivo: la base avanzó, el código no. La regla para Miguel sigue igual, por una razón más simple: hasta que el deploy no termina, su código no está arriba. Siempre confirma que el deploy terminó antes de que Miguel pruebe en producción.
 
 ---
 

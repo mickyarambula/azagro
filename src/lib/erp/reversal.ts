@@ -133,7 +133,7 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
     return empty();
   }
   if (p.memo.startsWith("Devolución ")) {
-    blockers.push(`${p.name} es el abono de una devolución (${p.memo.replace("Devolución ", "")}): se revierte con la devolución, y eso todavía no está construido.`);
+    blockers.push(`${p.name} es el abono de una devolución (${p.memo.replace("Devolución ", "")}): se revierte con la devolución. Usa «Revertir devolución» en el pedido, junto a la nota de crédito ${p.memo.replace("Devolución ", "")}.`);
     return empty();
   }
   if (p.memo.startsWith("Pronto pago ")) {

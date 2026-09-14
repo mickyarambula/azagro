@@ -114,7 +114,7 @@ async function chainForPurchase(sql: Sql, companyId: number, poId: number) {
   if (o.state === "done" || receipts.length) {
     blockers.push(
       `${o.name} ya se recibió en bodega${receipts.length ? ` (${receipts.map((r) => r.ref).join(", ")})` : ""}: la mercancía ya entró al inventario. ` +
-        "Eso no se cancela, se revierte — y revertir una recepción todavía no está construido.",
+        "Eso no se cancela, se revierte: usa «Revertir recepción» en Compras → esa orden.",
     );
   }
   // Directa / brokeraje: nunca se recibe, pero si su pedido ya se entregó al
@@ -145,7 +145,7 @@ async function chainForPurchase(sql: Sql, companyId: number, poId: number) {
     if (Number(fp.paid) > 0.009 || fp.state === "paid") {
       blockers.push(
         `${fp.name} (la factura de ${o.partner} por ${o.name}) ya tiene abonos: ya se le pagó al proveedor, en todo o en parte. ` +
-          "Primero habría que revertir ese pago, y eso todavía no está construido.",
+          "Primero revierte ese pago: botón «Revertir último abono» en Cartera → Por pagar.",
       );
       continue;
     }
@@ -217,7 +217,7 @@ async function chainForSale(sql: Sql, companyId: number, soId: number) {
   if (s.state === "done" || deliveries.length || fvs.length) {
     blockers.push(
       `${s.name} ya se entregó y facturó${fvs.length ? ` (${fvs.map((f) => f.name).join(", ")})` : ""}: la mercancía ya salió y la factura ya existe. ` +
-        "Eso no se cancela, se revierte — y revertir una entrega todavía no está construido.",
+        "Eso no se cancela, se revierte: usa «Revertir entrega» en el pedido.",
     );
   }
   const money = await moneyLinked(sql, companyId, "so_id", s.id);

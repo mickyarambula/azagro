@@ -110,7 +110,7 @@ async function chainForDelivery(sql: Sql, companyId: number, soId: number, role:
   const returned = await sql<{ q: string }>`select coalesce(sum(qty_returned),0)::text as q from sales_lines where so_id = ${s.id}`;
   if (devs.length || Number(returned[0]?.q ?? 0) > 0.0001) {
     blockers.push(
-      `${s.name} ya tiene una devolución (${devs.map((d) => d.name).join(", ") || "mercancía devuelta"}). Primero habría que revertir esa devolución, y eso todavía no está construido.`,
+      `${s.name} ya tiene una devolución (${devs.map((d) => d.name).join(", ") || "mercancía devuelta"}). Primero revierte esa devolución: botón «Revertir devolución» en el pedido, junto a la nota de crédito.`,
     );
   }
 

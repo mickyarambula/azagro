@@ -136,7 +136,7 @@ test("bloqueos: abono posterior (regla del último abono), abono de devolución,
   const chain = fnBody(src("src/lib/erp/reversal.ts"), "chainForPayment");
   assert.ok(chain.includes("Se revierte primero el último:"), "LIFO: nombra cuál va primero");
   assert.ok(chain.includes("const later = live.filter((l) => l.id > p.id && l.id !== discountRow?.id);"), "el pronto pago de este cobro no cuenta como posterior");
-  assert.ok(chain.includes("se revierte con la devolución, y eso todavía no está construido"), "abono virtual de NC → paso 8");
+  assert.ok(chain.includes("se revierte con la devolución. Usa «Revertir devolución»"), "abono virtual de NC → paso 8, con el camino nombrado (B3)");
   assert.ok(chain.includes("Una reversa no se revierte: para corregir, se captura el cobro o pago correcto."), "Decisión 16 en el candado");
   assert.ok(chain.includes("ya está revertido ("), "no se revierte dos veces");
   assert.ok(chain.includes("se revierte junto con ese cobro, no sola"), "el pronto pago no se revierte solo");
