@@ -11,6 +11,7 @@ attachments/
 screenshots/
 .grok/
 .project_id
+antes.json
 .node_modules.lock
 *.log
 .DS_Store

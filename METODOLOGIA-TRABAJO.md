@@ -187,7 +187,7 @@ Se le dice a Miguel antes de cada tarea, siempre.
 ## 9. Lo que está resuelto en Azagro
 
 - **Qué es Azagro:** ERP operativo de AZ Insumos Agrícolas (Los Mochis). Reemplaza Compaq + Excel de cartera, no el timbrado SAT (`CLAUDE.md`, encabezado).
-- **Dónde vive:** repo GitHub `mickyarambula/azagro` (`git remote -v`). La plataforma de despliegue no tiene mención textual en ningún documento del repo — no se afirma aquí cuál es.
+- **Dónde vive:** repo GitHub `mickyarambula/azagro` (`git remote -v`); se despliega en Vercel (confirmado por el dueño, 9-sep-2026).
 - **Base de datos:** Postgres. Producción usa Neon vía `DATABASE_URL`; sin eso, PGLite local que se pierde al reiniciar (`HANDOFF.md:61-63`, `CLAUDE.md` § Correr).
 - **Qué existe:** stack TanStack Start + React + Postgres, kardex, cartera, circuitos de financiamiento (`CLAUDE.md`, § No romper), ocho módulos de navegación (`src/lib/nav.ts`), decisiones 1-45 anotadas en `DECISIONES.md`.
 - **Auditorías:** `LOGICA.md` (20 hallazgos), `EXCEL_VS_SISTEMA.md`, `ESTADO.md`, `DISENO_FINANCIAMIENTO.md`, `DESHACER.md`.
