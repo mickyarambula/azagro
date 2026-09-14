@@ -70,7 +70,7 @@ Tú revisas y das el OK. Nunca antes.
 Con el OK, Claude Code construye y entrega:
 
 - Archivos tocados y por qué
-- Verificación de las anclas numéricas, antes y después
+- Corrida de la red de seguridad (comparación del motor congelado; ninguna prueba existente cambia)
 - Guía de prueba para Miguel
 
 ### Paso 5 — Prueba
@@ -81,7 +81,7 @@ Miguel prueba en el navegador. Tú le dices **qué número es el que más import
 
 Claude Code sube directo a `main` sin pull request. No hay revisión en GitHub; todo sale en un solo commit.
 
-**Aviso crítico — más relevante que antes:** Claude Code corre sus pruebas contra la misma base de producción, así que las migraciones se aplican al probar. Pero el **código** solo llega a producción cuando el deploy de Vercel termina. Si Miguel prueba antes de que el deploy termine, corre código viejo contra una base ya migrada, y los resultados son basura. **Siempre confirma que el deploy entró (Vercel mostrará "Deployment successful") antes de que Miguel pruebe en producción.** En preview (antes del deploy), el code y la base están siempre en sincronía y es seguro probar.
+**Aviso crítico — más relevante que antes:** Claude Code corre sus pruebas contra la misma base de producción, así que las migraciones se aplican al probar. Pero el **código** solo llega a producción cuando el deploy de Vercel termina. Si Miguel prueba antes de que el deploy termine, corre código viejo contra una base ya migrada, y los resultados son basura. Siempre confirma que el deploy terminó antes de que Miguel pruebe en producción.
 
 ---
 
@@ -115,13 +115,13 @@ Estas son de Cosecha. **Adáptalas a Azagro, pero la forma es la misma: una list
 - **Red de seguridad — congelación de motor y pruebas invariantes:** En Azagro los datos son de prueba, inventados; no hay "anclas numéricas" reales. La red es otra: (1) Se congela una copia del motor de antes del cambio y se compara contra el de después, caso por caso, al centavo. (2) Ninguna prueba existente puede cambiar de resultado. Si una prueba vieja tiene que actualizarse es la señal de que el comportamiento anterior se movió — ahí se para. Ejemplos en producción: `scripts/erp-circuito-lineal.test.mjs` compara +2,000 casos del motor ASR; `scripts/erp-reportes-circuito.test.mjs` compara +1,000 casos del P&L; el bloque de deshacer paso 2 cerró con 490/490 sin actualizar una prueba.
 - **Prefijos de folio nunca cambian.**
 - **UI en español. SQL, nombres de columna y código de servidor en inglés.**
-- **Datos de prueba se borran** con una función de la propia app, y las anclas se verifican después del borrado.
+- **Borrado de datos de prueba:** no existe hoy en Azagro (`ESTADO.md` § 4.15, patrón C4 sin construir).
 
 ---
 
 ## 6. Cómo se escribe un prompt para Claude Code
 
-Estructura que funcionó:
+Estructura que funcionó. **El modelo va siempre dentro del bloque de código, como primera línea — nunca en un párrafo aparte**, porque Miguel copia y pega el bloque completo tal cual:
 
 ```
 MODELO: Haiku 4.5 (o el que corresponda, ver § 8)
@@ -167,7 +167,7 @@ Miguel conoce su negocio perfectamente pero no el sistema por dentro. Si un paso
 - Los números exactos y con signo: `−$8.00`, `+$20.00`, `$172.00`.
 - **Nada de jerga.** Ni SKU destino, ni lote hijo, ni FK, ni snapshot.
 - **Para cada candado, la guía prueba DOS cosas:** que el bloqueo aparece, y que el camino legítimo que nombra el mensaje funciona de verdad. No basta con ver el mensaje rojo.
-- Al final: correr el borrado de pruebas y verificar las anclas.
+- Al final: correr `npm test` y confirmar que ninguna prueba existente cambió de resultado (no existe hoy un borrado de datos de prueba en Azagro, `ESTADO.md` § 4.15).
 
 ---
 
@@ -186,12 +186,13 @@ Se le dice a Miguel antes de cada tarea, siempre.
 
 ## 9. Lo que está resuelto en Azagro
 
-- **Qué es Azagro:** ERP operativo de AZ Insumos Agrícolas (Los Mochis). Reemplaza Compaq + Excel de cartera, no el timbrado SAT.
-- **Dónde vive:** GitHub `mickyarambula/azagro`. Se despliega en Vercel con Neon (producción) o PGLite (preview/local).
-- **Base de datos:** Postgres. Preview y producción comparten esquema; datos de prueba se borran con la app.
-- **Qué existe:** stack completo (TanStack Start + React + Postgres), ocho módulos de navegación, kardex, cartera, circuitos de financiamiento, decisiones 1-45 anotadas en `DECISIONES.md`.
-- **Auditorías:** `LOGICA.md` (20 hallazgos), `EXCEL_VS_SISTEMA.md` (comparación contra Excel real), `ESTADO.md` (contradicciones resueltas), `DISENO_FINANCIAMIENTO.md` (diseño vigente), `DESHACER.md` (bloques 0-8 de cancelación y reversa).
+- **Qué es Azagro:** ERP operativo de AZ Insumos Agrícolas (Los Mochis). Reemplaza Compaq + Excel de cartera, no el timbrado SAT (`CLAUDE.md`, encabezado).
+- **Dónde vive:** repo GitHub `mickyarambula/azagro` (`git remote -v`); despliegue en Vercel (directorio `.vercel/output` presente en el repo).
+- **Base de datos:** Postgres. Producción usa Neon (`DATABASE_URL`); sin eso, PGLite local que se pierde al reiniciar (`CLAUDE.md`, § Correr).
+- **Qué existe:** stack TanStack Start + React + Postgres, kardex, cartera, circuitos de financiamiento (`CLAUDE.md`, § No romper), ocho módulos de navegación (`src/lib/nav.ts`), decisiones 1-45 anotadas en `DECISIONES.md`.
+- **Auditorías:** `LOGICA.md` (20 hallazgos), `EXCEL_VS_SISTEMA.md`, `ESTADO.md`, `DISENO_FINANCIAMIENTO.md`, `DESHACER.md`.
 - **Red de seguridad:** congelación de motor y pruebas invariantes (§ 5, no anclas numéricas).
+- **No existe todavía:** borrado de datos de prueba (`ESTADO.md` § 4.15, patrón C4).
 
 ---
 
@@ -199,7 +200,7 @@ Se le dice a Miguel antes de cada tarea, siempre.
 
 Para que el chat pueda verificar por sí mismo en lugar de suponer:
 
-- **Conector de la base de datos** (en Cosecha es Neon). Permite correr consultas de lectura para verificar anclas y estado real sin que Miguel abra una consola. Se usa solo lectura; para escribir se le pregunta siempre.
+- **Conector de la base de datos** (en Cosecha es Neon). Permite correr consultas de lectura para verificar estado real sin que Miguel abra una consola. Se usa solo lectura; para escribir se le pregunta siempre.
 - **Acceso al repo** para que Claude Code lea el código.
 - **Acceso al hosting** (Vercel en Cosecha) para revisar si un deploy entró y cuándo.
 

@@ -541,12 +541,9 @@ limpieza dedicado, porque tocan cartera, kardex y bitácora a la vez
 mercancía equivocada, ¿cómo se regresa y cómo se baja la deuda con el
 proveedor?*
 
-**Aclaración (9-sep-2026):** Revertir una recepción (paso 6, `DESHACER.md`) **no
-es** lo mismo que devolver mercancía al proveedor. La reversa de recepción es
-un ajuste de kardex/contabilidad (la mercancía nunca llegó o se registró por
-error). Una devolución es una venta real de regreso: la mercancía llegó, la
-recibimos, la pasamos a bodega, y **después** descubrimos que está equivocada o
-defectuosa. Los dos casos necesitan documentos distintos. H4c sigue abierta.
+**Aclaración del dueño (9-sep-2026):** Revertir una recepción **no es**
+devolverle al proveedor; son dos cosas distintas, y la reversa de recepción
+(paso 6) no cubre H4c. H4c sigue **ABIERTA**.
 
 ### H4d. Recepciones y entregas parciales (LOGICA h.17)
 **ABIERTA.** Siempre completas. *Para el dueño: si el proveedor manda 20 de 50
@@ -582,11 +579,14 @@ No se construye hasta que el dueño elija uno.
 viejo no puede amarrarse exacto (por falta del folio de la NC en `origin`, como
 antes de la Decisión 42), la reversa se bloquea sin ofrecer un camino legítimo
 (`return-reversal.ts:180-182`). Esto choca con el patrón **B3 de
-PATRONES-DISENO.md**: "Un candaco sin salida es peor que el bug que tapa."
+PATRONES-DISENO.md**, citado literal:
+
+> Para cada acción bloqueada tiene que existir un camino legítimo, y el
+> mensaje tiene que nombrarlo. **Un candado sin salida es peor que el bug que
+> tapa**, porque el bug es silencioso y el candado deja al usuario parado.
+
 *Para el dueño: ¿qué se debe hacer con una devolución de prueba cuya reversa
-no se puede calcular de forma segura?* Los dos datos de prueba de referencia
-(`PV-0003`, `PV-0004`, DESHACER § 4.5) pueden quedarse atrapados aquí si hay
-devoluciones previas sin amarre.
+no se puede calcular de forma segura?*
 
 ### H5. Lotes y caducidad
 **ABIERTA.** CLAUDE.md los pone "después"; nadie ha dicho cuándo ni cómo.
@@ -1065,7 +1065,7 @@ hay dónde. Cuando se construya el borrado, esta tabla entra por `member_id`
 
 ## 5. Qué hacer con esto
 
-- Las **9 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
+- Las **10 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
   punto 4 se contestan en `DECISIONES.md` conforme el dueño decida, un
   renglón por decisión, con fecha.
 - El 5-sep-2026 el dueño cerró las **cuatro** preguntas que gateaban la Fase

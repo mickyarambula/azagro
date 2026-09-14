@@ -148,14 +148,16 @@ Sin 1, 2 y 3 no se puede escribir el paso 4 ni el 7; sin 4, el 6 y el 9; sin 5 y
 
 ## 7. Lo que sigue sin poder deshacerse
 
-El paso 8 cierra el bloque: cada documento tiene su reversa. Pero tres casos bloquean con candados sin salida legítima nombrada, que incumplen el patrón B3 de PATRONES-DISENO.md:
+El paso 8 cierra el bloque: cada documento tiene su reversa. Pero tres casos bloquean con candados; solo dos tienen una salida legítima nombrada. El patrón que aplica es B3 de PATRONES-DISENO.md, citado literal:
 
-> **B3. Candado con salida:** Para cada acción bloqueada tiene que existir un camino legítimo, y el mensaje tiene que nombrarlo. **Un candado sin salida es peor que el bug que tapa**, porque el bug es silencioso y el candado deja al usuario parado.
+> ### B3. Candado con salida
+>
+> Para cada acción bloqueada tiene que existir un camino legítimo, y el mensaje tiene que nombrarlo. **Un candado sin salida es peor que el bug que tapa**, porque el bug es silencioso y el candado deja al usuario parado.
+>
+> Y la prueba tiene que verificar **las dos cosas**: que el bloqueo aparece, y que el camino que nombra funciona de verdad.
 
 **Caso 1: Devolución ya revendida.** `return-reversal.ts:190-196`. El movimiento `'return'` de la devolución tuvo **salidas posteriores** de ese producto desde esa bodega. El kardex no lleva lotes; no se sabe si lo que salió era lo devuelto o stock anterior. Bloqueo: "El kardex no lleva lotes: no se puede saber si lo que salió era lo devuelto. Revierte primero esa salida." **Salida legítima:** primero revertir la entrega que la revendió (paso 7). Nombrada en el mensaje.
 
 **Caso 2: Devolución seguida de cobro real.** `return-reversal.ts:140-146`. La FV tiene **pagos posteriores** al abono virtual de la devolución. El paso 8 no puede revertir el abono virtual si hay dinero real después (la regla del último abono de Decisión 33). Bloqueo: "tiene PAG1, PAG2... después de esta devolución. Revierte primero ese cobro (Cartera → Revertir último abono)." **Salida legítima:** primero el paso 5. Nombrada en el mensaje.
 
-**Caso 3: Movimiento `return` viejo sin amarre exacto.** `return-reversal.ts:180-182`. Antes de la Decisión 42, el `return` no llevaba el folio de la NC en `origin`, solo el nombre del pedido. Al revertir, el sistema busca el movimiento por producto + cantidad + fecha; si no encuentra exacto, no puede amarrar con certeza qué fue lo que se devolvió. Bloqueo: "No se puede amarrar el movimiento de regreso de... No se adivina." **Salida legítima:** ninguna. El documento existe, su reversa no puede calcularse, y no hay forma de "intentarlo manualmente" porque el amarre tiene que ser exacto (Decisión 42 lo establece después). **Este es un candado sin salida**: choca con B3. 
-
-El caso 3 es deuda técnica: datos de prueba anteriores a Decisión 42 quedan atrapados. Solución futura: migración que recalcule el amarre retroactivamente mediante `deliveryUnitCost` (`stock.ts:149-154`, paso 2) — si no se rompe, se puede automatizar; si se rompe, queda marcado en bitácora.
+**Caso 3: Movimiento `return` viejo sin amarre exacto.** `return-reversal.ts:180-182`. Antes de la Decisión 42, el `return` no llevaba el folio de la NC en `origin`, solo el nombre del pedido. Al revertir, el sistema busca el movimiento por producto + cantidad + fecha; si no encuentra exacto, no puede amarrar con certeza qué fue lo que se devolvió. Bloqueo: "No se puede amarrar el movimiento de regreso de... No se adivina." **Salida legítima:** ninguna. **Este es un candado sin salida**: choca con B3.

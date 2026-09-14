@@ -143,7 +143,7 @@ revisión)**: están escritas y decididas en documento, no construidas.
 
 ## Pendientes de decisión (no son decisiones todavía)
 
-Las **9 preguntas ABIERTAS** de `ESTADO.md` § 2 y las **8** de § 4. Cuando el
+Las **10 preguntas ABIERTAS** de `ESTADO.md` § 2 y las **8** de § 4. Cuando el
 dueño conteste una, se agrega arriba con su fecha y se cambia de columna en
 `ESTADO.md`. Las cinco preguntas que gateaban la Fase 2 y la Fase 3 del diseño
 (D-A, E2, H8b, 4.9, N1) quedaron cerradas el 5-sep-2026, todas en documento,
