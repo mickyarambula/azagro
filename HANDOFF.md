@@ -548,10 +548,13 @@ pero cada cambio queda en bitácora con el valor anterior y el nuevo.
     del corte, estado de cuenta con Santa Rosa como tercera audiencia, quién
     emite la FI, margen en $ fijo, la instrucción de facturación) — y
     `DECISIONES.md`, un renglón por decisión con fecha, sembrado con todo lo
-    confirmado hasta hoy. **19 preguntas ABIERTAS** en ESTADO § 2 y 10 en § 4.
+    confirmado hasta hoy. **19 preguntas ABIERTAS** en ESTADO § 2 y 10 en § 4
+    — conteo del 5-sep-2026, esta bitácora no se actualiza; el conteo vivo
+    está en `ESTADO.md` § 2 y § 4.
 
-Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 360 hoy,
-incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
+Todo lo anterior quedó con pruebas automáticas (`npm test`, más de 360 al
+5-sep-2026 — cifra de esa fecha, no de hoy; correr `npm test` para el número
+vivo, incluidas las migraciones aplicadas de cero sobre un Postgres real) y pasa
 `npx tsc --noEmit` limpio.
 
 ## Decisiones de negocio confirmadas por el dueño
@@ -759,14 +762,18 @@ No importar facturas en ceros ni hojas de utilidad.
 - Bitácora `/bitacora`, ahora con filtros por folio/texto, tipo, usuario y
   fecha.
 - Archivos en el folio (CFDI/guía). Respaldo JSON.
-- Migraciones hasta `migrations/0023_fi_explicacion_cliente.sql`.
+- Migraciones hasta `migrations/0023_fi_explicacion_cliente.sql` — estado al
+  4-sep-2026, esta lista no se actualiza; hoy hay más, ver `migrations/`.
 - Pruebas: `npm test` corre más de 200 casos en varios archivos
   `scripts/erp-*.test.mjs` (fórmulas, permisos, cartera, utilidad,
-  trazabilidad, precio). Todas deben pasar en verde, junto con
+  trazabilidad, precio) — cifra al 4-sep-2026, no de hoy; correr `npm test`
+  para el número vivo. Todas deben pasar en verde, junto con
   `npx tsc --noEmit` limpio, antes de dar por hecho cualquier cambio.
-- Documentos de auditoría en la raíz del repo, todos vigentes:
+- Documentos de auditoría en la raíz del repo, todos vigentes al 4-sep-2026:
   `AUDITORIA.md`, `SEGURIDAD.md`, `LOGICA.md`, `EXCEL_VS_SISTEMA.md`,
-  `TRAZABILIDAD.md`. Léelos antes de tocar cartera, permisos o kardex — cada
+  `TRAZABILIDAD.md`. Después se agregaron `DISENO_FINANCIAMIENTO.md`,
+  `ESTADO.md`, `DECISIONES.md`, `DESHACER.md` — ver el mapa de `CLAUDE.md`.
+  Léelos antes de tocar cartera, permisos o kardex — cada
   uno explica el porqué de una decisión que ya se tomó.
 
 Sin `DATABASE_URL` el preview local sigue cayendo a PGLite y se pierde al
