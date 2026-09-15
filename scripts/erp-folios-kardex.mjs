@@ -129,6 +129,16 @@ if (esCli) {
     console.error("Falta DATABASE_URL (solo lectura).");
     process.exit(1);
   }
+  // Del lado del cliente, antes de conectar: qué host dice la propia cadena
+  // (nunca la contraseña). Si esto ya no coincide con lo que ves en Neon, el
+  // problema es el valor que te dieron, ni siquiera hace falta conectar.
+  let hostDeLaCadena = "(no se pudo leer como URL)";
+  try {
+    const u = new URL(url);
+    hostDeLaCadena = `${u.hostname}${u.port ? ":" + u.port : ""}`;
+  } catch {
+    // deja el mensaje de arriba
+  }
   const { default: pg } = await import("pg");
   const pool = new pg.Pool({ connectionString: url, max: 1 });
   try {
@@ -136,6 +146,30 @@ if (esCli) {
     try {
       // Solo lectura, de verdad: la transacción se declara READ ONLY.
       await client.query("begin read only");
+      // ENCABEZADO — a qué base quedaste conectado, antes de creerle al
+      // reporte. Si esto dice 0 y tú ves movimientos en el sitio, DATABASE_URL
+      // no es la base de producción: no sigas leyendo el reporte de abajo.
+      const chk = (
+        await client.query(
+          `select current_database() as db,
+                  inet_server_addr()::text as server_addr,
+                  inet_server_port() as server_port,
+                  (select count(*)::int from stock_moves) as stock_moves_total,
+                  (select count(*)::int from companies) as companies_total`,
+        )
+      ).rows[0];
+      console.log("══ A DÓNDE TE CONECTASTE (antes de creerle al reporte) ══");
+      console.log(`Host de la cadena DATABASE_URL: ${hostDeLaCadena}`);
+      console.log(`Base (current_database):        ${chk.db}`);
+      console.log(`Host del servidor (inet_server_addr): ${chk.server_addr ?? "(sin IP — normal en pooler/PgBouncer o TLS)"}${chk.server_port ? ":" + chk.server_port : ""}`);
+      console.log(`companies, sin filtro:           ${chk.companies_total}`);
+      console.log(`stock_moves, sin filtro:         ${chk.stock_moves_total}`);
+      if (chk.stock_moves_total === 0) {
+        console.log("AVISO: CERO movimientos sin ningún filtro. Si en el sitio ves kardex con datos,");
+        console.log("  esta DATABASE_URL NO es la base de producción (rama vacía, proyecto viejo,");
+        console.log("  o el valor no es el de Production en Vercel). El reporte de abajo no sirve.");
+      }
+      console.log("");
       const secciones = await radiografia((text, params) => client.query(text, params));
       await client.query("rollback");
       console.log(imprimir(secciones));
