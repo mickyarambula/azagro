@@ -264,15 +264,23 @@ El dueño recuerda el plan anterior como **siete** pasos, con 0, 1 y 2 posibles 
 El dueño recuerda seis, una de dinero. Contra el código son **ocho**: las seis se confirman (ninguna está contestada en `DECISIONES.md`; la 28 contesta solo la mitad de proveedor de la 4, y la 29 la extiende a brokeraje), y salen dos más, una de ellas también de dinero. Redactadas en lenguaje simple:
 
 1. **(Dinero) Cuando un pedido a crédito sale en dos viajes con semanas de diferencia, ¿el precio se queda como se cotizó, o se recalcula la parte que sale después?** Hoy el precio incluye el costo de financiar todo el pedido por todos los días del plazo, contados desde el día del pedido. La mercancía del segundo viaje la tiene el cliente menos días de los que pagó. Va junto: **¿el plazo de cada factura corre desde el día de su entrega, o todas corren desde el día del pedido?** (§ 3; los números se ven aparte.)
+   **CONTESTADA (Decisión 54, 9-sep-2026):** el plazo de cada factura arranca el mismo día que el costo con Santa Rosa — no desde el día del pedido. Queda **pendiente el dato de negocio** que aterriza la regla (si Santa Rosa desembolsa por pedido o por entrega): `ESTADO.md` § 4.16.
 2. **¿Una factura por cada entrega, o una sola factura cuando se complete el pedido?** Y las dos mitades: **¿se puede entregar sin facturar? ¿se puede facturar sin entregar?** Hoy entregar y facturar son un solo clic (§ 1.3).
+   **CONTESTADA (Decisiones 46 y 47, 9-sep-2026):** una factura por cada entrega; se puede entregar sin facturar, no se puede facturar sin entregar.
 3. **¿Quién entrega y quién factura?** Hoy almacén puede hacer las dos cosas y además editar el pedido entero, porque su permiso de ventas es completo (`acl.ts:152-158`; `ESTADO.md` H4e, abierta). Si entregar y facturar se separan, hay que elegir uno de los dos caminos que H4e ya tiene escritos: un nivel de permiso nuevo "solo entregar", o una bandera aparte.
+   **CONTESTADA (Decisión 48, 9-sep-2026):** camino (a) de H4e — permiso nuevo "solo entregar" para almacén; facturar y editar el pedido quedan fuera.
 4. **Recepción parcial: cuando el proveedor manda 20 de 50, ¿la orden queda abierta hasta que llegue el resto, o se puede cerrar con lo que llegó y dar el resto por perdido?** La deuda con el proveedor ya está decidida: crece con cada recepción (Decisión 28). Lo que falta es qué pasa con la orden.
+   **CONTESTADA (Decisión 49, 9-sep-2026):** se puede cerrar con lo recibido, a mano y con motivo obligatorio; no se cierra sola.
 5. **Entrega corta: ¿se puede cerrar un pedido con cantidad pendiente que ya nunca va a salir?** Y si sí, ¿qué pasa con lo que ya se entregó y facturó — se queda tal cual? Sin esto, un pedido a medias no se puede ni cerrar ni cancelar (§ 4.1).
+   **CONTESTADA (Decisión 50, 9-sep-2026):** se puede cerrar con motivo obligatorio; lo ya entregado y facturado queda intacto.
 6. **Límite de crédito: hoy un pedido confirmado no consume línea hasta que se factura. Con entregas por partes, ¿el límite se consume por partes, conforme se factura cada una, o se aparta completo al confirmar el pedido?**
+   **CONTESTADA (Decisión 51, 9-sep-2026):** se aparta completo al confirmar el pedido y se convierte en deuda real conforme se factura.
 7. **(Nueva) Si un pedido tiene dos facturas y el cliente devuelve mercancía, ¿a cuál factura se le descuenta?** Hoy se descuenta siempre a la última (`azagro.ts:1762-1766`), sin mirar en cuál viajó el producto. Opciones reales: la factura donde viajó el producto; la que la persona elija (el sistema propone, como en la Decisión 13); la última, como hoy.
+   **CONTESTADA (Decisión 52, 9-sep-2026):** el sistema propone la factura donde viajó el producto y la persona confirma o cambia; si viajó en más de una, pregunta.
 8. **(Nueva, dinero) La comisión y el FEGA (3.04 %) se cobran "una vez" cuando una factura vence. Con dos facturas del mismo pedido, ¿se cobran una vez por pedido o una vez por factura?** Hoy es por factura (`credit.ts:166`, `:223-225`; `ops.ts:2818-2822`): si vencen las dos, suma lo mismo que una vez sobre el total; si vence solo una, se cobra sobre una parte.
+   **CONTESTADA (Decisión 53, 9-sep-2026):** por factura, sin cambio — medido contra el libro 2025, cobrarlo por pedido completo daría ~$74,600 más al año (9.7 % de la utilidad), y el dueño lo declinó a propósito.
 
-Ninguna se contesta aquí. Cuando el dueño conteste una, va a `DECISIONES.md` con fecha y se marca en `ESTADO.md` (H4d sigue siendo la pregunta paraguas; no se abrieron renglones nuevos en `ESTADO.md` en este bloque).
+**Las ocho, contestadas el 9-sep-2026** (Decisiones 46 a 54 en `DECISIONES.md`; la 54 amarra la 1 y deja abierta `ESTADO.md` § 4.16). H4d y H4e (`ESTADO.md`) se cerraron con ellas. Ninguna está construida — el plan sigue siendo § 8.
 
 ---
 

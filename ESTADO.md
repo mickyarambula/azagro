@@ -546,11 +546,26 @@ devolverle al proveedor; son dos cosas distintas, y la reversa de recepción
 (paso 6) no cubre H4c. H4c sigue **ABIERTA**.
 
 ### H4d. Recepciones y entregas parciales (LOGICA h.17)
-**ABIERTA.** Siempre completas. *Para el dueño: si el proveedor manda 20 de 50
-tambos, o si al cliente se le entrega en dos viajes, ¿se registra por partes?*
+**RESUELTA EN DOCUMENTO (Decisiones 46 a 54 del dueño, 9-sep-2026), no
+construida.** Diagnóstico completo y plan por pasos en `PARCIALES.md`. En
+corto: una factura por cada entrega (Decisión 46); se puede entregar sin
+facturar, no facturar sin entregar (47); permiso nuevo "solo entregar" para
+almacén (48, cierra también H4e); una OC parcial se cierra a mano con lo
+recibido (49); un pedido con entrega corta se cierra a mano, lo ya entregado
+y facturado queda intacto (50); el límite de crédito se aparta al confirmar
+el pedido (51); una devolución con dos facturas la propone el sistema y la
+persona confirma o cambia (52); comisión y FEGA se cobran por factura, sin
+cambio (53); el plazo de cada factura arranca el mismo día que el costo con
+Santa Rosa, con un dato de negocio todavía pendiente (54, ver 4.16). Sigue
+sin construirse.
 
 ### H4e. Almacén tiene más permiso del que dice su descripción (Sesión de permisos, 7-sep-2026)
-**ABIERTA.** `templateAcl("almacen")` (`src/lib/erp/acl.ts`) le da `sales: "edit"`
+**RESUELTA EN DOCUMENTO (Decisión 48 del dueño, 9-sep-2026), no construida.**
+El dueño eligió el camino (a): nace un permiso nuevo "solo entregar" — puede
+confirmar entrega, recepción y devolución, pero no facturar ni editar el
+pedido. Queda sin construirse. Texto original de la pregunta, sin tocar:
+
+`templateAcl("almacen")` (`src/lib/erp/acl.ts`) le da `sales: "edit"`
 y `purchases: "edit"` completos — no solo entregar/recibir/devolver. Con eso
 puede crear y editar el pedido entero (`saveOrder`), cambiar el plazo de
 crédito (`changeOrderTerm`) y crear/editar una OC, aunque la regla dicha es
@@ -572,7 +587,8 @@ caminos, cada uno con su costo:*
   toca `AclLevel` ni el resto del motor, pero agrega módulos/columnas nuevas
   solo para este caso, y cada función que hoy es un solo `assertCan` pasaría a
   aceptar dos permisos válidos (el fino o el de módulo completo).
-No se construye hasta que el dueño elija uno.
+
+**Elegido: camino (a)** (Decisión 48, 9-sep-2026). Sin construir.
 
 ### H4f. Candado sin salida: reversa de devolución con amarre incompleto (DESHACER § 7)
 **ABIERTA.** En el paso 8 (reversa de devolución), si el movimiento `return`
@@ -685,16 +701,20 @@ código de hoy sigue usando una sola tasa de la tabla (`ops.ts:1954`,
 `credit.ts:156`); falta construir la tabla de dos columnas y aplicar esta
 regla.
 
-**ABIERTAS en esta lista: 10** (llegaron a ser 19, luego 17 con N1 abierta; el
+**ABIERTAS en esta lista: 9** (llegaron a ser 19, luego 17 con N1 abierta; el
 5-sep-2026 se cerraron D-A, H8b, E2 y, más tarde el mismo día, N1 — las
 cuatro en documento, ninguna construida; el 7-sep-2026 se cerraron otras
 siete — L3a, L3b, L3c, L5, L6, H4a, H4b — Decisiones 9 a 16 en
 `DECISIONES.md`, también en documento, ninguna construida; el 9-sep-2026 se
-agregó H4f, y se aclaró que H4c es ortogonal a la reversa de recepción) — L4a
-(solo la parte de captura; el modelo ya se cerró), L8a, H3, H4c, H4d, H4f, H5,
-H6, D-B, D-C. (H2 y H7 están decididas en documento; D-A, E2, H8b, N1, y ahora
-L3a, L3b, L3c, L5, L6, H4a y H4b, se movieron a "resuelta en documento"; el
-resto está en código.)
+agregó H4f, y se aclaró que H4c es ortogonal a la reversa de recepción; el
+mismo 9-sep-2026, más tarde, el dueño cerró H4d y H4e — Decisiones 46 a 54 —
+y se corrigió un conteo viejo: **H4e ya estaba ABIERTA desde el 7-sep-2026
+pero se había quedado fuera de este renglón**, un descuido de la sesión que la
+agregó; entra y sale de la lista el mismo día) — L4a (solo la parte de
+captura; el modelo ya se cerró), L8a, H3, H4c, H4f, H5, H6, D-B, D-C. (H2 y H7
+están decididas en documento; D-A, E2, H8b, N1, L3a, L3b, L3c, L5, L6, H4a,
+H4b, y ahora H4d y H4e, se movieron a "resuelta en documento"; el resto está
+en código.)
 
 ### N2. La tasa de mora no se puede pactar por cliente hoy — VERIFICADO el 5-sep-2026, requisito confirmado de la Fase 1 (no pregunta abierta)
 Al contestar N1 el dueño dijo que la tasa moratoria "depende del acuerdo con
@@ -1063,9 +1083,21 @@ corte. `member_favorites` (0031) nació sin entrar a ningún borrado porque no
 hay dónde. Cuando se construya el borrado, esta tabla entra por `member_id`
 (cascada desde `members`).
 
+### 4.16 Con qué desembolsa Santa Rosa una entrega parcial (anotado el 9-sep-2026, Decisión 54)
+La Decisión 54 fija la regla — el plazo de cada factura arranca el mismo día
+que el costo con Santa Rosa — pero deja pendiente el dato que la aterriza. Hoy
+el precio se congela en la cotización suponiendo un solo desembolso por todo
+el pedido (`PARCIALES.md` § 3); con un pedido que sale en dos o más entregas
+(Decisión 46), cada una con su propia factura (Decisión 47), ese desembolso
+ya no es uno solo. *Para el dueño: cuando un pedido se entrega en dos partes,
+Santa Rosa (o la línea que financie) ¿desembolsa todo el costo desde la
+primera entrega, o desembolsa por partes, conforme sale cada entrega?* Sin
+esta respuesta no se puede fijar con qué tasa y desde qué día corre el
+financiamiento de la segunda entrega en adelante.
+
 ## 5. Qué hacer con esto
 
-- Las **10 ABIERTAS** del punto 2 y las **8 preguntas sin contestar** del
+- Las **9 ABIERTAS** del punto 2 y las **9 preguntas sin contestar** del
   punto 4 se contestan en `DECISIONES.md` conforme el dueño decida, un
   renglón por decisión, con fecha.
 - El 5-sep-2026 el dueño cerró las **cuatro** preguntas que gateaban la Fase
@@ -1088,6 +1120,16 @@ hay dónde. Cuando se construya el borrado, esta tabla entra por `member_id`
   la Fase 0 del § 14 del diseño: las cuatro preguntas que la Fase 2 necesitaba
   cerradas ya están cerradas en documento, y N2 solo agrega alcance a una fase
   (la 1) que ya estaba planeada, no bloquea nada.
+- El 9-sep-2026 el dueño cerró **H4d y H4e** (Decisiones 46 a 54 en
+  `DECISIONES.md`) — el bloque de parciales completo: una FV por entrega, se
+  puede entregar sin facturar, permiso "solo entregar" para almacén, cierre a
+  mano de OC y pedidos parciales con motivo, límite de crédito al confirmar,
+  devolución propuesta por el sistema, comisión y FEGA por factura sin
+  cambio, y el plazo de cada factura atado al costo real de Santa Rosa. La
+  última decisión (54) abre una pregunta nueva, **4.16**: falta el dato de
+  negocio (si Santa Rosa desembolsa por pedido o por entrega) para aplicarla.
+  Diagnóstico completo en `PARCIALES.md`; también decididas en documento,
+  ninguna construida.
 - Este archivo se actualiza cada vez que una pregunta cambie de columna.
 
 ---
