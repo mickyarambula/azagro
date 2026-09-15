@@ -176,7 +176,6 @@ export const getOrder = createServerFn({ method: "POST" })
     await sql`alter table sales_orders add column if not exists guia_obs text not null default ''`;
     await sql`alter table purchase_orders add column if not exists so_id integer`;
     await sql`alter table purchase_orders add column if not exists fulfill_kind text not null default 'inventory'`;
-    await sql`alter table sales_lines add column if not exists qty_returned numeric(14,3) not null default 0`;
     await ensureQuoteOrigin(sql);
     const rows = await sql<{
       id: number;

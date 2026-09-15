@@ -1640,7 +1640,6 @@ export const returnSale = createServerFn({ method: "POST" })
   )
   .handler(async ({ context, data }) => {
     const boot = await getSql();
-    await boot`alter table sales_lines add column if not exists qty_returned numeric(14,3) not null default 0`;
     await boot`alter table invoices add column if not exists paid_date date`;
     await boot`alter table invoices add column if not exists inv_class text not null default 'product'`;
     await boot`alter table invoices add column if not exists order_id integer`;
