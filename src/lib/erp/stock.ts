@@ -99,9 +99,29 @@ export async function ensureStock(sql: Sql) {
   `;
 }
 
+/**
+ * Un contador por serie (bloque A4), no uno compartido por los siete tipos.
+ * Atómico: `insert … on conflict … do update` serializa dos peticiones
+ * simultáneas de la MISMA serie por el candado de fila que trae la llave
+ * primaria — dos series distintas ya no pueden competir por nada, y dos
+ * peticiones de la misma serie nunca se llevan el mismo número. La fila
+ * nace sola la primera vez que se pide una serie (arranca en 1).
+ *
+ * El +1 vive dentro de la misma transacción que el resto de la operación
+ * (esta función corre con la conexión que postStock recibe de withTx). Si
+ * esa transacción se revierte, el +1 se revierte con ella: autocorregible,
+ * igual que el `count(*)` de antes — nunca se pierde un folio por una
+ * operación que nunca pasó.
+ */
 async function nextRef(sql: Sql, companyId: number, type: StockMoveType) {
-  const n = await sql<{ c: number }>`select count(*)::int as c from stock_moves where company_id = ${companyId}`;
-  return `${REF_PREFIX[type]}/${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const series = REF_PREFIX[type];
+  const rows = await sql<{ last_number: number }>`
+    insert into folio_counters (company_id, series, last_number)
+    values (${companyId}, ${series}, 1)
+    on conflict (company_id, series) do update set last_number = folio_counters.last_number + 1
+    returning last_number
+  `;
+  return `${series}/${String(rows[0]!.last_number).padStart(4, "0")}`;
 }
 
 export async function qtyFromMoves(sql: Sql, companyId: number, productId: number, locationId: number) {
