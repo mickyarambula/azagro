@@ -11,7 +11,7 @@ import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
 import { createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
 import { CancelChainButton, ReceiptReversalButton } from "@/components/cancel-doc";
 import { cancelChainPreview, cancelPurchaseOrderChain } from "@/lib/erp/cancel";
-import { receiptReversalPreview, reverseReceipt } from "@/lib/erp/receipt-reversal";
+import { listReceiptEvents, receiptEventReversalPreview, receiptReversalPreview, reverseReceipt, reverseReceiptEvent } from "@/lib/erp/receipt-reversal";
 import { exportCsv } from "@/lib/export-csv";
 import { moneyIn, num, todayMx } from "@/lib/utils";
 
@@ -98,6 +98,40 @@ function ReceivePartialButton(props: {
           </div>
         </div>
       ) : null}
+    </>
+  );
+}
+
+/**
+ * BLOQUE DE PARCIALES, paso 2: con más de un evento de recepción en la OC,
+ * cada uno se revierte por separado (event_ref), no la OC completa. Con uno
+ * solo no se dibuja nada — ahí sigue sirviendo el botón de siempre
+ * (`ReceiptReversalButton`, por OC).
+ */
+function ReceiptEventsPanel(props: { poId: number; poName: string; onDone: () => void | Promise<void> }) {
+  const [events, setEvents] = useState<Awaited<ReturnType<typeof listReceiptEvents>> | null>(null);
+
+  useEffect(() => {
+    void listReceiptEvents({ data: { poId: props.poId } })
+      .then(setEvents)
+      .catch(() => setEvents([]));
+  }, [props.poId]);
+
+  if (!events || events.length <= 1) return null;
+  const live = events.filter((e) => !e.reversed);
+  if (!live.length) return null;
+  return (
+    <>
+      {live.map((e) => (
+        <ReceiptReversalButton
+          key={e.eventRef}
+          poName={props.poName}
+          label={`Revertir ${e.eventRef}`}
+          load={() => receiptEventReversalPreview({ data: { poId: props.poId, eventRef: e.eventRef } })}
+          onConfirm={(reason) => reverseReceiptEvent({ data: { poId: props.poId, eventRef: e.eventRef, reason } })}
+          onDone={props.onDone}
+        />
+      ))}
     </>
   );
 }
@@ -491,6 +525,7 @@ function Page() {
                             onDone={load}
                           />
                         )}
+                        {o.fulfill_kind !== "direct" && <ReceiptEventsPanel poId={o.id} poName={o.name} onDone={load} />}
                         {o.state === "confirmed" && (
                           <CancelChainButton
                             title="la orden de compra"

@@ -307,3 +307,289 @@ export const reverseReceipt = createServerFn({ method: "POST" })
       return { ok: true as const, refs, invoice: fresh.preview.invoice?.name ?? null };
     });
   });
+
+/**
+ * BLOQUE DE PARCIALES, paso 2 (PARCIALES.md § 8): revertir UNA recepción
+ * específica de una OC con varias — no la OC completa. `chainForReceipt` /
+ * `reverseReceipt` de arriba se quedan intactas para el caso de una sola
+ * recepción (identidad al centavo, `erp-revertir-recepcion.test.mjs`); estas
+ * son un camino nuevo y paralelo, keyed por `event_ref` (paso 0(b)) en vez de
+ * por `origin` (que sigue siendo el folio de la OC, compartido por TODAS sus
+ * recepciones).
+ *
+ * Diferencias con la reversa de una sola recepción:
+ *   - Los movimientos vivos son los de `event_ref = eventRef`, no todos los
+ *     `receipt` de esa OC.
+ *   - La FP a revertir es la de `event_ref = eventRef`, no todas las de
+ *     `origin = po.name`.
+ *   - `qty_received` se RESTA (puede haber otras recepciones vivas de la
+ *     misma partida), nunca se pone en 0.
+ *   - La OC vuelve a `'confirmed'` solo si, después de restar, alguna
+ *     partida queda con pendiente — no siempre.
+ * Decisión 35 (no revertir con salida posterior) se evalúa igual, por
+ * producto y bodega: no cambia con eventos.
+ */
+
+export type ReceiptEventPreview = {
+  po: { id: number; name: string; partner: string; state: string; date: string; currency: string };
+  eventRef: string;
+  lines: ReceiptLine[];
+  invoice: { id: number; name: string; amount: number; residual: number; currency: string } | null;
+  blockers: string[];
+  allowed: boolean;
+  role: string;
+};
+
+type EventChain = {
+  preview: ReceiptEventPreview;
+  companyId: number;
+  moves: Array<{ id: number; product_id: number; quantity: number; unit_cost: number; location_to: number; ref: string }>;
+  invoiceId: number | null;
+};
+
+async function chainForReceiptEvent(sql: Sql, companyId: number, poId: number, eventRef: string, role: string): Promise<EventChain> {
+  const blockers: string[] = [];
+  const lines: ReceiptLine[] = [];
+
+  const po = await sql<{ id: number; name: string; state: string; partner: string; date: string; currency: string; location_id: number }>`
+    select po.id, po.name, po.state, p.name as partner, po.date::text, coalesce(po.currency,'MXN') as currency, po.location_id
+    from purchase_orders po join partners p on p.id = po.partner_id
+    where po.id = ${poId} and po.company_id = ${companyId}
+  `;
+  if (!po[0]) throw new Error("Orden de compra no encontrada");
+  const o = po[0];
+
+  const moves = await sql<{
+    id: number;
+    ref: string;
+    product_id: number;
+    quantity: string;
+    unit_cost: string;
+    location_to: number;
+    code: string;
+    product: string;
+    uom: string;
+    location: string;
+    reversed_by: string | null;
+  }>`
+    select m.id, m.ref, m.product_id, m.quantity::text, coalesce(m.unit_cost,0)::text as unit_cost,
+      m.location_to, p.code, p.name as product, coalesce(p.uom,'') as uom, l.name as location,
+      (select r.ref from stock_moves r where r.reverses_id = m.id limit 1) as reversed_by
+    from stock_moves m
+    join products p on p.id = m.product_id
+    left join locations l on l.id = m.location_to
+    where m.company_id = ${companyId} and m.event_ref = ${eventRef} and m.move_type = 'receipt'
+    order by m.id
+  `;
+  const live = moves.filter((m) => !m.reversed_by);
+
+  if (o.state === "cancelled") blockers.push(`${o.name} está cancelada.`);
+  if (!moves.length) blockers.push(`No hay recepción con el evento ${eventRef} en ${o.name}.`);
+  else if (!live.length) blockers.push(`La recepción ${eventRef} de ${o.name} ya está revertida (${moves.map((m) => m.reversed_by).join(", ")}).`);
+
+  for (const m of live) {
+    const qty = Number(m.quantity);
+    const unitCost = Number(m.unit_cost);
+    const salidas = await sql<{ ref: string; quantity: string; move_type: string; date: string }>`
+      select ref, quantity::text, move_type, date::text from stock_moves
+      where company_id = ${companyId} and product_id = ${m.product_id}
+        and location_from = ${m.location_to} and id > ${m.id}
+      order by id
+    `;
+    if (salidas.length) {
+      const total = salidas.reduce((s, x) => s + Number(x.quantity), 0);
+      blockers.push(
+        `Después de recibir ${eventRef} de ${o.name} salieron ${total} ${m.uom} de ${m.code} de ${m.location} (${salidas.map((x) => x.ref).join(", ")}). ` +
+          "El kardex no lleva lotes: no se puede saber si lo que salió era de esta recepción, y revertir se llevaría existencia que no es del proveedor. " +
+          "Revierte primero esa salida.",
+      );
+      continue;
+    }
+    const q = await sql<{ quantity: string; avg_cost: string }>`
+      select quantity::text, coalesce(avg_cost,0)::text as avg_cost from stock_quants
+      where company_id = ${companyId} and product_id = ${m.product_id} and location_id = ${m.location_to}
+    `;
+    const qtyBefore = Number(q[0]?.quantity ?? 0);
+    const avgNow = Number(q[0]?.avg_cost ?? 0);
+    const qtyAfter = r2(qtyBefore - qty);
+    const entradasDespues = await sql<{ n: number }>`
+      select count(*)::int as n from stock_moves
+      where company_id = ${companyId} and product_id = ${m.product_id}
+        and location_to = ${m.location_to} and id > ${m.id}
+    `;
+    const puro = (entradasDespues[0]?.n ?? 0) === 0 && qtyAfter > 0.0001;
+    const avgBeforeReceipt = puro ? r2((qtyBefore * avgNow - qty * unitCost) / (qtyBefore - qty)) : null;
+    const valueNow = r2(qtyBefore * avgNow);
+    const valueAfter = r2(qtyAfter * avgNow);
+    lines.push({
+      productId: m.product_id,
+      code: m.code,
+      product: m.product,
+      uom: m.uom,
+      qty,
+      unitCost,
+      value: r2(qty * unitCost),
+      moveRef: m.ref,
+      location: m.location,
+      qtyBefore,
+      qtyAfter,
+      avgNow,
+      avgBeforeReceipt,
+      valueNow,
+      valueAfter,
+      avgLeftover: avgBeforeReceipt == null ? null : r2(valueAfter - qtyAfter * avgBeforeReceipt),
+    });
+  }
+
+  const fps = await sql<{ id: number; name: string; amount: string; residual: string; state: string; paid: string }>`
+    select i.id, i.name, i.amount::text, i.residual::text, i.state,
+      coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid
+    from invoices i
+    where i.company_id = ${companyId} and i.kind = 'supplier' and i.event_ref = ${eventRef} and i.state <> 'reversed'
+    order by i.id
+  `;
+  let invoice: ReceiptEventPreview["invoice"] = null;
+  let invoiceId: number | null = null;
+  for (const fp of fps) {
+    if (Number(fp.paid) > 0.009 || fp.state === "paid") {
+      blockers.push(`${fp.name} (la factura de ${o.partner} por esta recepción) ya tiene abonos: ya se le pagó al proveedor, en todo o en parte. Revierte primero ese pago.`);
+      continue;
+    }
+    invoice = { id: fp.id, name: fp.name, amount: Number(fp.amount), residual: Number(fp.residual), currency: o.currency };
+    invoiceId = fp.id;
+  }
+
+  return {
+    preview: {
+      po: { id: o.id, name: o.name, partner: o.partner, state: o.state, date: o.date, currency: o.currency },
+      eventRef,
+      lines,
+      invoice,
+      blockers,
+      allowed: canRevert(role),
+      role,
+    },
+    companyId,
+    moves: live.map((m) => ({ id: m.id, product_id: m.product_id, quantity: Number(m.quantity), unit_cost: Number(m.unit_cost), location_to: m.location_to, ref: m.ref })),
+    invoiceId,
+  };
+}
+
+async function auditRejectedEvent(sql: Sql, companyId: number, userId: string, chain: EventChain) {
+  await writeAudit(sql, {
+    companyId,
+    userId,
+    action: "revertir-rechazado",
+    entity: "purchase",
+    entityId: chain.preview.po.id,
+    name: `${chain.preview.po.name} · ${chain.preview.eventRef}`,
+    detail: chain.preview.blockers.join(" | ").slice(0, 900),
+  });
+}
+
+/** Lo que la pantalla enseña antes de preguntar, para UNA recepción de la OC. */
+export const receiptEventReversalPreview = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ poId: z.number(), eventRef: z.string() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    const chain = await chainForReceiptEvent(sql, companyId, data.poId, data.eventRef, me.role);
+    if (chain.preview.blockers.length) await auditRejectedEvent(sql, companyId, context.userId, chain);
+    return chain.preview;
+  });
+
+/** Revertir UNA recepción: resta (no zeroea) qty_received, la OC vuelve a 'confirmed' solo si queda pendiente. */
+export const reverseReceiptEvent = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ poId: z.number(), eventRef: z.string(), reason: z.string().trim().min(1, "Escribe el motivo") }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    const chain = await chainForReceiptEvent(sql, companyId, data.poId, data.eventRef, me.role);
+    if (chain.preview.blockers.length) {
+      await auditRejectedEvent(sql, companyId, context.userId, chain);
+      throw new Error(chain.preview.blockers[0]);
+    }
+    if (!canRevert(me.role)) throw new Error("Solo un administrador o gerencia puede revertir una recepción: ya movió inventario.");
+    return withTx(async (tx) => {
+      await tx`select id from purchase_orders where id = ${data.poId} and company_id = ${companyId} for update`;
+      const fresh = await chainForReceiptEvent(tx, companyId, data.poId, data.eventRef, me.role);
+      if (fresh.preview.blockers.length) throw new Error(fresh.preview.blockers[0]);
+      const refs: string[] = [];
+      for (const m of fresh.moves) {
+        const mv = await postStock(tx, {
+          companyId,
+          userId: context.userId,
+          moveType: "reversal",
+          origin: fresh.preview.po.name,
+          productId: m.product_id,
+          quantity: m.quantity,
+          locationFrom: m.location_to,
+          unitCost: m.unit_cost,
+          reversesId: m.id,
+        });
+        refs.push(mv.ref);
+        await tx`
+          update purchase_lines set qty_received = greatest(0, qty_received - ${m.quantity})
+          where po_id = ${data.poId} and product_id = ${m.product_id}
+        `;
+      }
+      const pendiente = await tx<{ n: number }>`
+        select count(*)::int as n from purchase_lines where po_id = ${data.poId} and qty_received < qty - 0.0001
+      `;
+      if ((pendiente[0]?.n ?? 0) > 0) {
+        await tx`update purchase_orders set state = 'confirmed' where id = ${data.poId} and company_id = ${companyId}`;
+      }
+      if (fresh.invoiceId) {
+        await tx`
+          update invoices set state = 'reversed', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason}
+          where id = ${fresh.invoiceId} and company_id = ${companyId}
+        `;
+        await writeAudit(tx, {
+          companyId,
+          userId: context.userId,
+          action: "revertir-fp",
+          entity: "invoice",
+          entityId: fresh.invoiceId,
+          name: fresh.preview.invoice?.name ?? "",
+          detail: `Revertida al revertir la recepción ${data.eventRef} de ${fresh.preview.po.name} · sin abonos · ${data.reason}`,
+        });
+      }
+      const promedios = fresh.preview.lines
+        .map((l) => `${l.code}: ${l.qtyBefore} → ${l.qtyAfter} ${l.uom}, promedio ${l.avgNow.toFixed(4)} (no se mueve)${l.avgLeftover != null ? `, quedan ${l.avgLeftover.toFixed(2)} de más en el valor` : ""}`)
+        .join(" · ");
+      await writeAudit(tx, {
+        companyId,
+        userId: context.userId,
+        action: "revertir-recepcion",
+        entity: "purchase",
+        entityId: data.poId,
+        name: `${fresh.preview.po.name} · ${data.eventRef}`,
+        detail: `${refs.join(", ")} · ${promedios}${fresh.preview.invoice ? ` · ${fresh.preview.invoice.name} revertida` : ""} · ${data.reason}`,
+      });
+      return { ok: true as const, refs, invoice: fresh.preview.invoice?.name ?? null };
+    });
+  });
+
+/** Los eventos de recepción de una OC (para la pantalla: si hay más de uno, cada uno con su botón de reversa). */
+export const listReceiptEvents = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ poId: z.number() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    const rows = await sql<{ event_ref: string; date: string; qty: string; reversed: boolean }>`
+      select m.event_ref, min(m.date)::text as date, sum(m.quantity)::text as qty,
+        bool_and(exists (select 1 from stock_moves r where r.reverses_id = m.id)) as reversed
+      from stock_moves m
+      join purchase_orders po on po.id = ${data.poId}
+      where m.company_id = ${companyId} and m.event_ref is not null and m.move_type = 'receipt'
+        and m.origin = po.name
+      group by m.event_ref
+      order by min(m.id)
+    `;
+    return rows.map((r) => ({ eventRef: r.event_ref, date: r.date, qty: Number(r.qty), reversed: r.reversed }));
+  });
