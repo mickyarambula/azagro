@@ -147,6 +147,16 @@ function Page() {
           {data!.purchaseGaps.length + data!.salesGaps.length > 4 ? "…" : ""}
         </div>
       )}
+      {(data?.porFacturar?.length ?? 0) > 0 && (
+        <div className="mb-3 rounded-md border border-line bg-paper px-3 py-2 text-[13px] text-ink-soft">
+          {data!.porFacturar.length} partida{data!.porFacturar.length === 1 ? "" : "s"} entregada{data!.porFacturar.length === 1 ? "" : "s"} y todavía sin facturar (se factura por entrega desde la ficha del pedido):{" "}
+          {data!.porFacturar
+            .slice(0, 4)
+            .map((r) => `${r.productCode} en ${r.soName} (${r.porFacturar})`)
+            .join(" · ")}
+          {data!.porFacturar.length > 4 ? "…" : ""}
+        </div>
+      )}
 
       <div className="mb-4 flex flex-wrap gap-2">
         {(

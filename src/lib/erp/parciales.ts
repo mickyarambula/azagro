@@ -45,8 +45,15 @@ export type SalesLineGap = {
   cerradaCorta: number;
   /** qty − (entregadaViva + pendiente + cerradaCorta). Debe ser 0. */
   gap: number;
-  /** entregadaViva − facturadaViva. Debe ser 0: no se emite una FV que no cubra exactamente lo entregado y no facturado. */
+  /** entregadaViva − facturadaViva, como dato. */
   facturaGap: number;
+  /**
+   * Paso 3 (Decisión 47): lo entregado y todavía no facturado. Es un estado
+   * NORMAL — se puede entregar sin facturar —, se reporta, no se acusa.
+   */
+  porFacturar: number;
+  /** Facturado MÁS de lo entregado: facturar sin entregar, lo que la Decisión 47 prohíbe. Esto sí es violación. */
+  overInvoiced: boolean;
 };
 
 export function reconcileSalesLine(l: SalesLineRecon): SalesLineGap {
@@ -55,7 +62,9 @@ export function reconcileSalesLine(l: SalesLineRecon): SalesLineGap {
   const pendiente = Math.max(0, l.qty - entregadaViva - cerradaCorta);
   const gap = l.qty - (entregadaViva + pendiente + cerradaCorta);
   const facturaGap = entregadaViva - l.invoicedQty;
-  return { qty: l.qty, entregadaViva, facturadaViva: l.invoicedQty, devuelta: l.qtyReturned, pendiente, cerradaCorta, gap, facturaGap };
+  const porFacturar = Math.max(0, facturaGap);
+  const overInvoiced = facturaGap < -0.0001;
+  return { qty: l.qty, entregadaViva, facturadaViva: l.invoicedQty, devuelta: l.qtyReturned, pendiente, cerradaCorta, gap, facturaGap, porFacturar, overInvoiced };
 }
 
 /**
@@ -99,8 +108,12 @@ export async function purchaseLineGaps(sql: SqlTag, companyId: number): Promise<
 
 export type SalesLineGapRow = SalesLineGap & { soId: number; soName: string; productCode: string; productName: string };
 
-/** Panel del cuadre (§ 5): solo las partidas de pedidos confirmados/entregados cuyo gap (o facturaGap) no da 0. Hoy: siempre vacío. */
-export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<SalesLineGapRow[]> {
+/**
+ * Panel del cuadre (§ 5). `gaps` = violaciones: cantidad sin clasificar
+ * (gap ≠ 0) o facturado más de lo entregado (Decisión 47). `porFacturar` =
+ * partidas entregadas y todavía sin facturar — informativo, no error.
+ */
+export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<{ gaps: SalesLineGapRow[]; porFacturar: SalesLineGapRow[] }> {
   // invoices.order_id hoy solo nace en runtime (deliverSale, azagro.ts) — una
   // empresa que nunca entregó nada puede no tenerla todavía. Idempotente.
   await sql`alter table invoices add column if not exists order_id integer`;
@@ -128,7 +141,8 @@ export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<Sal
     join products p on p.id = sl.product_id
     where so.company_id = ${companyId} and so.state in ('confirmed', 'done')
   `;
-  const out: SalesLineGapRow[] = [];
+  const gaps: SalesLineGapRow[] = [];
+  const porFacturar: SalesLineGapRow[] = [];
   for (const r of rows) {
     const g = reconcileSalesLine({
       qty: Number(r.qty),
@@ -136,9 +150,9 @@ export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<Sal
       qtyReturned: Number(r.qty_returned),
       invoicedQty: Number(r.invoiced_qty),
     });
-    if (Math.abs(g.gap) > 0.0001 || Math.abs(g.facturaGap) > 0.0001) {
-      out.push({ ...g, soId: r.so_id, soName: r.so_name, productCode: r.product_code, productName: r.product_name });
-    }
+    const row = { ...g, soId: r.so_id, soName: r.so_name, productCode: r.product_code, productName: r.product_name };
+    if (Math.abs(g.gap) > 0.0001 || g.overInvoiced) gaps.push(row);
+    else if (g.porFacturar > 0.0001) porFacturar.push(row);
   }
-  return out;
+  return { gaps, porFacturar };
 }

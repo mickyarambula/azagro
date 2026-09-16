@@ -984,7 +984,11 @@ export const listInventory = createServerFn({ method: "GET" })
     // todo-o-nada de hoy siempre da vacío; empieza a poblarse el día que
     // exista recepción/entrega parcial (paso 1 en adelante).
     const purchaseGaps = await purchaseLineGaps(sql, m.company_id);
-    const salesGaps = await salesLineGaps(sql, m.company_id);
+    const salesRecon = await salesLineGaps(sql, m.company_id);
+    const salesGaps = salesRecon.gaps;
+    // Paso 3 (Decisión 47): entregado sin facturar es normal — se enseña
+    // aparte, en tono normal, no como error.
+    const porFacturar = salesRecon.porFacturar;
     if (!canSeeCosts(me.role)) {
       return {
         quants: quants.map((q) => ({ ...q, cost: "0" })),
@@ -995,9 +999,10 @@ export const listInventory = createServerFn({ method: "GET" })
         mismatches,
         purchaseGaps,
         salesGaps,
+        porFacturar,
       };
     }
-    return { quants, locations, moves, incoming, outgoing, mismatches, purchaseGaps, salesGaps };
+    return { quants, locations, moves, incoming, outgoing, mismatches, purchaseGaps, salesGaps, porFacturar };
   });
 
 export const transferStock = createServerFn({ method: "POST" })

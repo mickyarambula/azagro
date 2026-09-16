@@ -64,9 +64,21 @@ test("reconcileSalesLine: entrega parcial (paso 3) con devolución, sigue dando 
   assert.equal(r.facturaGap, 0, "facturada (6) = entregada (6): cuadra aunque haya devolución");
 });
 
-test("reconcileSalesLine: facturaGap distinto de 0 delata una FV que no cubre lo entregado", () => {
+// Paso 3 (Decisión 47): entregar sin facturar es un estado NORMAL — lo
+// entregado y no facturado es "por facturar", no un error. La violación es
+// la contraria: facturar más de lo entregado (facturar sin entregar).
+test("reconcileSalesLine: entregado 10, facturado 7 → porFacturar 3, sin violación (Decisión 47)", () => {
   const r = reconcileSalesLine({ qty: 10, qtyDelivered: 10, qtyReturned: 0, invoicedQty: 7 });
-  assert.equal(r.facturaGap, 3, "entregado 10, facturado 7: 3 de más entregado sin facturar");
+  assert.equal(r.facturaGap, 3, "la resta se conserva como dato");
+  assert.equal(r.porFacturar, 3, "y se nombra como lo que es");
+  assert.equal(r.overInvoiced, false, "no es violación");
+});
+
+test("reconcileSalesLine: facturado 12 > entregado 10 → violación (facturar sin entregar, lo que la 47 prohíbe)", () => {
+  const r = reconcileSalesLine({ qty: 10, qtyDelivered: 10, qtyReturned: 0, invoicedQty: 12 });
+  assert.equal(r.facturaGap, -2);
+  assert.equal(r.porFacturar, 0);
+  assert.equal(r.overInvoiced, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -121,6 +133,22 @@ test("purchaseLineGaps / salesLineGaps: sembrado de hoy (todo-o-nada) da 0 rengl
   const pg = await purchaseLineGaps(r, 1);
   const sg = await salesLineGaps(r, 1);
   assert.deepEqual(pg, [], "ninguna partida de compra con gap");
-  assert.deepEqual(sg, [], "ninguna partida de venta con gap");
+  assert.deepEqual(sg.gaps, [], "ninguna partida de venta con gap");
+  assert.deepEqual(sg.porFacturar, [], "nada entregado sin facturar en el todo-o-nada de hoy");
+
+  // Paso 3: entrega parcial en bodega propia, todavía sin FV (Decisión 47).
+  await r`insert into sales_orders (id, company_id, name, partner_id, location_id, state) values (52, 1, 'PV-0003', 10, 30, 'confirmed')`;
+  await r`insert into sales_lines (so_id, product_id, qty, qty_delivered, unit_price) values (52, 20, 10, 4, 20)`;
+  const s2 = await salesLineGaps(r, 1);
+  assert.deepEqual(s2.gaps, [], "entregado sin facturar NO es violación");
+  assert.equal(s2.porFacturar.length, 1, "pero se reporta como por facturar");
+  assert.equal(s2.porFacturar[0].porFacturar, 4);
+
+  // Y facturar más de lo entregado sí es violación.
+  await r`insert into invoices (id, company_id, kind, name, partner_id, due_date, amount, residual, order_id) values (61, 1, 'customer', 'FV-0002', 10, current_date, 120, 120, 52)`;
+  await r`insert into invoice_lines (invoice_id, product_id, qty, unit_price) values (61, 20, 6, 20)`;
+  const s3 = await salesLineGaps(r, 1);
+  assert.equal(s3.gaps.length, 1, "facturado 6 > entregado 4: violación");
+  assert.equal(s3.gaps[0].overInvoiced, true);
   await db.close();
 });
