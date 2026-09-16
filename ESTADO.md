@@ -714,7 +714,8 @@ agregó; entra y sale de la lista el mismo día) — L4a (solo la parte de
 captura; el modelo ya se cerró), L8a, H3, H4c, H4f, H5, H6, D-B, D-C. (H2 y H7
 están decididas en documento; D-A, E2, H8b, N1, L3a, L3b, L3c, L5, L6, H4a,
 H4b, y ahora H4d y H4e, se movieron a "resuelta en documento"; el resto está
-en código.)
+en código.) **Verificado el 15-sep-2026, al cerrar 4.15 (§ 4, bloque C4):**
+ninguna de estas 9 pertenece a ese bloque; el conteo de esta lista no cambia.
 
 ### N2. La tasa de mora no se puede pactar por cliente hoy — VERIFICADO el 5-sep-2026, requisito confirmado de la Fase 1 (no pregunta abierta)
 Al contestar N1 el dueño dijo que la tasa moratoria "depende del acuerdo con
@@ -1077,11 +1078,20 @@ Vencimientos · Cadena · Estados de cuenta · Bancos · Gastos) heredada del
 módulo "Finanzas". El menú ya pone Vencimientos y Cadena en Reportes; la tira
 sigue igual. Se corrige en la parte 3 (pestañas), decisión del dueño 9-sep-2026.
 
-### 4.15 No existe borrado de datos de prueba (patrón C4)
-Azagro no tiene una función que borre lo capturado de prueba respetando el
-corte. `member_favorites` (0031) nació sin entrar a ningún borrado porque no
-hay dónde. Cuando se construya el borrado, esta tabla entra por `member_id`
-(cascada desde `members`).
+### 4.15 No existe borrado de datos de prueba (patrón C4) — CERRADO el 15-sep-2026 (bloque C4 completo, pasos 1-6)
+**Construido.** Migración 0034 (`notifications` y las columnas que solo
+nacían en runtime, más `company_settings.live_since`); el plan
+`scripts/purge-plan.mjs` (toda la SQL del borrado, el candado de arranque con
+su salida, el preview); el servidor `src/lib/erp/purge.ts` (`purgePreview` /
+`purgeTestData` / `setLiveSince` / `clearLiveSince`, solo administrador,
+`withTx`, nombre de empresa tecleado + motivo); la pantalla "Datos de prueba"
+en `/importar` y las etiquetas nuevas en `/bitacora`. `member_favorites`
+entró exactamente como este renglón anticipaba: por `member_id`, cascada
+desde `members` (`KEEP` en `purge-plan.mjs`) — nadie tuvo que acordarse
+aparte. Decisiones 55 a 60 (`DECISIONES.md`); commits `0c16c18`, `262bc95`,
+`4c8b2ca`; 599 → 618 pruebas nuevas, ninguna existente cambió; verificado en
+el navegador con Playwright, no solo por tipos (`BORRADO-PRUEBAS.md`, nota de
+método del paso 5, primera vez que se prueba así una pantalla del proyecto).
 
 ### 4.16 Con qué desembolsa Santa Rosa una entrega parcial (anotado el 9-sep-2026, Decisión 54)
 La Decisión 54 fija la regla — el plazo de cada factura arranca el mismo día
@@ -1097,9 +1107,17 @@ financiamiento de la segunda entrega en adelante.
 
 ## 5. Qué hacer con esto
 
-- Las **9 ABIERTAS** del punto 2 y las **9 preguntas sin contestar** del
+- Las **9 ABIERTAS** del punto 2 y las **preguntas sin contestar** del
   punto 4 se contestan en `DECISIONES.md` conforme el dueño decida, un
   renglón por decisión, con fecha.
+- **Corrección de conteo (15-sep-2026), al cerrar 4.15 (bloque C4):** el "9"
+  de punto 4 de este renglón quedó escrito el 5-sep-2026 y nunca se volvió a
+  contar según se agregaron 4.13, 4.14 y 4.16 (9-sep-2026). El número real,
+  antes de cerrar 4.15, era **11** (4.1, 4.2, 4.3, 4.4, 4.5, 4.7, 4.8, 4.10,
+  4.13, 4.15, 4.16 — ya estaban cerradas 4.6, 4.9 y 4.14). Al cerrar **4.15**
+  hoy quedan **10** preguntas sin contestar en el punto 4. El "9" del punto 2
+  sí sigue exacto (verificado arriba, § 2): ninguna de esas 9 es del bloque
+  C4.
 - El 5-sep-2026 el dueño cerró las **cuatro** preguntas que gateaban la Fase
   2 (**D-A**, **E2**, **H8b / 4.6**, **4.9**) y, más tarde el mismo día, **N1**
   (la que gateaba la Fase 3: si la protección se cobra también en la mora) —

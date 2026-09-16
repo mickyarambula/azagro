@@ -173,11 +173,13 @@ La tabla que conecta un catálogo con otro. Es lo que hace que el usuario pueda 
 
 En Cosecha: cada concepto de gasto mapea a una cuenta contable, en una pantalla donde el usuario elige. Cambiar el nombre del concepto no rompe nada porque la relación vive en el mapeo, no en el nombre.
 
-### C4. Datos de prueba borrables
+### C4. Datos de prueba borrables — **cumplido en Azagro** (15-sep-2026, bloque C4)
 
 Una función en la propia app que borra todo lo capturado de prueba y **respeta el corte inicial**. Se corre al final de cada prueba y luego se verifican las anclas.
 
 Cada tabla nueva con llave foránea entra al borrado, en el orden correcto. Esto se actualiza en el mismo bloque que crea la tabla, nunca después.
+
+**Cómo quedó en Azagro:** toda la SQL del borrado vive en un solo archivo (`scripts/purge-plan.mjs`), separado del servidor que decide quién/cuándo (`src/lib/erp/purge.ts`) — la regla de este patrón hecha código: una prueba (`scripts/erp-tablas-clasificadas.test.mjs`) escanea cada `create table` del repo y pone `npm test` en rojo si una tabla nueva no está clasificada en SE BORRA o SE CONSERVA, así que "se actualiza en el mismo bloque que crea la tabla" ya no depende de que alguien se acuerde. El candado de una sola vía (arranque real / regreso a pruebas) y el preview marcado como foto, no como número exacto, son extensiones de este patrón que valen para cualquier borrado futuro parecido. Detalle: `BORRADO-PRUEBAS.md`; código: `scripts/purge-plan.mjs`, `src/lib/erp/purge.ts`, `src/routes/importar.tsx`.
 
 ### C5. Nombres
 
