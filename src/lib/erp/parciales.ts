@@ -156,3 +156,28 @@ export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<{ g
   }
   return { gaps, porFacturar };
 }
+
+/**
+ * BLOQUE DE PARCIALES, paso 4: repartir la cantidad de una entrega revertida
+ * entre las partidas de ese producto. `stock_moves` guarda producto, no
+ * partida; y un pedido puede llevar el mismo producto en dos partidas. Se
+ * resta partida por partida, en orden, sin pasar de lo entregado en cada
+ * una: la suma restada es exactamente la del evento (o lo que había, si
+ * hubo una inconsistencia previa — `sobrante` lo dice, y va a bitácora).
+ */
+export function repartirReversa(
+  lines: Array<{ id: number; delivered: number }>,
+  qty: number,
+): { restas: Array<{ id: number; qty: number }>; sobrante: number } {
+  const restas: Array<{ id: number; qty: number }> = [];
+  let resto = Math.max(0, qty);
+  for (const l of lines) {
+    if (resto <= 0.0001) break;
+    const take = Math.min(resto, Math.max(0, l.delivered));
+    if (take > 0.0001) {
+      restas.push({ id: l.id, qty: Math.round(take * 10000) / 10000 });
+      resto = Math.round((resto - take) * 10000) / 10000;
+    }
+  }
+  return { restas, sobrante: resto };
+}

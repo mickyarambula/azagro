@@ -5,6 +5,7 @@ import { getSql, withTx, type Sql } from "@/lib/db";
 import { activeMember, canRevert } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { postStock } from "@/lib/erp/stock";
+import { repartirReversa } from "@/lib/erp/parciales";
 import { todayMx } from "@/lib/utils";
 
 /**
@@ -97,12 +98,26 @@ async function chainForDelivery(sql: Sql, companyId: number, soId: number, role:
   const empty = (): Chain => ({ preview, companyId, fv: null, fis: [], atcs: [], fps: [], moves: [], partnerId: s.partner_id });
 
   if (s.state === "cancelled") { blockers.push(`${s.name} está cancelado.`); return empty(); }
-  if (s.state !== "done") { blockers.push(`${s.name} no se ha entregado: no hay entrega que revertir.`); return empty(); }
+  if (s.state !== "done") {
+    // BLOQUE DE PARCIALES, paso 4: un pedido con entregas parciales vivas no
+    // está `done` — pero sí tiene entregas. Se revierten una por una.
+    const partial = await sql<{ n: number }>`
+      select count(distinct event_ref)::int as n from stock_moves m
+      where m.company_id = ${companyId} and m.origin = ${s.name} and m.move_type = 'delivery' and m.event_ref is not null
+        and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+    `;
+    if ((partial[0]?.n ?? 0) > 0) {
+      blockers.push(`${s.name} tiene ${partial[0]!.n} entrega(s) parcial(es) y queda pendiente: se revierte por entrega, con «Revertir esta entrega» en el panel de entregas.`);
+      return empty();
+    }
+    blockers.push(`${s.name} no se ha entregado: no hay entrega que revertir.`);
+    return empty();
+  }
 
   // BLOQUE DE PARCIALES, paso 3: este módulo es "un pedido = una entrega =
   // una FV". Con dos eventos de entrega revertiría TODAS las salidas del
   // kardex y UNA sola FV — inconsistente en silencio. Se detiene antes de
-  // tocar nada; la reversa por entrega es el paso 4.
+  // tocar nada; la reversa por entrega es `reverseDeliveryEvent` (paso 4).
   const eventsLive = await sql<{ n: number }>`
     select count(distinct event_ref)::int as n from stock_moves m
     where m.company_id = ${companyId} and m.origin = ${s.name} and m.move_type = 'delivery' and m.event_ref is not null
@@ -116,7 +131,7 @@ async function chainForDelivery(sql: Sql, companyId: number, soId: number, role:
   const nEvents = Math.max(eventsLive[0]?.n ?? 0, fvsLive[0]?.n ?? 0);
   if (nEvents > 1) {
     blockers.push(
-      `${s.name} tiene ${nEvents} entregas: se revierte por entrega, y eso es el paso 4 del bloque de parciales (todavía no construido). ` +
+      `${s.name} tiene ${nEvents} entregas: se revierte por entrega (paso 4 del bloque de parciales), una por una, con «Revertir esta entrega» en el panel de entregas. ` +
         "Completo solo se revierte un pedido de una sola entrega.",
     );
     return empty();
@@ -313,6 +328,279 @@ export const reverseDelivery = createServerFn({ method: "POST" })
         detail: `${written.join(", ")}${fresh.preview.fiscal ? ` · ${fresh.preview.fiscal.name} estaba TIMBRADA (${fresh.preview.fiscal.uuid || fresh.preview.fiscal.folio}): la NC se timbra en Compaq` : ""}${
           fresh.preview.stock.length ? ` · ${fresh.preview.stock.map((l) => `${l.code} ${l.qtyBefore} → ${l.qtyAfter} ${l.uom}, promedio ${l.avgBefore.toFixed(4)} → ${l.avgAfter.toFixed(4)}`).join(" · ")}` : ""
         } · ${data.reason}`,
+      });
+      return { ok: true as const, written };
+    });
+  });
+
+/**
+ * BLOQUE DE PARCIALES, paso 4 (PARCIALES.md § 8): revertir UNA entrega
+ * específica de un pedido con varias — no el pedido completo.
+ * `chainForDelivery` / `reverseDelivery` de arriba se quedan intactas para el
+ * caso de una sola entrega (identidad al centavo,
+ * `erp-revertir-entrega.test.mjs`); estas son un camino nuevo y paralelo,
+ * keyed por `event_ref` (paso 0(b)) en vez de por `origin` (que sigue siendo
+ * el folio del pedido, compartido por TODAS sus entregas). Mismo patrón que
+ * `chainForReceiptEvent` / `reverseReceiptEvent` (paso 2).
+ *
+ * Diferencias con la reversa de un pedido completo:
+ *   - No exige que el pedido esté `done`: basta una entrega viva con ese
+ *     evento. Un error en la entrega 1 de 3 se corrige sin esperar las otras
+ *     dos.
+ *   - Las salidas vivas son las de `event_ref = eventRef`, no todas las
+ *     `delivery` del pedido. En directo/brokeraje no hay kardex: la entrega
+ *     se identifica por la FV que nació con ella (mismo `event_ref`).
+ *   - La FV a revertir es la de `event_ref = eventRef` (si la hay: en bodega
+ *     propia una entrega puede seguir sin facturar, Decisión 47, y entonces
+ *     no hay nada que anular en cartera). Su FI y su ATC van por el folio de
+ *     esa FV, como siempre. La FP de brokeraje es la de ese evento.
+ *   - `qty_delivered` se RESTA (puede haber otras entregas vivas de la misma
+ *     partida), nunca se pone en 0.
+ *   - El pedido vuelve a `'confirmed'` siempre: al restar, queda pendiente.
+ *   - La devolución previa se evalúa por PRODUCTO de esta entrega, no por
+ *     todo el pedido (mismo criterio de la Decisión 52): una devolución de
+ *     otro producto no bloquea. Si la devolución abonó a la FV de este
+ *     evento, la FV tiene abonos y se bloquea por eso (→ paso 5 / paso 8).
+ * Lo que no cambia: NC por el total de la FV (Decisión 19), FI revertida
+ * (Decisión 37), entrada contraria al costo de salida (Decisión 9), FV
+ * timbrada no bloquea (Decisión 39), nada se borra (Decisión 16).
+ */
+
+export type DeliveryEventPreview = DeliveryReversalPreview & { eventRef: string; invoiced: boolean };
+
+type EventChain = Omit<Chain, "preview"> & { preview: DeliveryEventPreview; qtyByProduct: Array<{ product_id: number; qty: number }> };
+
+async function chainForDeliveryEvent(sql: Sql, companyId: number, soId: number, eventRef: string, role: string): Promise<EventChain> {
+  const blockers: string[] = [];
+  const reverts: Line[] = [];
+  const stock: DeliveryReversalPreview["stock"] = [];
+
+  const so = await sql<{
+    id: number; name: string; state: string; partner: string; partner_id: number; date: string; currency: string;
+    route_kind: string; location_id: number; circuit_code: string | null; credit_days: number;
+  }>`
+    select so.id, so.name, so.state, p.name as partner, so.partner_id, so.date::text, coalesce(so.currency,'MXN') as currency,
+      coalesce(so.route_kind,'own') as route_kind, so.location_id, so.circuit_code, coalesce(so.credit_days,0)::int as credit_days
+    from sales_orders so join partners p on p.id = so.partner_id
+    where so.id = ${soId} and so.company_id = ${companyId}
+  `;
+  if (!so[0]) throw new Error("Pedido no encontrado");
+  const s = so[0];
+  const direct = s.route_kind === "supplier" || s.route_kind === "asr";
+  const preview: DeliveryEventPreview = {
+    so: { id: s.id, name: s.name, partner: s.partner, date: s.date, currency: s.currency, circuit: s.circuit_code, creditDays: s.credit_days, direct },
+    eventRef, invoiced: false,
+    stock, reverts, fiscal: null, partnerDebt: { name: s.partner, before: 0, after: 0 }, blockers, allowed: canRevert(role), role,
+  };
+  const empty = (): EventChain => ({ preview, companyId, fv: null, fis: [], atcs: [], fps: [], moves: [], partnerId: s.partner_id, qtyByProduct: [] });
+
+  if (s.state === "cancelled") { blockers.push(`${s.name} está cancelado.`); return empty(); }
+
+  // Las salidas de ESTE evento (bodega propia). En directo no hay kardex.
+  const outs = await sql<{ id: number; product_id: number; quantity: string; unit_cost: string; location_from: number; code: string; product: string; uom: string; location: string; reversed_by: string | null }>`
+    select m.id, m.product_id, m.quantity::text, coalesce(m.unit_cost,0)::text as unit_cost, m.location_from,
+      p.code, p.name as product, coalesce(p.uom,'') as uom, l.name as location,
+      (select r.ref from stock_moves r where r.reverses_id = m.id limit 1) as reversed_by
+    from stock_moves m join products p on p.id = m.product_id left join locations l on l.id = m.location_from
+    where m.company_id = ${companyId} and m.origin = ${s.name} and m.event_ref = ${eventRef} and m.move_type = 'delivery'
+    order by m.id
+  `;
+  const liveOuts = outs.filter((m) => !m.reversed_by);
+
+  // La FV de ESTE evento (si la hay), con su FI y su ATC.
+  const docs = await sql<{ id: number; name: string; amount: string; residual: string; inv_class: string; origin: string; event_ref: string | null; state: string; folio_fiscal: string; uuid_fiscal: string; paid: string; reversed_by: string | null }>`
+    select i.id, i.name, i.amount::text, i.residual::text, coalesce(i.inv_class,'product') as inv_class, coalesce(i.origin,'') as origin,
+      i.event_ref, i.state, coalesce(i.folio_fiscal,'') as folio_fiscal, coalesce(i.uuid_fiscal,'') as uuid_fiscal,
+      coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid,
+      (select r.name from invoices r where r.reverses_id = i.id limit 1) as reversed_by
+    from invoices i
+    where i.company_id = ${companyId} and i.kind = 'customer' and i.reverses_id is null
+      and (i.order_id = ${s.id} or i.origin like ${"% " + s.name})
+    order by i.id
+  `;
+  const fvRow = docs.find((d) => d.name.startsWith("FV-") && d.event_ref === eventRef && d.state !== "reversed" && !d.reversed_by);
+  const fvReversed = docs.find((d) => d.name.startsWith("FV-") && d.event_ref === eventRef && (d.state === "reversed" || d.reversed_by));
+
+  if (!outs.length && !fvRow && !fvReversed) { blockers.push(`No hay entrega con el evento ${eventRef} en ${s.name}.`); return empty(); }
+  if (!liveOuts.length && !fvRow) {
+    blockers.push(`La entrega ${eventRef} de ${s.name} ya está revertida (${[...outs.map((m) => m.reversed_by), fvReversed?.reversed_by].filter(Boolean).join(", ")}).`);
+    return empty();
+  }
+
+  // Lo entregado en este evento, por producto: del kardex en bodega propia,
+  // de los renglones de la FV en directo (ahí no hay kardex).
+  const qtyByProduct: EventChain["qtyByProduct"] = [];
+  const addQty = (product_id: number, qty: number) => {
+    const row = qtyByProduct.find((q) => q.product_id === product_id);
+    if (row) row.qty = r2(row.qty + qty); else qtyByProduct.push({ product_id, qty });
+  };
+  if (!direct) for (const m of liveOuts) addQty(m.product_id, Number(m.quantity));
+  else if (fvRow) {
+    const ils = await sql<{ product_id: number | null; qty: string }>`select product_id, qty::text from invoice_lines where invoice_id = ${fvRow.id}`;
+    for (const l of ils) if (l.product_id != null) addQty(l.product_id, Number(l.qty));
+  }
+  const productIds = qtyByProduct.map((q) => q.product_id);
+
+  // Devolución previa DE ESTOS PRODUCTOS: NC viva con un renglón de ellos o
+  // cantidad devuelta en su partida. Seis documentos en cadena y la reversa
+  // de devolución es el paso 8. Se bloquea.
+  if (productIds.length) {
+    const devs = await sql<{ name: string }>`
+      select distinct i.name from invoices i join invoice_lines il on il.invoice_id = i.id
+      where i.company_id = ${companyId} and i.order_id = ${s.id} and i.name like 'NC-%' and i.reverses_id is null and i.state <> 'reversed'
+        and il.product_id = any(${productIds}::int[])
+      order by i.name
+    `;
+    const returned = await sql<{ q: string }>`
+      select coalesce(sum(qty_returned),0)::text as q from sales_lines where so_id = ${s.id} and product_id = any(${productIds}::int[])
+    `;
+    if (devs.length || Number(returned[0]?.q ?? 0) > 0.0001) {
+      blockers.push(
+        `${s.name} ya tiene una devolución de lo que salió en ${eventRef} (${devs.map((d) => d.name).join(", ") || "mercancía devuelta"}). Primero revierte esa devolución: botón «Revertir devolución» en el pedido, junto a la nota de crédito.`,
+      );
+    }
+  }
+
+  const toDoc = (d: { id: number; name: string; amount: string; residual: string; inv_class: string }): Doc => ({ id: d.id, name: d.name, amount: Number(d.amount), residual: Number(d.residual), inv_class: d.inv_class });
+  let fv: Doc | null = null;
+  const fis: Doc[] = [];
+  const atcs: Doc[] = [];
+  if (fvRow) {
+    fv = toDoc(fvRow);
+    preview.invoiced = true;
+    if (Number(fvRow.paid) > 0.009) blockers.push(`${fv.name} tiene abonos: revierte ese cobro primero (Cartera → Revertir último abono).`);
+    if (fvRow.folio_fiscal || fvRow.uuid_fiscal) preview.fiscal = { name: fv.name, folio: fvRow.folio_fiscal, uuid: fvRow.uuid_fiscal };
+    reverts.push({ name: fv.name, detail: `entrega ${eventRef} · saldo ${fv.residual.toFixed(2)} · sin abonos → nota de crédito por el total, factura revertida`, amount: fv.amount, currency: s.currency });
+    for (const d of docs.filter((x) => x.inv_class === "interest" && x.origin === `Mora ${fv!.name}` && !x.reversed_by && x.state !== "reversed")) {
+      if (Number(d.paid) > 0.009) { blockers.push(`${d.name} (mora facturada de ${fv.name}) tiene abonos: revierte ese cobro primero.`); continue; }
+      fis.push(toDoc(d));
+      reverts.push({ name: d.name, detail: "mora facturada · sin abonos → nota de crédito por el total, revertida (si la entrega no existió, la mora tampoco)", amount: Number(d.amount), currency: "MXN" });
+    }
+    for (const d of docs.filter((x) => x.inv_class === "fx" && x.origin === `Ajuste TC ${fv!.name}` && !x.reversed_by && x.state !== "reversed")) {
+      if (Number(d.paid) > 0.009) { blockers.push(`${d.name} (ajuste de tipo de cambio de ${fv.name}) tiene abonos: revierte ese cobro primero.`); continue; }
+      atcs.push(toDoc(d));
+      reverts.push({ name: d.name, detail: "ajuste de tipo de cambio · sin abonos → se marca revertido", amount: Number(d.amount), currency: "MXN" });
+    }
+  } else {
+    reverts.push({ name: eventRef, detail: "entrega sin facturar (Decisión 47): no hay factura que anular, solo regresa la mercancía", amount: 0, currency: s.currency });
+  }
+
+  // Brokeraje: la FP que nació con ESTE evento (paso 3, por evento y por OC).
+  const fps: Doc[] = [];
+  if (direct) {
+    const rows = await sql<{ id: number; name: string; amount: string; residual: string; partner: string; paid: string; po: string }>`
+      select i.id, i.name, i.amount::text, i.residual::text, p.name as partner, coalesce(i.origin,'') as po,
+        coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid
+      from invoices i join partners p on p.id = i.partner_id
+      where i.company_id = ${companyId} and i.kind = 'supplier' and i.event_ref = ${eventRef} and i.state <> 'reversed'
+      order by i.id
+    `;
+    for (const d of rows) {
+      if (Number(d.paid) > 0.009) { blockers.push(`${d.name} (la factura de ${d.partner} por ${d.po}, brokeraje) tiene abonos: revierte ese pago primero.`); continue; }
+      fps.push({ id: d.id, name: d.name, amount: Number(d.amount), residual: Number(d.residual), inv_class: "supplier" });
+      reverts.push({ name: d.name, detail: `${d.partner} · brokeraje, nació con la entrega ${eventRef} · sin abonos → revertida`, amount: Number(d.amount), currency: s.currency });
+    }
+  }
+
+  // Kardex: las salidas de este evento, de regreso al costo con el que salieron.
+  const moves: Chain["moves"] = [];
+  for (const m of liveOuts) {
+    const qty = Number(m.quantity);
+    const unitCost = Number(m.unit_cost);
+    const q = await sql<{ quantity: string; avg_cost: string }>`
+      select quantity::text, coalesce(avg_cost,0)::text as avg_cost from stock_quants
+      where company_id = ${companyId} and product_id = ${m.product_id} and location_id = ${m.location_from}
+    `;
+    const qtyBefore = Number(q[0]?.quantity ?? 0);
+    const avgBefore = Number(q[0]?.avg_cost ?? 0);
+    const qtyAfter = r2(qtyBefore + qty);
+    const avgAfter = qtyAfter > 0.0000001 ? (qtyBefore * avgBefore + qty * unitCost) / qtyAfter : unitCost;
+    stock.push({ code: m.code, product: m.product, uom: m.uom, qty, unitCost, value: r2(qty * unitCost), location: m.location, qtyBefore, qtyAfter, avgBefore, avgAfter });
+    moves.push({ id: m.id, product_id: m.product_id, quantity: qty, unit_cost: unitCost, location_from: m.location_from });
+  }
+
+  const debt = await sql<{ total: string }>`
+    select coalesce(sum(residual),0)::text as total from invoices
+    where company_id = ${companyId} and partner_id = ${s.partner_id} and kind = 'customer' and state = 'open'
+  `;
+  const before = Number(debt[0]?.total ?? 0);
+  preview.partnerDebt = { name: s.partner, before, after: r2(before - (fv?.residual ?? 0) - fis.reduce((a, d) => a + d.residual, 0) - atcs.reduce((a, d) => a + d.residual, 0)) };
+  return { preview, companyId, fv, fis, atcs, fps, moves, partnerId: s.partner_id, qtyByProduct };
+}
+
+async function auditRejectedEvent(sql: Sql, companyId: number, userId: string, chain: EventChain) {
+  await writeAudit(sql, { companyId, userId, action: "revertir-rechazado", entity: "sale", entityId: chain.preview.so.id, name: `${chain.preview.so.name} · ${chain.preview.eventRef}`, detail: chain.preview.blockers.join(" | ").slice(0, 900) });
+}
+
+/** Lo que la pantalla enseña antes de preguntar, para UNA entrega del pedido. */
+export const deliveryEventReversalPreview = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ soId: z.number(), eventRef: z.string() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    const chain = await chainForDeliveryEvent(sql, companyId, data.soId, data.eventRef, me.role);
+    if (chain.preview.blockers.length) await auditRejectedEvent(sql, companyId, context.userId, chain);
+    return chain.preview;
+  });
+
+/** Revertir UNA entrega: resta (no zeroea) qty_delivered; el pedido vuelve a 'confirmed'. */
+export const reverseDeliveryEvent = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ soId: z.number(), eventRef: z.string(), reason: z.string().trim().min(1, "Escribe el motivo") }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const companyId = await cid(sql, context.userId);
+    const me = await activeMember(sql, context.userId);
+    const chain = await chainForDeliveryEvent(sql, companyId, data.soId, data.eventRef, me.role);
+    if (chain.preview.blockers.length) { await auditRejectedEvent(sql, companyId, context.userId, chain); throw new Error(chain.preview.blockers[0]); }
+    if (!canRevert(me.role)) throw new Error("Solo un administrador o gerencia puede revertir una entrega: ya movió inventario y cartera.");
+    return withTx(async (tx) => {
+      await tx`select id from sales_orders where id = ${data.soId} and company_id = ${companyId} for update`;
+      const fresh = await chainForDeliveryEvent(tx, companyId, data.soId, data.eventRef, me.role);
+      if (fresh.preview.blockers.length) throw new Error(fresh.preview.blockers[0]);
+      const today = todayMx();
+      const so = { id: fresh.preview.so.id, name: fresh.preview.so.name, partnerId: fresh.partnerId, currency: fresh.preview.so.currency, circuit: fresh.preview.so.circuit };
+      const written: string[] = [];
+      // 1) Kardex: de regreso al costo con el que salió, ligado a su salida.
+      for (const m of fresh.moves) {
+        const mv = await postStock(tx, { companyId, userId: context.userId, moveType: "reversal", origin: so.name, productId: m.product_id, quantity: m.quantity, locationTo: m.location_from, unitCost: m.unit_cost, reversesId: m.id });
+        written.push(mv.ref);
+      }
+      // 2) Lo timbrado: NC por el total. Lo interno: por estado.
+      if (fresh.fv) written.push(await creditNoteFor(tx, companyId, context.userId, fresh.fv, so, data.reason, today));
+      for (const fi of fresh.fis) written.push(await creditNoteFor(tx, companyId, context.userId, fi, so, data.reason, today));
+      for (const atc of fresh.atcs) {
+        await tx`update invoices set state = 'reversed', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason} where id = ${atc.id} and company_id = ${companyId}`;
+        await writeAudit(tx, { companyId, userId: context.userId, action: "revertir-atc", entity: "invoice", entityId: atc.id, name: atc.name, detail: `Revertido al revertir la entrega ${data.eventRef} de ${so.name} · ${data.reason}` });
+        written.push(`${atc.name} revertida`);
+      }
+      for (const fp of fresh.fps) {
+        await tx`update invoices set state = 'reversed', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason} where id = ${fp.id} and company_id = ${companyId}`;
+        await writeAudit(tx, { companyId, userId: context.userId, action: "revertir-fp", entity: "invoice", entityId: fp.id, name: fp.name, detail: `Brokeraje: nació con la entrega ${data.eventRef} de ${so.name}; si la entrega no existió, esa deuda tampoco · ${data.reason}` });
+        written.push(`${fp.name} revertida`);
+      }
+      // 3) Lo entregado en este evento, de regreso: se RESTA (otras entregas
+      //    siguen vivas), partida por partida del producto — el kardex no
+      //    guarda la partida, y un pedido puede repetir producto. El pedido
+      //    vuelve a "confirmado, por entregar".
+      const avisos: string[] = [];
+      for (const q of fresh.qtyByProduct) {
+        const ls = await tx<{ id: number; delivered: string }>`
+          select id, coalesce(qty_delivered,0)::text as delivered from sales_lines
+          where so_id = ${so.id} and product_id = ${q.product_id} order by id for update
+        `;
+        const { restas, sobrante } = repartirReversa(ls.map((l) => ({ id: l.id, delivered: Number(l.delivered) })), q.qty);
+        for (const r of restas) await tx`update sales_lines set qty_delivered = qty_delivered - ${r.qty} where id = ${r.id}`;
+        if (sobrante > 0.0001) avisos.push(`producto ${q.product_id}: quedaban ${sobrante} sin restar (entregado en partidas menor que lo que salió en ${data.eventRef})`);
+      }
+      await tx`update sales_orders set state = 'confirmed' where id = ${so.id} and company_id = ${companyId}`;
+      await writeAudit(tx, {
+        companyId, userId: context.userId, action: "revertir-entrega", entity: "sale", entityId: so.id, name: `${so.name} · ${data.eventRef}`,
+        detail: `${written.join(", ")}${fresh.preview.fiscal ? ` · ${fresh.preview.fiscal.name} estaba TIMBRADA (${fresh.preview.fiscal.uuid || fresh.preview.fiscal.folio}): la NC se timbra en Compaq` : ""}${
+          fresh.preview.stock.length ? ` · ${fresh.preview.stock.map((l) => `${l.code} ${l.qtyBefore} → ${l.qtyAfter} ${l.uom}, promedio ${l.avgBefore.toFixed(4)} → ${l.avgAfter.toFixed(4)}`).join(" · ")}` : ""
+        }${avisos.length ? ` · AVISO: ${avisos.join("; ")}` : ""} · ${data.reason}`,
       });
       return { ok: true as const, written };
     });

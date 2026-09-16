@@ -208,11 +208,20 @@ async function chainForSale(sql: Sql, companyId: number, soId: number) {
     blockers.push(`${s.name} sigue en borrador: se cancela desde el pedido, sin cadena (no tiene órdenes de compra hijas todavía).`);
     return { cancels, reverts, keeps, blockers };
   }
+  // BLOQUE DE PARCIALES, paso 4: solo cuentan las entregas VIVAS. Una salida
+  // con su contraria `reversal` ligada (reverses_id) ya no está en casa del
+  // cliente: un pedido con todas sus entregas revertidas vuelve a poder
+  // cancelarse, como si nunca hubiera salido.
   const deliveries = await sql<{ ref: string }>`
-    select ref from stock_moves where company_id = ${companyId} and origin = ${s.name} and move_type = 'delivery' order by id
+    select m.ref from stock_moves m
+    where m.company_id = ${companyId} and m.origin = ${s.name} and m.move_type = 'delivery'
+      and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+    order by m.id
   `;
   const fvs = await sql<{ name: string }>`
-    select name from invoices where company_id = ${companyId} and order_id = ${s.id} and kind = 'customer' and state <> 'reversed' order by id
+    select name from invoices where company_id = ${companyId} and order_id = ${s.id} and kind = 'customer' and state <> 'reversed'
+      and reverses_id is null
+    order by id
   `;
   if (s.state === "done" || deliveries.length || fvs.length) {
     blockers.push(
