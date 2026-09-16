@@ -546,6 +546,7 @@ devolverle al proveedor; son dos cosas distintas, y la reversa de recepción
 (paso 6) no cubre H4c. H4c sigue **ABIERTA**.
 
 ### H4d. Recepciones y entregas parciales (LOGICA h.17)
+**En construcción — pasos 0 a 3 de `PARCIALES.md` construidos y verificados el 15-sep-2026** (recepción parcial con FP por evento, reversa por recepción, entrega parcial con una FV por evento y vencimientos desde la entrega — Decisiones 46, 47, 48, 54; en directo, entregar = facturar en el mismo acto). Faltan los pasos 4 a 7 (reversa por entrega, devolución y P&L con N facturas, límite de crédito por partes, cierre corto). Texto original:
 **RESUELTA EN DOCUMENTO (Decisiones 46 a 54 del dueño, 9-sep-2026), no
 construida.** Diagnóstico completo y plan por pasos en `PARCIALES.md`. En
 corto: una factura por cada entrega (Decisión 46); se puede entregar sin
@@ -560,6 +561,8 @@ Santa Rosa, con un dato de negocio todavía pendiente (54, ver 4.16). Sigue
 sin construirse.
 
 ### H4e. Almacén tiene más permiso del que dice su descripción (Sesión de permisos, 7-sep-2026)
+**CONSTRUIDA el 15-sep-2026 (paso 3.1 del bloque de parciales, commit `a3bd5d2`):** `AclLevel` gana `deliver`; `assertCan` y el `can()` del cliente lo entienden; la plantilla de almacén queda en `deliver` para ventas y compras (quien ya tenía `edit` guardado a mano lo conserva hasta que un administrador lo re-guarde — nada se degrada en silencio); `deliverSale`, `receivePurchase` y `returnSale` piden `deliver`; facturar (`invoiceDelivery`) y editar el pedido siguen en `edit`. Texto original:
+
 **RESUELTA EN DOCUMENTO (Decisión 48 del dueño, 9-sep-2026), no construida.**
 El dueño eligió el camino (a): nace un permiso nuevo "solo entregar" — puede
 confirmar entrega, recepción y devolución, pero no facturar ni editar el
@@ -588,7 +591,7 @@ caminos, cada uno con su costo:*
   solo para este caso, y cada función que hoy es un solo `assertCan` pasaría a
   aceptar dos permisos válidos (el fino o el de módulo completo).
 
-**Elegido: camino (a)** (Decisión 48, 9-sep-2026). Sin construir.
+**Elegido: camino (a)** (Decisión 48, 9-sep-2026). **Construido el 15-sep-2026** (ver arriba).
 
 ### H4f. Candado sin salida: reversa de devolución con amarre incompleto (DESHACER § 7)
 **ABIERTA.** En el paso 8 (reversa de devolución), si el movimiento `return`
@@ -1094,6 +1097,7 @@ el navegador con Playwright, no solo por tipos (`BORRADO-PRUEBAS.md`, nota de
 método del paso 5, primera vez que se prueba así una pantalla del proyecto).
 
 ### 4.16 Con qué desembolsa Santa Rosa una entrega parcial (anotado el 9-sep-2026, Decisión 54)
+**Dónde entra (15-sep-2026, paso 3 construido):** en el **costo** — el P&L con varias facturas, paso 5 —, no en la factura al cliente: la FV de cada entrega ya corre su plazo desde la fecha de esa entrega (Decisión 54, `issueDeliveryInvoice`). Sigue ABIERTA.
 La Decisión 54 fija la regla — el plazo de cada factura arranca el mismo día
 que el costo con Santa Rosa — pero deja pendiente el dato que la aterriza. Hoy
 el precio se congela en la cotización suponiendo un solo desembolso por todo
