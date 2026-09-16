@@ -13,7 +13,7 @@ import { PartialQtyDialog } from "@/components/partial-qty-dialog";
 import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
 import { CancelButton, CancelChainButton, DeliveryReversalButton, ReturnReversalButton } from "@/components/cancel-doc";
 import { returnReversalPreview, reverseReturn } from "@/lib/erp/return-reversal";
-import { deliveryReversalPreview, reverseDelivery } from "@/lib/erp/delivery-reversal";
+import { deliveryEventReversalPreview, deliveryReversalPreview, reverseDelivery, reverseDeliveryEvent } from "@/lib/erp/delivery-reversal";
 import { cancelChainPreview, cancelSalesOrderChain } from "@/lib/erp/cancel";
 import { duesPreview } from "@/components/order-form";
 import { QtyField } from "@/components/fields";
@@ -411,24 +411,44 @@ function Ficha() {
         <div className="mb-3 erp-card p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Entregas</p>
           <ul className="mt-1 divide-y divide-line text-[13px]">
-            {events.map((e) => (
-              <li key={e.eventRef} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
-                <span>
-                  <span className="font-medium">{e.eventRef}</span> · {e.date} ·{" "}
-                  {e.lines.map((l) => `${l.code} ${l.qty} ${l.uom}`).join(", ")}
-                  {e.reversed ? <span className="ml-2 text-muted">revertida</span> : null}
-                </span>
-                {e.fv ? (
-                  <span className="erp-chip">{e.fv}</span>
-                ) : e.reversed ? null : canEdit && form.routeKind === "own" ? (
-                  <button type="button" className="erp-btn h-8 text-[12px]" disabled={busy} onClick={() => void invoiceEvent(e.eventRef)}>
-                    Facturar esta entrega
-                  </button>
-                ) : (
-                  <span className="text-[12px] text-warn">Sin facturar</span>
-                )}
-              </li>
-            ))}
+            {events.map((e) => {
+              // BLOQUE DE PARCIALES, paso 4, mitad B: revertir UNA entrega, no
+              // el pedido completo. El botón de siempre (arriba, "Revertir
+              // entrega") ya cubre el único caso que no necesita esto: un solo
+              // evento y el pedido ya `done`. En todo lo demás — 2+ eventos, o
+              // un evento con el pedido todavía pendiente — solo este botón
+              // llega: chainForDelivery (el de siempre) no exige `done`.
+              const showRevert = canEdit && !e.reversed && (events.length > 1 || state !== "done");
+              return (
+                <li key={e.eventRef} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+                  <span>
+                    <span className="font-medium">{e.eventRef}</span> · {e.date} ·{" "}
+                    {e.lines.map((l) => `${l.code} ${l.qty} ${l.uom}`).join(", ")}
+                    {e.reversed ? <span className="ml-2 text-muted">revertida</span> : null}
+                  </span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    {e.fv ? (
+                      <span className="erp-chip">{e.fv}</span>
+                    ) : e.reversed ? null : canEdit && form.routeKind === "own" ? (
+                      <button type="button" className="erp-btn h-8 text-[12px]" disabled={busy} onClick={() => void invoiceEvent(e.eventRef)}>
+                        Facturar esta entrega
+                      </button>
+                    ) : (
+                      <span className="text-[12px] text-warn">Sin facturar</span>
+                    )}
+                    {showRevert ? (
+                      <DeliveryReversalButton
+                        soName={form.name}
+                        label={`Revertir ${e.eventRef}`}
+                        load={() => deliveryEventReversalPreview({ data: { soId: id, eventRef: e.eventRef } })}
+                        onConfirm={(reason) => reverseDeliveryEvent({ data: { soId: id, eventRef: e.eventRef, reason } })}
+                        onDone={load}
+                      />
+                    ) : null}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}

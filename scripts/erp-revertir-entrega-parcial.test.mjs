@@ -169,3 +169,29 @@ test("las server functions nuevas existen con su firma por evento, listas para e
   assert.ok(s.includes("export type DeliveryEventPreview = DeliveryReversalPreview & { eventRef: string; invoiced: boolean };"), "mismo preview que el diálogo de hoy, más el evento");
   assert.equal((s.match(/validator\(z\.object\(\{ soId: z\.number\(\), eventRef: z\.string\(\)/g) || []).length, 2, "preview y reversa, las dos por evento");
 });
+
+// ---------------------------------------------------------------------------
+// Paso 4, mitad B (pantalla): botón «Revertir esta entrega» por evento.
+// ---------------------------------------------------------------------------
+test("DeliveryReversalButton: acepta un label por evento (patrón de ReceiptReversalButton, paso 2)", () => {
+  const c = src("src/components/cancel-doc.tsx");
+  const body = fnBody(c, "DeliveryReversalButton");
+  assert.match(body, /label\?:\s*string;/, "prop opcional");
+  assert.ok(body.includes('{props.label ?? "Revertir entrega"}'), "sin label sigue diciendo lo de siempre — no rompe el botón de hoy");
+});
+
+test("ficha del pedido: cada entrega viva del panel tiene su botón de revertir, salvo el único caso que ya cubre el botón de arriba (un evento, pedido done)", () => {
+  const so = src("src/routes/sales.$orderId.tsx");
+  assert.ok(so.includes("deliveryEventReversalPreview, deliveryReversalPreview, reverseDelivery, reverseDeliveryEvent"), "importa el camino por evento junto al de siempre");
+  const body = fnBody(so, "Ficha");
+  assert.ok(body.includes("const showRevert = canEdit && !e.reversed && (events.length > 1 || state !== \"done\");"), "se apoya en el botón de arriba solo cuando ese sí aplica");
+  assert.ok(body.includes("load={() => deliveryEventReversalPreview({ data: { soId: id, eventRef: e.eventRef } })}"), "preview por evento");
+  assert.ok(body.includes("onConfirm={(reason) => reverseDeliveryEvent({ data: { soId: id, eventRef: e.eventRef, reason } })}"), "reversa por evento");
+  assert.ok(body.includes("label={`Revertir ${e.eventRef}`}"), "el botón nombra el evento, no dice solo 'Revertir entrega'");
+  assert.ok(body.includes("onDone={load}"), "recarga la ficha completa — el mismo load() que ya usa el botón de siempre, sin panel aparte ni refresh-prop: aquí `events` ya se recarga con cada acción");
+});
+
+test("ficha del pedido: el botón de arriba (canEdit && state === 'done') se queda tal cual — sigue siendo el único camino cuando hay un solo evento y el pedido ya está completo", () => {
+  const so = src("src/routes/sales.$orderId.tsx");
+  assert.ok(so.includes("{canEdit && state === \"done\" && (\n            <DeliveryReversalButton"), "no se le agregó ninguna condición nueva");
+});

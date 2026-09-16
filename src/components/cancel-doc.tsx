@@ -631,6 +631,8 @@ export function DeliveryReversalButton(props: {
   onConfirm: (reason: string) => Promise<unknown>;
   onDone?: () => void | Promise<void>;
   disabled?: boolean;
+  /** BLOQUE DE PARCIALES, paso 4: con varias entregas, cuál se está revirtiendo. */
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [chain, setChain] = useState<DeliveryReversalView | null>(null);
@@ -675,7 +677,7 @@ export function DeliveryReversalButton(props: {
   return (
     <>
       <button type="button" className="erp-btn h-8 text-[12px] text-danger" disabled={props.disabled} onClick={() => void openDialog()}>
-        Revertir entrega
+        {props.label ?? "Revertir entrega"}
       </button>
       {open ? (
         <div className="fixed inset-0 z-[90] grid place-items-center bg-ink/40 p-4" onClick={() => !busy && setOpen(false)}>
