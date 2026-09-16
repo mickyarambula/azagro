@@ -1,3 +1,4 @@
+import { creditDetail, creditExceededMessage, creditExposure, creditRoom } from "@/lib/erp/credit-limit";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getSql, withTx } from "@/lib/db";
@@ -647,7 +648,10 @@ export const getPartner = createServerFn({ method: "POST" })
     if (!rows[0]) throw new Error("No encontrado");
     const me = await activeMember(sql, context.userId);
     const partner =
-      me.acl.credit === "none" ? { ...rows[0], ar: "0", ap: "0", credit_limit: "0" } : rows[0];
+      me.acl.credit === "none"
+        ? { ...rows[0], ar: "0", reserved: "0", ap: "0", credit_limit: "0" }
+        // Paso 6 (Decisión 51): lo apartado, de la misma regla que usa el candado.
+        : { ...rows[0], reserved: String((await creditExposure(sql, m.company_id, rows[0]!.id)).reserved) };
     const contacts = await sql<{
       id: number;
       name: string;
@@ -1578,17 +1582,12 @@ export const createSale = createServerFn({ method: "POST" })
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
     const member = await assertCan(sql, context.userId, "sales", "edit");
-    const partner = await sql<{ credit_limit: string }>`
-      select credit_limit::text from partners where id = ${data.partnerId} and company_id = ${m.company_id}
-    `;
-    const ar = await sql<{ ar: string }>`
-      select coalesce(sum(residual),0)::text as ar from invoices
-      where partner_id = ${data.partnerId} and kind = 'customer' and state = 'open'
-    `;
     const total = data.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
-    const limit = Number(partner[0]?.credit_limit ?? 0);
-    const used = Number(ar[0]?.ar ?? 0);
-    if (limit > 0 && used + total > limit) {
+    // Paso 6 (Decisión 51): la misma regla que saveOrder, del mismo lugar —
+    // este camino no tiene pantalla hoy, pero no se deja una segunda copia.
+    const exposure = await creditExposure(sql, m.company_id, data.partnerId);
+    const room = creditRoom({ ...exposure, order: total });
+    if (room.exceeds) {
       if (!(data.overrideCredit && member.role === "admin")) {
         // El rechazo también deja rastro: quién intentó, con qué números.
         await writeAudit(sql, {
@@ -1597,11 +1596,9 @@ export const createSale = createServerFn({ method: "POST" })
           action: "rechazado-credito",
           entity: "partner",
           entityId: data.partnerId,
-          detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+          detail: creditDetail(exposure, total),
         });
-        throw new Error(
-          `Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}. Un administrador puede autorizar el exceso.`,
-        );
+        throw new Error(creditExceededMessage(exposure));
       }
       await writeAudit(sql, {
         companyId: m.company_id,
@@ -1609,7 +1606,7 @@ export const createSale = createServerFn({ method: "POST" })
         action: "autorizar-credito",
         entity: "partner",
         entityId: data.partnerId,
-        detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+        detail: creditDetail(exposure, total),
       });
     }
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${m.company_id}`;

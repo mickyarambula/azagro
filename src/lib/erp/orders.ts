@@ -8,6 +8,7 @@ import { todayMx } from "@/lib/utils";
 import { computeDues } from "@/lib/erp/order-terms";
 import { computeDealPnl } from "@/lib/erp/reports";
 import { assertDueOk, validateDueDates } from "@/lib/erp/credit";
+import { creditDetail, creditExceededMessage, creditExposure, creditRoom } from "@/lib/erp/credit-limit";
 import { rememberTrade } from "@/lib/erp/links";
 import { policy } from "@/lib/erp/ops";
 import { financeUnit, linealPriceFromMargin } from "@/lib/erp/pricing";
@@ -541,16 +542,11 @@ export const saveOrder = createServerFn({ method: "POST" })
     if (data.routeKind === "asr" && !asrId) throw new Error("El circuito ASR necesita la contraparte (Santa Rosa / ASR)");
 
     if (data.confirm && data.termKind !== "contado") {
-      const partner = await sql<{ credit_limit: string }>`
-        select credit_limit::text from partners where id = ${data.partnerId} and company_id = ${companyId}
-      `;
-      const ar = await sql<{ ar: string }>`
-        select coalesce(sum(residual),0)::text as ar from invoices
-        where partner_id = ${data.partnerId} and kind = 'customer' and state = 'open'
-      `;
-      const limit = Number(partner[0]?.credit_limit ?? 0);
-      const used = Number(ar[0]?.ar ?? 0);
-      if (limit > 0 && used + total > limit) {
+      // BLOQUE DE PARCIALES, paso 6 (Decisión 51): la línea la ocupan las
+      // facturas abiertas Y lo apartado por pedidos confirmados sin facturar.
+      const exposure = await creditExposure(sql, companyId, data.partnerId, { excludeSoId: data.id ?? null });
+      const room = creditRoom({ ...exposure, order: total });
+      if (room.exceeds) {
         // Solo un administrador puede autorizar exceder el límite, y queda en bitácora.
         if (!(data.overrideCredit && member.role === "admin")) {
           // El rechazo también deja rastro: quién intentó y con qué números.
@@ -560,11 +556,9 @@ export const saveOrder = createServerFn({ method: "POST" })
             action: "rechazado-credito",
             entity: "partner",
             entityId: data.partnerId,
-            detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+            detail: creditDetail(exposure, total),
           });
-          throw new Error(
-            `Supera el límite de crédito (${limit.toFixed(0)}). Saldo actual ${used.toFixed(0)}. Un administrador puede autorizar el exceso.`,
-          );
+          throw new Error(creditExceededMessage(exposure));
         }
         await writeAudit(sql, {
           companyId,
@@ -572,7 +566,7 @@ export const saveOrder = createServerFn({ method: "POST" })
           action: "autorizar-credito",
           entity: "partner",
           entityId: data.partnerId,
-          detail: `Límite ${limit.toFixed(0)} · saldo ${used.toFixed(0)} · pedido ${total.toFixed(0)}`,
+          detail: creditDetail(exposure, total),
         });
       }
     }

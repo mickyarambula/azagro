@@ -22,7 +22,7 @@ function Ficha() {
   const canEdit = can("partners", "edit");
   const [lookups, setLookups] = useState<Awaited<ReturnType<typeof listLookups>> | null>(null);
   const [form, setForm] = useState<PartnerDraft | null>(null);
-  const [meta, setMeta] = useState<{ ar: string; ap: string }>({ ar: "0", ap: "0" });
+  const [meta, setMeta] = useState<{ ar: string; reserved: string; ap: string }>({ ar: "0", reserved: "0", ap: "0" });
   const [people, setPeople] = useState<Array<{ id: number; name: string; role: string; email: string; phone: string; is_billing: boolean }>>([]);
   const [destinos, setDestinos] = useState<Array<{ id: number; name: string; address: string; partner_id: number | null; partner_name: string | null }>>([]);
   const [addDest, setAddDest] = useState(false);
@@ -51,7 +51,7 @@ function Ficha() {
       is_customer: p.is_customer,
       is_supplier: p.is_supplier,
     });
-    setMeta({ ar: p.ar, ap: p.ap });
+    setMeta({ ar: p.ar, reserved: p.reserved ?? "0", ap: p.ap });
     setPeople(d.contacts);
     setDestinos((loc?.rows ?? []).filter((r) => r.partner_id === id));
   }
@@ -89,6 +89,7 @@ function Ficha() {
           <p className="mt-0.5 text-sm text-muted">
             {form.code} · {form.group_name || "sin grupo"}
             {form.is_customer ? ` · por cobrar ${money(meta.ar)}` : ""}
+            {form.is_customer && Number(meta.reserved) > 0.009 ? ` · apartado en pedidos confirmados sin facturar ${money(meta.reserved)}` : ""}
             {form.is_supplier ? ` · por pagar ${money(meta.ap)}` : ""}
           </p>
         </div>
