@@ -71,6 +71,11 @@ const ACTION: Record<string, string> = {
   "revertir-fv": "Revirtió factura de cliente (NC)",
   // Paso 8: reversa de devolución.
   "revertir-devolucion": "Revirtió devolución",
+  // BLOQUE C4, paso 4: borrado de datos de prueba y el candado de arranque.
+  "borrado-de-pruebas": "Borró datos de prueba",
+  "borrado-rechazado": "Borrado de pruebas RECHAZADO",
+  "arranque-real": "Arrancó la operación real",
+  "arranque-real-retirado": "Regresó a pruebas (retiró el arranque)",
 };
 
 type Payload = Awaited<ReturnType<typeof listAudit>>;

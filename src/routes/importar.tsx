@@ -2,12 +2,34 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { DocFiles } from "@/components/doc-files";
+import { useAccess } from "@/lib/access";
 import { resyncCompaq } from "@/lib/erp/catalogs";
 import { applyOpenInvoices, applyStockSnap, dbStatus, exportBackup, previewOpenInvoices } from "@/lib/erp/cutover";
 import { listCreditPolicies } from "@/lib/erp/ops";
-import { humanError } from "@/lib/utils";
+import { BACKUP_NOTE, clearLiveSince, LIVE_CLEAR_PHRASE, purgePreview, purgeTestData, setLiveSince } from "@/lib/erp/purge";
+import { dateTimeMx, humanError } from "@/lib/utils";
 
 export const Route = createFileRoute("/importar")({ component: Page });
+
+/** Nombre para pantalla de cada tabla que el borrado toca (§ 2 de BORRADO-PRUEBAS.md). */
+const TABLE_LABEL: Record<string, string> = {
+  expenses: "Gastos",
+  bank_moves: "Movimientos de banco",
+  payments: "Cobros / pagos",
+  invoices: "Facturas (fuera del corte)",
+  customer_pos: "OC de cliente",
+  purchase_orders: "Órdenes de compra",
+  sales_orders: "Pedidos",
+  vendor_rfqs: "Solicitudes a proveedor (SC)",
+  quotes: "Cotizaciones",
+  customer_requests: "Solicitudes",
+  stock_moves: "Movimientos de kardex (fuera del corte)",
+  stock_quants: "Existencias (se reconstruyen)",
+  documents: "Documentos",
+  doc_files: "Archivos adjuntos (fuera del corte)",
+  notifications: "Avisos",
+  folio_counters: "Contadores de folio (se re-siembran)",
+};
 
 function Page() {
   const [msg, setMsg] = useState<string | null>(null);
@@ -202,8 +224,247 @@ function Page() {
             Descargar respaldo
           </button>
         </li>
+        <PurgeSection />
       </ol>
       <DocFiles kind="cutover" entityId={0} />
     </AppShell>
+  );
+}
+
+/**
+ * BLOQUE C4 — Borrar datos de prueba, paso 5. Solo administrador (B6, el
+ * mismo candado que en el servidor). Preview de solo lectura (foto: no
+ * bloquea filas, puede cambiar entre el clic y el borrado); la protección
+ * real es el nombre de la empresa tecleado, que el plan compara adentro de
+ * la transacción antes de la primera sentencia.
+ */
+function PurgeSection() {
+  const { role } = useAccess();
+  const [preview, setPreview] = useState<Awaited<ReturnType<typeof purgePreview>> | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  const [confirmName, setConfirmName] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<string | null>(null);
+
+  const [liveDialog, setLiveDialog] = useState<"start" | "stop" | null>(null);
+  const [liveName, setLiveName] = useState("");
+  const [livePhrase, setLivePhrase] = useState("");
+  const [liveReason, setLiveReason] = useState("");
+  const [liveBusy, setLiveBusy] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+
+  // Candado B6: solo administrador dispara el preview — la misma condición
+  // que el servidor exige otra vez adentro de purgePreview / purgeTestData.
+  useEffect(() => {
+    if (role === "admin") void loadPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role]);
+
+  async function loadPreview() {
+    setLoadingPreview(true);
+    setPreviewError(null);
+    try {
+      setPreview(await purgePreview());
+    } catch (e) {
+      setPreviewError(humanError(e));
+    } finally {
+      setLoadingPreview(false);
+    }
+  }
+
+  if (role !== "admin") return null;
+
+  const nameMatches = Boolean(preview) && confirmName.trim() !== "" && confirmName.trim() === preview!.company.name.trim();
+  const canPurge = Boolean(preview) && preview!.allowed && nameMatches && Boolean(reason.trim()) && !busy;
+  const totalRows = preview?.counts.reduce((s, c) => s + c.count, 0) ?? 0;
+
+  async function doPurge() {
+    if (!canPurge) return;
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await purgeTestData({ data: { confirmName: confirmName.trim(), reason: reason.trim() } });
+      const deleted = r.deleted.filter((d) => d.kind === "delete" && d.count > 0).map((d) => `${TABLE_LABEL[d.table] ?? d.table}: ${d.count}`);
+      setResult(`Borrado en «${r.company.name}»: ${deleted.length ? deleted.join(", ") : "no había nada que borrar"}.`);
+      setConfirmName("");
+      setReason("");
+      await loadPreview();
+    } catch (e) {
+      setError(humanError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openLiveDialog(which: "start" | "stop") {
+    setLiveDialog(which);
+    setLiveName("");
+    setLivePhrase("");
+    setLiveReason("");
+    setLiveError(null);
+  }
+
+  async function doLive() {
+    if (!liveDialog) return;
+    setLiveBusy(true);
+    setLiveError(null);
+    try {
+      if (liveDialog === "start") {
+        await setLiveSince({ data: { confirmName: liveName.trim(), reason: liveReason.trim() } });
+      } else {
+        await clearLiveSince({
+          data: { confirmName: liveName.trim(), phrase: livePhrase.trim(), reason: liveReason.trim() },
+        });
+      }
+      setLiveDialog(null);
+      await loadPreview();
+    } catch (e) {
+      setLiveError(humanError(e));
+    } finally {
+      setLiveBusy(false);
+    }
+  }
+
+  return (
+    <li className="erp-card border-warn p-4">
+      <p className="font-semibold">Datos de prueba</p>
+      <p className="mt-1 text-muted">
+        Borra lo capturado en la app que no es del corte de Compaq: pedidos, OC, cotizaciones, solicitudes, cobros, pagos,
+        gastos, movimientos de banco y de kardex, documentos y avisos. El corte (facturas con folio del corte, existencias
+        iniciales, sus CSV) y los catálogos, Ajustes, personas y la bitácora <strong>se conservan siempre</strong>. Es la única
+        excepción a "no se borra" del sistema, y solo existe antes de que arranque la operación real.
+      </p>
+
+      {preview?.liveSince ? (
+        <div className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+          <p className="font-semibold">
+            «{preview.company.name}» arrancó la operación real el {dateTimeMx(preview.liveSince).slice(0, 8)}: los datos de
+            prueba ya no se pueden borrar.
+          </p>
+          <button type="button" className="erp-btn mt-2 h-7 text-[12px]" onClick={() => openLiveDialog("stop")}>
+            Regresar a pruebas…
+          </button>
+        </div>
+      ) : (
+        <button type="button" className="erp-btn mt-3 h-8 text-[12px]" onClick={() => openLiveDialog("start")}>
+          Arrancó la operación real…
+        </button>
+      )}
+
+      {loadingPreview && <p className="mt-3 text-[12px] text-muted">Revisando qué se borraría…</p>}
+      {previewError && <p className="mt-3 text-[12px] text-danger">{previewError}</p>}
+
+      {preview && !preview.liveSince ? (
+        <>
+          <p className="mt-3 text-[12px] font-semibold">
+            Foto de lo que se borraría ahora mismo{totalRows ? ` — ${totalRows} fila${totalRows === 1 ? "" : "s"} en total` : ""}:
+          </p>
+          <p className="mt-1 text-[12px] text-muted">
+            Es una foto, no un número exacto: no bloquea filas, y puede cambiar si alguien captura algo entre este preview y
+            el borrado. La protección real no es este conteo — es que el nombre de la empresa tecleado abajo coincida,
+            exacto, antes de que se borre una sola fila.
+          </p>
+          {totalRows > 0 ? (
+            <ul className="mt-2 grid grid-cols-2 gap-x-4 gap-y-0.5 text-[12px] text-ink-soft sm:grid-cols-3">
+              {preview.counts
+                .filter((c) => c.count > 0)
+                .map((c) => (
+                  <li key={c.table}>
+                    {TABLE_LABEL[c.table] ?? c.table}: <span className="font-medium">{c.count}</span>
+                  </li>
+                ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-[12px] text-ok">No hay nada que borrar: solo queda el corte y los catálogos.</p>
+          )}
+          {preview.warnings.length ? (
+            <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[12px] text-warn">
+              {preview.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          ) : null}
+          <p className="mt-2 text-[12px] text-muted">{BACKUP_NOTE}</p>
+
+          {preview.blockers.length ? (
+            <div className="mt-3 rounded-md border border-danger bg-cream px-3 py-2 text-[12px] text-danger">
+              <ul className="list-disc space-y-1 pl-5">
+                {preview.blockers.map((b, i) => (
+                  <li key={i}>{b}</li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <>
+              <label className="mt-3 grid gap-1 text-[12px] font-medium">
+                Nombre exacto de la empresa («{preview.company.name}»)
+                <input
+                  className="erp-input"
+                  value={confirmName}
+                  onChange={(e) => setConfirmName(e.target.value)}
+                  placeholder={preview.company.name}
+                />
+              </label>
+              <label className="mt-2 grid gap-1 text-[12px] font-medium">
+                Motivo (obligatorio)
+                <textarea className="erp-input" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Por qué se borra…" />
+              </label>
+              <button type="button" className="erp-btn mt-3 h-8 text-[12px] text-danger" disabled={!canPurge} onClick={() => void doPurge()}>
+                {busy ? "Borrando…" : "Borrar datos de prueba"}
+              </button>
+            </>
+          )}
+        </>
+      ) : null}
+
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {result && <p className="mt-2 text-[12px] text-ok">{result}</p>}
+
+      {liveDialog ? (
+        <div className="fixed inset-0 z-[90] grid place-items-center bg-ink/40 p-4" onClick={() => !liveBusy && setLiveDialog(null)}>
+          <div className="w-full max-w-md rounded-xl border border-line bg-cream p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold">{liveDialog === "start" ? "Arrancó la operación real" : "Regresar a pruebas"}</h2>
+            <p className="mt-1 text-[12px] text-muted">
+              {liveDialog === "start"
+                ? "Desde aquí el borrado de datos de prueba se niega para siempre en esta empresa."
+                : `Difícil a propósito: se niega si hay documentos o bitácora posteriores al arranque. Teclea «${LIVE_CLEAR_PHRASE}» exacto.`}
+            </p>
+            <label className="mt-3 grid gap-1 text-[12px] font-medium">
+              Nombre exacto de la empresa{preview ? ` («${preview.company.name}»)` : ""}
+              <input className="erp-input" value={liveName} onChange={(e) => setLiveName(e.target.value)} />
+            </label>
+            {liveDialog === "stop" ? (
+              <label className="mt-2 grid gap-1 text-[12px] font-medium">
+                Escribe «{LIVE_CLEAR_PHRASE}»
+                <input className="erp-input" value={livePhrase} onChange={(e) => setLivePhrase(e.target.value)} placeholder={LIVE_CLEAR_PHRASE} />
+              </label>
+            ) : null}
+            <label className="mt-2 grid gap-1 text-[12px] font-medium">
+              Motivo (obligatorio)
+              <textarea className="erp-input" rows={2} value={liveReason} onChange={(e) => setLiveReason(e.target.value)} />
+            </label>
+            {liveError && <p className="mt-2 text-[12px] text-danger">{liveError}</p>}
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                className="erp-btn-primary"
+                disabled={liveBusy || !liveName.trim() || !liveReason.trim() || (liveDialog === "stop" && !livePhrase.trim())}
+                onClick={() => void doLive()}
+              >
+                {liveBusy ? "Guardando…" : "Confirmar"}
+              </button>
+              <button type="button" className="erp-btn ml-auto" disabled={liveBusy} onClick={() => setLiveDialog(null)}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </li>
   );
 }
