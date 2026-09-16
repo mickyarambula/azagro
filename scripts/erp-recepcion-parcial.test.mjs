@@ -134,7 +134,9 @@ test("purchases.tsx: el botón Recibir abre el diálogo de cantidad por partida 
 
 test("purchases.tsx: 'Recibir todo lo pendiente' llama sin lines (el camino de hoy); confirmar cantidades llama con lines", () => {
   const s = src("src/routes/purchases.tsx");
-  const body = fnBody(s, "ReceivePartialButton");
+  // Paso 3.5: el diálogo se extrajo a src/components/partial-qty-dialog.tsx
+  // (lo comparten compras y ventas); ReceivePartialButton es un envoltorio.
+  const body = fnBody(src("src/components/partial-qty-dialog.tsx"), "PartialQtyDialog");
   assert.ok(body.includes("void confirm(undefined)"), "recibir todo = sin lines");
   assert.ok(body.includes("confirm(Object.entries(qtys)"), "recibir lo capturado = con lines");
   assert.ok(s.includes("data: recvLines ? { poId: o.id, lines: recvLines } : { poId: o.id }"), "onReceive arma el data correcto en los dos casos");

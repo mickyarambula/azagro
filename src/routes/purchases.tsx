@@ -10,95 +10,34 @@ import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
 import { createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
 import { CancelChainButton, ReceiptReversalButton } from "@/components/cancel-doc";
+import { PartialQtyDialog } from "@/components/partial-qty-dialog";
 import { cancelChainPreview, cancelPurchaseOrderChain } from "@/lib/erp/cancel";
 import { listReceiptEvents, receiptEventReversalPreview, receiptReversalPreview, reverseReceipt, reverseReceiptEvent } from "@/lib/erp/receipt-reversal";
 import { exportCsv } from "@/lib/export-csv";
 import { moneyIn, num, todayMx } from "@/lib/utils";
 
 /**
- * BLOQUE DE PARCIALES, paso 1.4: recibir cantidad por partida. "Recibir todo
- * lo pendiente" salta el diálogo (llama sin `lines`, el camino de hoy);
- * confirmar con cantidades editadas llama con `lines`, solo las partidas con
- * cantidad > 0.
+ * BLOQUE DE PARCIALES, paso 1.4: recibir cantidad por partida. Envoltorio del
+ * diálogo compartido (`PartialQtyDialog`, el mismo que usa Entregar en la
+ * ficha del pedido). "Recibir todo lo pendiente" llama sin `lines` (el camino
+ * de hoy); confirmar con cantidades llama con `lines`.
  */
 function ReceivePartialButton(props: {
   poName: string;
   pending: Array<{ lineId: number; product: string; uom: string; pending: number }>;
   onReceive: (lines?: Array<{ lineId: number; qty: number }>) => Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
-  const [qtys, setQtys] = useState<Record<number, number>>({});
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  function openDialog() {
-    setError(null);
-    setQtys(Object.fromEntries(props.pending.map((l) => [l.lineId, l.pending])));
-    setOpen(true);
-  }
-
-  async function confirm(lines?: Array<{ lineId: number; qty: number }>) {
-    setBusy(true);
-    setError(null);
-    try {
-      await props.onReceive(lines);
-      setOpen(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <>
-      <button type="button" className="erp-btn h-8 text-[12px]" onClick={openDialog}>
-        Recibir
-      </button>
-      {open ? (
-        <div className="fixed inset-0 z-[90] grid place-items-center bg-ink/40 p-4" onClick={() => !busy && setOpen(false)}>
-          <div className="w-full max-w-md rounded-xl border border-line bg-cream p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-base font-semibold">Recibir {props.poName}</h2>
-            <p className="mt-1 text-[12px] text-muted">Cantidad por partida. Deja en 0 la que todavía no llega.</p>
-            <div className="mt-3 grid gap-2">
-              {props.pending.map((l) => (
-                <label key={l.lineId} className="grid grid-cols-[1fr_auto] items-center gap-2 text-[13px]">
-                  <span>
-                    {l.product} <span className="text-muted">· pendiente {l.pending} {l.uom}</span>
-                  </span>
-                  <input
-                    type="number"
-                    className="erp-input w-24"
-                    min={0}
-                    max={l.pending}
-                    step="0.001"
-                    value={qtys[l.lineId] ?? 0}
-                    onChange={(e) => setQtys((q) => ({ ...q, [l.lineId]: Math.max(0, Math.min(l.pending, Number(e.target.value) || 0)) }))}
-                  />
-                </label>
-              ))}
-            </div>
-            {error ? <p className="mt-2 text-[12px] text-danger">{error}</p> : null}
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="erp-btn-primary"
-                disabled={busy || Object.values(qtys).every((q) => q <= 0)}
-                onClick={() => void confirm(Object.entries(qtys).filter(([, q]) => q > 0).map(([lineId, q]) => ({ lineId: Number(lineId), qty: q })))}
-              >
-                {busy ? "Recibiendo…" : "Recibir lo capturado"}
-              </button>
-              <button type="button" className="erp-btn" disabled={busy} onClick={() => void confirm(undefined)}>
-                Recibir todo lo pendiente
-              </button>
-              <button type="button" className="erp-btn ml-auto" disabled={busy} onClick={() => setOpen(false)}>
-                Cerrar
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </>
+    <PartialQtyDialog
+      buttonLabel="Recibir"
+      title={`Recibir ${props.poName}`}
+      hint="Cantidad por partida. Deja en 0 la que todavía no llega."
+      allLabel="Recibir todo lo pendiente"
+      confirmLabel="Recibir lo capturado"
+      busyLabel="Recibiendo…"
+      pending={props.pending}
+      onConfirm={props.onReceive}
+    />
   );
 }
 

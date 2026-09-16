@@ -152,3 +152,52 @@ test("chainForDelivery: con más de un evento vivo se bloquea antes de tocar nad
   assert.ok(i < body.indexOf("// La FV viva del pedido."), "ANTES de elegir una FV");
   assert.match(body, /paso 4 del bloque de parciales/, "nombra el camino que falta, no finge");
 });
+
+
+// ---------------------------------------------------------------------------
+// 3.5 Pantalla — ficha del pedido: Entregar (cantidad por partida, permiso
+//     deliver), Facturar esta entrega (edit), panel de entregas, aviso P&L.
+//     El diálogo de cantidad por partida es UNO, compartido con /purchases.
+// ---------------------------------------------------------------------------
+test("partial-qty-dialog.tsx: un solo diálogo de cantidad por partida, compartido por compras y ventas", () => {
+  const c = src("src/components/partial-qty-dialog.tsx");
+  assert.ok(c.includes("export function PartialQtyDialog("));
+  const body = fnBody(c, "PartialQtyDialog");
+  assert.ok(body.includes("void confirm(undefined)"), "'todo lo pendiente' = sin lines (el camino de hoy)");
+  assert.ok(body.includes("confirm(Object.entries(qtys)"), "confirmar = solo las partidas con cantidad > 0");
+  assert.ok(src("src/routes/purchases.tsx").includes("<PartialQtyDialog"), "compras lo usa");
+  assert.ok(src("src/routes/sales.$orderId.tsx").includes("<PartialQtyDialog"), "ventas lo usa");
+});
+
+test("ficha del pedido: Entregar pide deliver (almacén sí), Facturar y Cancelar piden edit; el botón de un clic 'Entregar y facturar' ya no existe en bodega propia", () => {
+  const so = src("src/routes/sales.$orderId.tsx");
+  assert.ok(so.includes('const canDeliver = can("sales", "deliver");'), "permiso de entregar, aparte del de editar");
+  assert.ok(so.includes('{canDeliver && state === "confirmed" && ('), "entregar con deliver");
+  assert.ok(so.includes('{canEdit && state === "confirmed" && ('), "cancelar sigue con edit (erp-cancelar-cascada lo fija)");
+  assert.ok(so.includes("deliverSale({ data: recvLines ? { soId: id, lines: recvLines } : { soId: id } })"), "con o sin cantidades");
+  assert.ok(so.includes("invoiceDelivery({ data: { soId: id, eventRef"), "facturar por evento");
+  assert.ok(so.includes("Facturar esta entrega"), "el botón, por evento");
+  assert.ok(so.includes("Entregar y facturar (directo)"), "en directo el botón dice que factura en el mismo acto");
+  assert.ok(!so.includes('Entregar y facturar{form.routeKind !== "own"'), "el botón viejo de un clic se fue (Decisión 47)");
+});
+
+test("ficha del pedido: panel de entregas (listDeliveryEvents) recargado con load(), y chip 'Entregado parcial'", () => {
+  const so = src("src/routes/sales.$orderId.tsx");
+  assert.ok(so.includes("listDeliveryEvents({ data: { soId: id } })"), "los eventos del pedido");
+  const iLoad = so.indexOf("async function load()");
+  const iEvents = so.indexOf("listDeliveryEvents({ data: { soId: id } })");
+  assert.ok(iLoad > -1 && iEvents > iLoad && iEvents < so.indexOf("}", so.indexOf("setSold(d.lines);")), "se cargan dentro de load(), no en un efecto propio (lección del paso 2: si no, una segunda entrega no aparece)");
+  assert.ok(so.includes('"Entregado parcial"'), "el chip lo dice cuando hay entregado y queda pendiente");
+});
+
+test("ficha del pedido: con 2+ facturas vivas, el P&L avisa que toma solo la última (paso 5), no finge el número", () => {
+  const so = src("src/routes/sales.$orderId.tsx");
+  assert.ok(so.includes("events.filter((e) => e.fv).length > 1"), "cuenta las FV vivas");
+  assert.match(so, /solo la última factura[\s\S]{0,120}paso 5/, "lo dice, con el paso que lo arregla");
+});
+
+test("ficha del pedido: el botón Recibir de las OC hijas también pasa a deliver (almacén recibe)", () => {
+  const so = src("src/routes/sales.$orderId.tsx");
+  assert.ok(so.includes('const canReceive = can("purchases", "deliver");'));
+  assert.ok(so.includes("canDeliver && canReceive && po.state"));
+});

@@ -8,7 +8,8 @@ import { Expediente } from "@/components/expediente";
 import { DocFiles } from "@/components/doc-files";
 import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
-import { deliverSale, receivePurchase, returnSale } from "@/lib/azagro";
+import { deliverSale, invoiceDelivery, listDeliveryEvents, receivePurchase, returnSale } from "@/lib/azagro";
+import { PartialQtyDialog } from "@/components/partial-qty-dialog";
 import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
 import { CancelButton, CancelChainButton, DeliveryReversalButton, ReturnReversalButton } from "@/components/cancel-doc";
 import { returnReversalPreview, reverseReturn } from "@/lib/erp/return-reversal";
@@ -33,10 +34,12 @@ function Ficha() {
   const { can, role } = useAccess();
   const isAdmin = role === "admin";
   const canEdit = can("sales", "edit");
+  // Paso 3 (Decisión 48): entregar es mover mercancía — deliver (edit lo incluye).
+  const canDeliver = can("sales", "deliver");
   // Recibir una OC ligada al pedido es acción de compras/almacén
   // (receivePurchase exige purchases:edit): no mostrar el botón a quien va a
   // truenar al hacer clic.
-  const canReceive = can("purchases", "edit");
+  const canReceive = can("purchases", "deliver");
   const [lookups, setLookups] = useState<OrderLookups | null>(null);
   const [form, setForm] = useState<OrderDraft | null>(null);
   const [state, setState] = useState("draft");
@@ -48,6 +51,7 @@ function Ficha() {
   >([]);
   const [receivedAt, setReceivedAt] = useState<string | null>(null);
   const [pnl, setPnl] = useState<Awaited<ReturnType<typeof getDealPnl>> | null>(null);
+  const [events, setEvents] = useState<Awaited<ReturnType<typeof listDeliveryEvents>>>([]);
   const [guia, setGuia] = useState({
     fletero: "",
     placas: "",
@@ -61,7 +65,7 @@ function Ficha() {
   const [obs, setObs] = useState("");
   const [printGuia, setPrintGuia] = useState(false);
   const [trail, setTrail] = useState("");
-  const [sold, setSold] = useState<Array<{ product_id: number; code: string; name: string; qty: string; qty_delivered: string; qty_returned: string; unit_price: string; uom: string }>>([]);
+  const [sold, setSold] = useState<Array<{ id: number; product_id: number; code: string; name: string; qty: string; qty_delivered: string; qty_returned: string; unit_price: string; uom: string }>>([]);
   const [retQty, setRetQty] = useState<Record<number, number>>({});
   const [retReason, setRetReason] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +84,12 @@ function Ficha() {
   const [circuitOverride, setCircuitOverride] = useState<"CONTADO" | "ASR" | null>(null);
 
   async function load() {
-    const [d, l, p] = await Promise.all([getOrder({ data: { id } }), orderLookups(), getDealPnl({ data: { soId: id } }).catch(() => null)]);
+    const [d, l, p, ev] = await Promise.all([
+      getOrder({ data: { id } }),
+      orderLookups(),
+      getDealPnl({ data: { soId: id } }).catch(() => null),
+      listDeliveryEvents({ data: { soId: id } }).catch(() => []),
+    ]);
     const o = d.order;
     setLookups(l);
     setPnl(p);
@@ -90,6 +99,7 @@ function Ficha() {
     setInvoices(d.invoices);
     setPurchases(d.purchases ?? []);
     setSold(d.lines);
+    setEvents(ev);
     setOrigin(d.origin);
     setCircuitOverride(null);
     setOriginLines(d.lines);
@@ -199,16 +209,31 @@ function Ficha() {
     }
   }
 
-  async function deliver() {
+  // Paso 3: entregar (cantidad por partida, o todo lo pendiente). En bodega
+  // propia NO factura (Decisión 47): la FV se emite por entrega, abajo. En
+  // directo/brokeraje sí, en el mismo acto (Decisión 29).
+  async function deliverLines(recvLines?: Array<{ lineId: number; qty: number }>) {
+    setError(null);
+    setMsg(null);
+    const r = await deliverSale({ data: recvLines ? { soId: id, lines: recvLines } : { soId: id } });
+    setMsg(
+      r.fv
+        ? `Entregado y facturado (${r.fv}) — directo, en el mismo acto.`
+        : `Entregado (${r.eventRef})${r.done ? ", pedido completo" : ", queda pendiente"} — falta facturar esta entrega.`,
+    );
+    await load();
+  }
+
+  async function invoiceEvent(eventRef: string) {
     setBusy(true);
     setError(null);
     setMsg(null);
     try {
-      await deliverSale({ data: { soId: id } });
-      setMsg("Entregado y facturado con el plazo de este pedido");
+      const r = await invoiceDelivery({ data: { soId: id, eventRef } });
+      setMsg(`${r.fv} emitida por la entrega ${eventRef}: su plazo corre desde la fecha de esa entrega.`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "No se pudo entregar");
+      setError(err instanceof Error ? err.message : "No se pudo facturar");
     } finally {
       setBusy(false);
     }
@@ -231,7 +256,7 @@ function Ficha() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h1 className="flex items-center gap-2 text-lg font-semibold">
           {form.name}
-          <span className="erp-chip">{stateLabel(state)}</span>
+          <span className="erp-chip">{state === "confirmed" && sold.some((l) => num(l.qty_delivered) > 0.0001) ? "Entregado parcial" : stateLabel(state)}</span>
         </h1>
         <div className="flex flex-wrap gap-2">
           <Link to="/sales" search={{ tab: "todos", q: "" }} className="erp-btn grid place-items-center">
@@ -258,11 +283,28 @@ function Ficha() {
               />
             </>
           )}
+          {canDeliver && state === "confirmed" && (
+            <PartialQtyDialog
+              primary
+              buttonLabel={form.routeKind !== "own" ? "Entregar y facturar (directo)" : "Entregar"}
+              title={`Entregar ${form.name}`}
+              hint={
+                form.routeKind !== "own"
+                  ? "Directo / brokeraje: no pasa por bodega Azagro. Cada entrega nace con su factura y con la deuda al proveedor, en el mismo acto."
+                  : "Cantidad por partida. Deja en 0 la que todavía no sale. La factura de esta entrega se emite después, desde el panel de entregas."
+              }
+              allLabel="Entregar todo lo pendiente"
+              confirmLabel="Entregar lo capturado"
+              busyLabel="Entregando…"
+              disabled={busy}
+              pending={sold
+                .filter((l) => num(l.qty) - num(l.qty_delivered) > 0.0001)
+                .map((l) => ({ lineId: l.id, product: `${l.code} ${l.name}`, uom: l.uom, pending: num(l.qty) - num(l.qty_delivered) }))}
+              onConfirm={deliverLines}
+            />
+          )}
           {canEdit && state === "confirmed" && (
             <>
-              <button className="erp-btn-primary" disabled={busy} type="button" onClick={() => void deliver()}>
-                Entregar y facturar{form.routeKind !== "own" ? " (directo, sin inventario Azagro)" : ""}
-              </button>
               <CancelChainButton
                 title="el pedido"
                 number={form.name}
@@ -365,6 +407,31 @@ function Ficha() {
           />
         </div>
       </div>
+      {events.length > 0 && (
+        <div className="mb-3 erp-card p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Entregas</p>
+          <ul className="mt-1 divide-y divide-line text-[13px]">
+            {events.map((e) => (
+              <li key={e.eventRef} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+                <span>
+                  <span className="font-medium">{e.eventRef}</span> · {e.date} ·{" "}
+                  {e.lines.map((l) => `${l.code} ${l.qty} ${l.uom}`).join(", ")}
+                  {e.reversed ? <span className="ml-2 text-muted">revertida</span> : null}
+                </span>
+                {e.fv ? (
+                  <span className="erp-chip">{e.fv}</span>
+                ) : e.reversed ? null : canEdit && form.routeKind === "own" ? (
+                  <button type="button" className="erp-btn h-8 text-[12px]" disabled={busy} onClick={() => void invoiceEvent(e.eventRef)}>
+                    Facturar esta entrega
+                  </button>
+                ) : (
+                  <span className="text-[12px] text-warn">Sin facturar</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {state === "cancelled" ? (
         <p className="mb-3 rounded-md border border-line bg-cream px-3 py-2 text-[12px] text-ink-soft">
           Cancelado{cancelledAt ? ` el ${cancelledAt.slice(0, 10)}` : ""}
@@ -503,6 +570,12 @@ function Ficha() {
       )}
       {pnl && (
         <div className="mt-4">
+          {events.filter((e) => e.fv).length > 1 ? (
+            <p className="mb-2 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
+              Este pedido tiene {events.filter((e) => e.fv).length} facturas vivas. La utilidad de abajo toma solo la última factura — el P&L con varias
+              facturas por pedido es el paso 5 del bloque de parciales, todavía no construido. No se finge el número.
+            </p>
+          ) : null}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <PnlKpi
               label={pnl.financingBase === "costo_margen" ? "Factura a Santa Rosa" : "Venta"}
@@ -615,7 +688,7 @@ function Ficha() {
                     </StatusPill>
                   </span>
                 </span>
-                {canEdit && canReceive && po.state !== "done" && po.state !== "cancelled" && po.fulfill_kind !== "direct" && (
+                {canDeliver && canReceive && po.state !== "done" && po.state !== "cancelled" && po.fulfill_kind !== "direct" && (
                   <button
                     type="button"
                     className="erp-btn h-8 text-[12px]"

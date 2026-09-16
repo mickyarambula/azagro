@@ -463,10 +463,12 @@ test("repunteo 5: registrar cobro/pago vive en Cartera, no en Bancos", () => {
 
 test("repunteo 3: el botón Recibir del pedido se esconde sin purchases:edit", () => {
   const s = src("src/routes/sales.$orderId.tsx");
-  assert.ok(s.includes('const canReceive = can("purchases", "edit");'), "falta el candado de visibilidad");
+  // Paso 3 del bloque de parciales (Decisión 48): recibir es mover mercancía —
+  // nivel deliver (edit lo incluye). Antes pedía edit.
+  assert.ok(s.includes('const canReceive = can("purchases", "deliver");'), "falta el candado de visibilidad");
   assert.ok(
-    s.includes("canEdit && canReceive && po.state"),
-    "el botón Recibir debe exigir canReceive además de canEdit",
+    s.includes("canDeliver && canReceive && po.state"),
+    "el botón Recibir debe exigir canReceive además de canDeliver",
   );
 });
 
