@@ -13,6 +13,7 @@ import { addDays, nearestRate, requireRate } from "@/lib/erp/credit";
 import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
+import { purchaseLineGaps, salesLineGaps } from "@/lib/erp/parciales";
 import { todayMx } from "@/lib/utils";
 import { circuitTerms, inheritCircuit } from "@/lib/erp/circuits";
 
@@ -973,6 +974,11 @@ export const listInventory = createServerFn({ method: "GET" })
       where q.company_id = ${m.company_id} and l.loc_type <> 'customer'
     `;
     const mismatches = rawMismatch.filter((r) => Math.abs(Number(r.shown) - Number(r.ledger)) > 0.001);
+    // Bloque de parciales, paso 0(a) — patrón A6: el cuadre. Con el
+    // todo-o-nada de hoy siempre da vacío; empieza a poblarse el día que
+    // exista recepción/entrega parcial (paso 1 en adelante).
+    const purchaseGaps = await purchaseLineGaps(sql, m.company_id);
+    const salesGaps = await salesLineGaps(sql, m.company_id);
     if (!canSeeCosts(me.role)) {
       return {
         quants: quants.map((q) => ({ ...q, cost: "0" })),
@@ -981,9 +987,11 @@ export const listInventory = createServerFn({ method: "GET" })
         incoming,
         outgoing,
         mismatches,
+        purchaseGaps,
+        salesGaps,
       };
     }
-    return { quants, locations, moves, incoming, outgoing, mismatches };
+    return { quants, locations, moves, incoming, outgoing, mismatches, purchaseGaps, salesGaps };
   });
 
 export const transferStock = createServerFn({ method: "POST" })

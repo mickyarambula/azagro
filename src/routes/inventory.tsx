@@ -137,6 +137,16 @@ function Page() {
           {data!.mismatches.length > 4 ? "…" : ""}
         </div>
       )}
+      {((data?.purchaseGaps?.length ?? 0) > 0 || (data?.salesGaps?.length ?? 0) > 0) && (
+        <div className="mb-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[13px] text-danger">
+          El cuadre no da cero (patrón A6): {(data!.purchaseGaps.length + data!.salesGaps.length)} partida
+          {data!.purchaseGaps.length + data!.salesGaps.length === 1 ? "" : "s"} con cantidad sin clasificar.{" "}
+          {[...data!.purchaseGaps.map((r) => `${r.productCode} en ${r.poName}`), ...data!.salesGaps.map((r) => `${r.productCode} en ${r.soName}`)]
+            .slice(0, 4)
+            .join(" · ")}
+          {data!.purchaseGaps.length + data!.salesGaps.length > 4 ? "…" : ""}
+        </div>
+      )}
 
       <div className="mb-4 flex flex-wrap gap-2">
         {(
