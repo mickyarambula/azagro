@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { pendingMigrations } from "./migration-plan.mjs";
-import { GUARD, KEEP, PURGE, REBUILD, keepTables, purgeGuard, purgeTables, runPurge } from "./purge-plan.mjs";
+import { GUARD, KEEP, LIVE, LIVE_HARMLESS_ACTIONS, PREVIEW, PURGE, REBUILD, clearLive, keepTables, liveBlockers, previewCounts, purgeGuard, purgeState, purgeTables, runPurge, setLive } from "./purge-plan.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dir = join(root, "migrations");
@@ -363,3 +363,121 @@ test("central (negativo): una factura del corte ligada por reverses_id a una bor
   assert.deepEqual(await snapshot(db, 1), before, "todo o nada");
   await db.close();
 });
+
+// ---------------------------------------------------------------- paso 4: lo que el servidor le pide al plan
+
+test("paso 4: el preview cuenta con la MISMA sentencia de cada paso — conteo antes = borrado después; costo de productos igual", async () => {
+  const db = await fresh();
+  await seed(db, 1, "u1");
+  await seed(db, 2, "u2");
+  const before = await previewCounts(q(db), 1);
+  const cost = (await q(db)(PREVIEW.productCost, [1]))[0].n;
+  const res = await inTx(db, 1);
+  assert.deepEqual(before, res.deleted, "el preview es exactamente lo que después se borra, paso por paso");
+  assert.equal(cost, res.rebuilt.find((x) => x.name === "costo de productos").count, "cuántos productos cambian de costo");
+  // Sobre lo que quedó, el preview dice 0 documentos (y solo las dos proyecciones).
+  const again = await previewCounts(q(db), 1);
+  for (const d of again) assert.equal(d.count, d.table === "stock_quants" || d.table === "folio_counters" ? 1 : 0, `${d.table} después: nada que borrar`);
+  assert.equal((await q(db)(PREVIEW.productCost, [1]))[0].n, 0, "ningún producto cambiaría de costo otra vez");
+  await db.close();
+});
+
+test("paso 4: el nombre tecleado se exige ANTES de la primera sentencia; con el nombre exacto (recortado) pasa", async () => {
+  const db = await fresh();
+  await seed(db, 1, "u1");
+  const before = await snapshot(db, 1);
+  const run = (t, p) => db.query(t, p).then((r) => r.rows);
+  await assert.rejects(() => db.transaction((tx) => runPurge((t, p) => tx.query(t, p).then((r) => r.rows), 1, { expectName: "Empresa 2" })), /no coincide con «Empresa 1»/);
+  await assert.rejects(() => db.transaction((tx) => runPurge((t, p) => tx.query(t, p).then((r) => r.rows), 1, { expectName: "" })), /no coincide/);
+  assert.deepEqual(await snapshot(db, 1), before, "nada se borró con el nombre equivocado");
+  const res = await db.transaction((tx) => runPurge((t, p) => tx.query(t, p).then((r) => r.rows), 1, { expectName: "  Empresa 1  " }));
+  assert.equal(res.company.name, "Empresa 1");
+  assert.ok(res.deleted.some((d) => d.count > 0), "con el nombre exacto sí borró");
+  void run;
+  await db.close();
+});
+
+test("paso 4: purgeState lee sin bloquear y NO truena con live_since fijado (es lo que el preview enseña como bloqueo)", async () => {
+  const db = await fresh();
+  await seed(db, 1, "u1");
+  assert.deepEqual(await purgeState(q(db), 1), { id: 1, name: "Empresa 1", liveSince: null });
+  await db.query(`update company_settings set live_since = '2026-09-20T12:00:00Z' where company_id = 1`);
+  const s = await purgeState(q(db), 1);
+  assert.equal(s.name, "Empresa 1");
+  assert.ok(s.liveSince, "devuelve la fecha para que el preview la enseñe");
+  await assert.rejects(() => purgeState(q(db), 999), /No existe la empresa 999/);
+  assert.ok(!LIVE.read.includes("for update"), "la lectura del preview no bloquea");
+  await db.close();
+});
+
+test("paso 4: «Arrancó la operación real» fija live_since una sola vez, crea el renglón de Ajustes si falta, y desde entonces el borrado se niega", async () => {
+  const db = await fresh();
+  await seed(db, 1, "u1");
+  await db.query(`insert into companies (id, name, join_code, created_by) values (7, 'Sin ajustes', 'J7', 'u')`);
+  await assert.rejects(() => setLive(q(db), 1, { expectName: "Otra" }), /no coincide con «Empresa 1»/);
+  const a = await setLive(q(db), 1, { expectName: "Empresa 1" });
+  assert.ok(a.liveSince instanceof Date, "devuelve cuándo");
+  await assert.rejects(() => setLive(q(db), 1, { expectName: "Empresa 1" }), /ya arrancó la operación real/);
+  const b = await setLive(q(db), 7, { expectName: "Sin ajustes" });
+  assert.ok(b.liveSince instanceof Date);
+  assert.equal((await q(db)(`select count(*)::int as n from company_settings where company_id = 7`))[0].n, 1, "el renglón de Ajustes nace con la marca");
+  await assert.rejects(() => inTx(db, 1), /arrancó la operación real/);
+  assert.ok(LIVE.set.includes("live_since is null"), "la sentencia misma no pisa una marca ya puesta");
+  await db.close();
+});
+
+test("paso 4: «Regresar a pruebas» — se niega si hay documentos fechados DESPUÉS o bitácora POSTERIOR (con la salida nombrada); sin nada, quita la marca", async () => {
+  const db = await fresh();
+  const r = q(db);
+  await seed(db, 1, "u1");
+  await assert.rejects(() => clearLive(r, 1, { expectName: "Empresa 1" }), /no está marcada/);
+  await setLive(r, 1, { expectName: "Empresa 1" });
+  // Lo sembrado es de hoy (no después) y la bitácora es anterior a la marca: no hay bloqueo.
+  assert.deepEqual(await liveBlockers(r, 1, (await purgeState(r, 1)).liveSince), []);
+  await assert.rejects(() => clearLive(r, 1, { expectName: "Empresa 2" }), /no coincide/);
+  const cleared = await clearLive(r, 1, { expectName: "Empresa 1" });
+  assert.equal(cleared.name, "Empresa 1");
+  assert.equal((await purgeState(r, 1)).liveSince, null, "marca quitada");
+
+  // Un pedido fechado un día después de la marca: bloquea y nombra la salida.
+  await setLive(r, 1, { expectName: "Empresa 1" });
+  await r(`insert into sales_orders (id, company_id, name, partner_id, location_id, date) values (199, 1, 'PV-0099', 11, 11, current_date + 1)`);
+  const bl = await liveBlockers(r, 1, (await purgeState(r, 1)).liveSince);
+  assert.deepEqual(bl, [{ what: "sales_orders", count: 1 }]);
+  await assert.rejects(() => clearLive(r, 1, { expectName: "Empresa 1" }), (e) => {
+    assert.match(e.message, /1 documento/, "cuenta");
+    assert.match(e.message, /Cancela o revierte/, "nombra la salida: el bloque de deshacer");
+    assert.match(e.message, /si son reales, la operación ya arrancó y no hay regreso/);
+    return true;
+  });
+  assert.ok((await purgeState(r, 1)).liveSince, "la marca sigue puesta");
+  await r(`delete from sales_orders where id = 199`);
+  // Una factura del corte fechada después NO cuenta (no es captura de la app); un INI del corte tampoco.
+  await r(`update invoices set date = current_date + 5 where id = 101`);
+  await r(`update stock_moves set date = current_date + 5 where id = 101`);
+  assert.deepEqual(await liveBlockers(r, 1, (await purgeState(r, 1)).liveSince), []);
+  // Bitácora con reloj propio: un renglón POSTERIOR que escribió un documento bloquea; uno de Ajustes (tiie) no.
+  await r(`insert into audit_log (company_id, action, entity, created_at) values (1, 'tiie', 'settings', now() + interval '1 second')`);
+  assert.deepEqual(await liveBlockers(r, 1, (await purgeState(r, 1)).liveSince), []);
+  assert.ok(LIVE_HARMLESS_ACTIONS.includes("tiie") && LIVE_HARMLESS_ACTIONS.includes("arranque-real"), "lo que no escribe documentos está en la lista");
+  await r(`insert into audit_log (company_id, action, entity, created_at) values (1, 'crear-pedido', 'sale', now() + interval '1 second')`);
+  assert.deepEqual(await liveBlockers(r, 1, (await purgeState(r, 1)).liveSince), [{ what: "bitácora", count: 1 }]);
+  await assert.rejects(() => clearLive(r, 1, { expectName: "Empresa 1" }), /bitácora/);
+  await db.close();
+});
+
+test("paso 4: fijar/quitar la marca toman for update sobre company_settings y releen live_since adentro", () => {
+  const plan = src("scripts/purge-plan.mjs");
+  const body = (name) => fnBody(plan, name);
+  for (const fn of ["setLive", "clearLive", "purgeGuard"]) assert.ok(body(fn).includes("GUARD.settings"), `${fn}: for update en company_settings, la misma sentencia del candado`);
+  assert.ok(GUARD.settings.endsWith("for update"));
+});
+
+function fnBody(source, name) {
+  const markers = [`export const ${name} `, `export async function ${name}(`, `export function ${name}(`];
+  const start = markers.map((m) => source.indexOf(m)).find((i) => i !== -1);
+  assert.notEqual(start, undefined, `No existe export ${name}`);
+  const rest = source.slice(start);
+  const next = rest.slice(10).search(/\nexport /);
+  return next === -1 ? rest : rest.slice(0, next + 10);
+}

@@ -2,11 +2,12 @@
 
 **Fecha:** 15-sep-2026 · **Base:** `main` en `b8b6576`+ · **Alcance:** diagnóstico y plan.
 
-**Estado (15-sep-2026):** pasos **1-3 construidos y comiteados** — `migrations/0034_datos_de_prueba.sql`, `scripts/purge-plan.mjs`, `scripts/erp-borrado-pruebas.test.mjs`, `scripts/erp-tablas-clasificadas.test.mjs`. 
-- **npm test:** 588 → 599 (11 nuevas, ninguna existente cambió; baseline íntegro).
+**Estado (15-sep-2026):** pasos **1-4 construidos** — `migrations/0034_datos_de_prueba.sql`, `scripts/purge-plan.mjs`, `scripts/erp-borrado-pruebas.test.mjs`, `scripts/erp-tablas-clasificadas.test.mjs`, y el paso 4: `src/lib/erp/purge.ts` + `scripts/erp-borrado-servidor.test.mjs`. 
+- **npm test:** 588 → 599 (pasos 1-3) → 610 (paso 4: 6 pruebas nuevas del plan en la central + 5 por texto del servidor; ninguna existente cambió).
+- **Paso 4, lo que quedó en el plan y no en el servidor (regla "el servidor no escribe SQL propia"):** `previewCounts` (el conteo del preview sale de la MISMA sentencia de cada paso convertida a `count(*)` — la prueba compara conteo-antes = borrado-después paso por paso), `runPurge(run, id, { expectName })` (el nombre tecleado se compara ANTES de la primera sentencia), `purgeState` (lectura sin `for update` para el preview), `PREVIEW.productCost` (cuántos productos cambian de costo), `LIVE` (`set` con `on conflict … where live_since is null` — crea el renglón de Ajustes si falta y nunca pisa una marca puesta; `clear`; `docs` por tabla del grupo A; `audit`), `setLive` / `clearLive` / `liveBlockers` / `LIVE_HARMLESS_ACTIONS` (acciones de bitácora que NO escriben documentos; lo desconocido bloquea). **Fechas de negocio: estrictamente un día después de la marca** (lo del mismo día es ambiguo y de eso se encarga la bitácora, con reloj de la base y `>` al instante). `purge.ts` solo decide quién/cuándo/con qué confirmación y deja rastro; `borrado-rechazado` cubre también los rechazos de fijar/quitar la marca (el detalle dice cuál).
 - **Corrección del dueño al construir:** **el plan mismo valida `$1`** (`purgeGuard`: la empresa existe con `for update` en `companies` y `company_settings`, se niega si `live_since` está fijado nombrando «Regresar a pruebas», y devuelve el nombre para que el paso 4 lo exija tecleado). 
 - **Aclaración (15-sep-2026, insertada en § 4 línea 1):** una empresa **sin renglón en `company_settings`** no tiene obstáculo para el borrado: se trata como "en pruebas". La marca de arranque (`live_since` fijado) solo la prende un administrador a propósito; que falte un renglón de configuración no significa operación arrancada.
-- **Pasos 4-6:** aún por construir (servidor, pantalla, documentación).
+- **Pasos 5-6:** aún por construir (pantalla, documentación).
 
 **Decisiones del dueño ya tomadas en esta sesión:** la bitácora se **conserva completa**; se borra **solo lo operativo** (catálogos, ajustes y personas se quedan); lo del corte de Compaq **siempre sobrevive**.
 
@@ -101,7 +102,7 @@ Se evaluaron tres, ninguna reemplaza al borrado:
 | **5** | **Pantalla en `/importar`** (Ajustes → Importar / corte): sección "Datos de prueba" solo admin, con preview (se borra / se conserva / avisos), nombre de empresa tecleado, motivo, el texto honesto del respaldo, e interruptor "Arrancó la operación real". Después del borrado, recarga. Etiquetas nuevas en `/bitacora` (`borrado-de-pruebas`, `borrado-rechazado`, `arranque-real`). | Pantalla | Texto: la sección existe, condicionada a admin, llama `purgePreview` antes de `purgeTestData` |
 | **6** | **Documentos:** `DECISIONES.md` (la excepción a la 16, confinada, con candado de una vía); `PATRONES-DISENO.md` C4 con la regla "tabla nueva ⇒ entra a `purge-plan.mjs` en el mismo cambio; la prueba lo obliga"; `ESTADO.md` § 4.15 cerrada; `CLAUDE.md` mapa. | Docs | — |
 
-**Dependencias:** 1 ✓ → 2 ✓ → 3 ✓ y 4 (pendiente) → 5 (pendiente) → 6 (pendiente). Los pasos 1-3 construidos, comiteados y verificados (599/599). Pasos 4-6 aún por hacer. Todo lo hecho es aditivo; ninguna prueba existente cambió.
+**Dependencias:** 1 ✓ → 2 ✓ → 3 ✓ → 4 ✓ → 5 (pendiente) → 6 (pendiente). Los pasos 1-4 construidos y verificados (610/610, `tsc` limpio). Pasos 5-6 aún por hacer. Todo lo hecho es aditivo; ninguna prueba existente cambió.
 
 **Decisiones del dueño cerradas para este bloque (15-sep-2026, `DECISIONES.md` 55 y 56):** la bitácora se conserva completa; solo lo operativo se borra; el costo de los productos sin existencia de corte regresa a 0 (el del catálogo) y `ref_cost` no se toca; el preview lista cuántos productos toca. Correcciones del dueño a la primera versión: 0034 solo con lo que el borrado nombra; el candado de arranque con salida (B3), difícil y con rastro, no imposible. La prueba del candado verifica las dos cosas (B3): que bloquea, y que la salida funciona.
 

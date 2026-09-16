@@ -25,7 +25,17 @@
  * (`bank_moves.expense_id` ↔ `expenses.bank_move_id`) que se rompe primero.
  */
 
-/** Tablas que SE CONSERVAN (§ 2 "Se conserva"). Motivo por tabla. */
+/**
+ * @typedef {(text: string, params?: unknown[]) => Promise<Array<Record<string, any>>>} Run
+ *   Quien corre SQL: la app pasa `sql.query`, las pruebas `db.query(...).rows`.
+ * @typedef {{ expectName?: string }} NameOpts
+ *   El nombre de la empresa tecleado (paso 4). Ausente = no se exige (pruebas del plan).
+ * @typedef {{ id: number, name: string, liveSince: unknown }} CompanyState
+ * @typedef {{ step: number, table: string, kind: "update" | "delete", sql: string, children?: string[], keeps?: string, why?: string }} PurgeStep
+ * @typedef {{ name: string, why: string, sql: string }} RebuildStep
+ */
+
+/** Tablas que SE CONSERVAN (§ 2 "Se conserva"). Motivo por tabla. @type {Array<{ table: string, why: string }>} */
 export const KEEP = [
   { table: "companies", why: "la empresa" },
   { table: "company_settings", why: "Ajustes (y el candado live_since)" },
@@ -75,6 +85,7 @@ export const GUARD = {
   settings: "select live_since from company_settings where company_id = $1 for update",
 };
 
+/** @param {string} name @param {unknown} liveSince */
 export function liveSinceMessage(name, liveSince) {
   const when = liveSince instanceof Date ? liveSince.toISOString().slice(0, 10) : String(liveSince).slice(0, 10);
   return (
@@ -83,21 +94,190 @@ export function liveSinceMessage(name, liveSince) {
   );
 }
 
-/** @returns {Promise<{ id: number, name: string, liveSince: unknown }>} */
-export async function purgeGuard(run, companyId) {
+/**
+ * Lectura del estado (paso 4). `companySql` / `settingsSql` son las dos
+ * sentencias del candado (con `for update`, para escribir) o las de LIVE (sin
+ * bloquear, para el preview). No juzga: devuelve `liveSince` tal cual.
+ * @param {Run} run @param {number} companyId @param {string} companySql @param {string} settingsSql
+ * @returns {Promise<CompanyState>}
+ */
+async function readState(run, companyId, companySql, settingsSql) {
   if (!Number.isInteger(companyId) || companyId <= 0) throw new Error(`Empresa inválida: ${String(companyId)}`);
-  const company = await run(GUARD.company, [companyId]);
+  const company = await run(companySql, [companyId]);
   if (!company[0]) throw new Error(`No existe la empresa ${companyId}: no hay nada que borrar.`);
-  const settings = await run(GUARD.settings, [companyId]);
-  const liveSince = settings[0]?.live_since ?? null;
-  if (liveSince !== null && liveSince !== undefined) throw new Error(liveSinceMessage(company[0].name, liveSince));
-  return { id: Number(company[0].id), name: String(company[0].name), liveSince: null };
+  const settings = await run(settingsSql, [companyId]);
+  return { id: Number(company[0].id), name: String(company[0].name), liveSince: settings[0]?.live_since ?? null };
+}
+
+/**
+ * El nombre de la empresa tecleado (paso 4, § 4.4): exacto, recortado. Sin `expectName` no se exige (las pruebas del plan).
+ * @param {CompanyState} company @param {string | undefined} expectName
+ */
+function assertName(company, expectName) {
+  if (expectName === undefined) return;
+  if (String(expectName).trim() !== company.name.trim()) {
+    throw new Error(`El nombre tecleado no coincide con «${company.name}». No se tocó nada.`);
+  }
+}
+
+/**
+ * El candado de escritura: bloquea, relee `live_since`, se niega si arrancó, exige el nombre si se lo pasan.
+ * @param {Run} run @param {number} companyId @param {NameOpts} [opts]
+ */
+export async function purgeGuard(run, companyId, opts = {}) {
+  const s = await readState(run, companyId, GUARD.company, GUARD.settings);
+  if (s.liveSince !== null && s.liveSince !== undefined) throw new Error(liveSinceMessage(s.name, s.liveSince));
+  assertName(s, opts.expectName);
+  return s;
+}
+
+/**
+ * Lo mismo SIN bloquear y SIN negarse: lo que el preview enseña (si `liveSince` viene, es un bloqueo en pantalla).
+ * @param {Run} run @param {number} companyId
+ */
+export async function purgeState(run, companyId) {
+  return readState(run, companyId, LIVE.readCompany, LIVE.read);
+}
+
+// ---------------------------------------------------------------------------
+// La marca de arranque (§ 4.2, B3): `company_settings.live_since`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Acciones de bitácora que NO escriben documentos (Ajustes, catálogos,
+ * permisos, rechazos, y las de este mismo bloque). Cualquier otra acción
+ * posterior a la marca cuenta como "se capturó algo" y bloquea «Regresar a
+ * pruebas»: lo desconocido bloquea, no pasa. La bitácora tiene reloj propio
+ * (`created_at` lo pone la base), así que no se puede antedatar como la
+ * fecha de un documento.
+ */
+export const LIVE_HARMLESS_ACTIONS = [
+  "arranque-real",
+  "arranque-real-retirado",
+  "borrado-de-pruebas",
+  "borrado-rechazado",
+  "rechazado-permiso",
+  "cancelar-rechazado",
+  "revertir-rechazado",
+  "rechazado-credito",
+  "importacion-fallida",
+  "tiie",
+  "tasas",
+  "tipo-cambio",
+  "parametros",
+  "politica-cobro",
+  "circuito",
+  "margen",
+  "precio-producto",
+  "credito-cliente",
+  "saldo-banco",
+  "permisos-usuario",
+  "alta-usuario",
+  "correo",
+  "recordatorio",
+];
+
+const harmlessList = LIVE_HARMLESS_ACTIONS.map((a) => `'${a}'`).join(", ");
+
+/**
+ * Documentos del grupo A fechados DESPUÉS de la marca. Fechas de negocio
+ * (`date`, `po_date`): estrictamente un día posterior — lo del mismo día es
+ * ambiguo (pudo capturarse antes de marcar) y de eso se encarga la bitácora.
+ * Reloj de la base (`created_at`): posterior al instante. Lo del corte nunca
+ * cuenta (no es captura de la app).
+ */
+export const LIVE = {
+  readCompany: "select id, name from companies where id = $1",
+  read: "select live_since from company_settings where company_id = $1",
+  set: `insert into company_settings (company_id, live_since) values ($1, now())
+on conflict (company_id) do update set live_since = now() where company_settings.live_since is null
+returning live_since`,
+  clear: "update company_settings set live_since = null where company_id = $1 and live_since is not null returning 1",
+  docs: [
+    { what: "expenses", sql: "select count(*)::int as n from expenses where company_id = $1 and (date > ($2::timestamptz)::date or created_at > $2::timestamptz)" },
+    { what: "bank_moves", sql: "select count(*)::int as n from bank_moves where company_id = $1 and date > ($2::timestamptz)::date" },
+    { what: "payments", sql: "select count(*)::int as n from payments where company_id = $1 and date > ($2::timestamptz)::date" },
+    { what: "invoices", sql: "select count(*)::int as n from invoices where company_id = $1 and cutover_key is null and date > ($2::timestamptz)::date" },
+    { what: "customer_pos", sql: "select count(*)::int as n from customer_pos where company_id = $1 and (po_date > ($2::timestamptz)::date or created_at > $2::timestamptz)" },
+    { what: "purchase_orders", sql: "select count(*)::int as n from purchase_orders where company_id = $1 and date > ($2::timestamptz)::date" },
+    { what: "sales_orders", sql: "select count(*)::int as n from sales_orders where company_id = $1 and date > ($2::timestamptz)::date" },
+    { what: "vendor_rfqs", sql: "select count(*)::int as n from vendor_rfqs where company_id = $1 and created_at > $2::timestamptz" },
+    { what: "quotes", sql: "select count(*)::int as n from quotes where company_id = $1 and date > ($2::timestamptz)::date" },
+    { what: "customer_requests", sql: "select count(*)::int as n from customer_requests where company_id = $1 and date > ($2::timestamptz)::date" },
+    { what: "stock_moves", sql: "select count(*)::int as n from stock_moves where company_id = $1 and not (move_type = 'opening' and origin = 'Corte Compaq') and date > ($2::timestamptz)::date" },
+    { what: "documents", sql: "select count(*)::int as n from documents where company_id = $1 and created_at > $2::timestamptz" },
+    { what: "doc_files", sql: "select count(*)::int as n from doc_files where company_id = $1 and kind <> 'cutover' and created_at > $2::timestamptz" },
+    { what: "notifications", sql: "select count(*)::int as n from notifications where company_id = $1 and created_at > $2::timestamptz" },
+  ],
+  audit: `select count(*)::int as n from audit_log where company_id = $1 and created_at > $2::timestamptz and action not in (${harmlessList})`,
+};
+
+/** @param {unknown} v */
+const tsOf = (v) => (v instanceof Date ? v.toISOString() : String(v));
+
+/**
+ * @param {Run} run @param {number} companyId @param {unknown} liveSince
+ * @returns {Promise<Array<{ what: string, count: number }>>} vacío = se puede regresar a pruebas.
+ */
+export async function liveBlockers(run, companyId, liveSince) {
+  const since = tsOf(liveSince);
+  /** @type {Array<{ what: string, count: number }>} */
+  const out = [];
+  for (const d of LIVE.docs) {
+    const n = Number((await run(d.sql, [companyId, since]))[0]?.n ?? 0);
+    if (n > 0) out.push({ what: d.what, count: n });
+  }
+  const a = Number((await run(LIVE.audit, [companyId, since]))[0]?.n ?? 0);
+  if (a > 0) out.push({ what: "bitácora", count: a });
+  return out;
+}
+
+/** @param {string} name @param {Array<{ what: string, count: number }>} blockers */
+export function liveBlockersMessage(name, blockers) {
+  const docs = blockers.filter((b) => b.what !== "bitácora");
+  const audit = blockers.find((b) => b.what === "bitácora");
+  const n = docs.reduce((s, b) => s + b.count, 0);
+  const parts = [];
+  if (n) parts.push(`${n} documento${n === 1 ? "" : "s"} fechado${n === 1 ? "" : "s"} después del arranque (${docs.map((b) => `${b.what}: ${b.count}`).join(", ")})`);
+  if (audit) parts.push(`${audit.count} renglón${audit.count === 1 ? "" : "es"} de bitácora posterior${audit.count === 1 ? "" : "es"} que escribió documentos`);
+  return (
+    `No se puede regresar a pruebas: la empresa «${name}» tiene ${parts.join(" y ")}. ` +
+    `Cancela o revierte esos ${n || audit?.count || 0} documentos primero (bloque de deshacer); si son reales, la operación ya arrancó y no hay regreso.`
+  );
+}
+
+/**
+ * «Arrancó la operación real»: una sola vez; crea el renglón de Ajustes si falta.
+ * @param {Run} run @param {number} companyId @param {NameOpts} [opts]
+ */
+export async function setLive(run, companyId, opts = {}) {
+  const s = await readState(run, companyId, GUARD.company, GUARD.settings);
+  assertName(s, opts.expectName);
+  if (s.liveSince !== null && s.liveSince !== undefined) throw new Error(`La empresa «${s.name}» ya arrancó la operación real el ${tsOf(s.liveSince).slice(0, 10)}.`);
+  const rows = await run(LIVE.set, [companyId]);
+  if (!rows[0]) throw new Error(`La empresa «${s.name}» ya arrancó la operación real.`);
+  return { id: s.id, name: s.name, liveSince: rows[0].live_since };
+}
+
+/**
+ * «Regresar a pruebas»: solo si nada se capturó después de la marca (documentos ni bitácora).
+ * @param {Run} run @param {number} companyId @param {NameOpts} [opts]
+ */
+export async function clearLive(run, companyId, opts = {}) {
+  const s = await readState(run, companyId, GUARD.company, GUARD.settings);
+  assertName(s, opts.expectName);
+  if (s.liveSince === null || s.liveSince === undefined) throw new Error(`La empresa «${s.name}» no está marcada como en operación real: no hay nada que quitar.`);
+  const blockers = await liveBlockers(run, companyId, s.liveSince);
+  if (blockers.length) throw new Error(liveBlockersMessage(s.name, blockers));
+  await run(LIVE.clear, [companyId]);
+  return { id: s.id, name: s.name, liveSince: s.liveSince };
 }
 
 /**
  * Lo que SE BORRA, en este orden. `sql` es la sentencia literal, con `$1` =
  * company_id. `children` = tablas sin company_id que caen en cascada con ésta.
  * `kind` = 'delete' salvo el primer paso, que es un `update` (rompe el ciclo).
+ * @type {PurgeStep[]}
  */
 export const PURGE = [
   {
@@ -153,6 +333,7 @@ export const PURGE = [
 /**
  * Reconstrucción después del borrado, en este orden (§ 3). Cada sentencia
  * termina en `returning 1` implícito (runPurge la envuelve) para contar filas.
+ * @type {RebuildStep[]}
  */
 export const REBUILD = [
   {
@@ -236,8 +417,43 @@ on conflict (company_id, series) do update
   },
 ];
 
+/**
+ * Lo que el preview (paso 4) pregunta antes de borrar, con la MISMA sentencia
+ * de cada paso convertida a conteo — así el número que se enseña es el número
+ * que después se borra (la prueba central lo compara paso por paso).
+ */
+/** @param {PurgeStep} step */
+export function countSql(step) {
+  const m = step.sql.match(/^(?:delete from|update) (\w+)(?: set [\s\S]*?)? where ([\s\S]*)$/);
+  if (!m) throw new Error(`Paso ${step.step}: no se pudo derivar el conteo de: ${step.sql}`);
+  return `select count(*)::int as n from ${m[1]} where ${m[2]}`;
+}
+
+/** @param {Run} run @param {number} companyId */
+export async function previewCounts(run, companyId) {
+  /** @type {Array<{ step: number, table: string, kind: string, count: number }>} */
+  const out = [];
+  for (const s of PURGE) {
+    const rows = await run(countSql(s), [companyId]);
+    out.push({ step: s.step, table: s.table, kind: s.kind, count: Number(rows[0]?.n ?? 0) });
+  }
+  return out;
+}
+
+export const PREVIEW = {
+  /** Cuántos productos cambiarían de costo (Decisión 56): el promedio ponderado de sus INI del corte, o 0 si no tiene. Misma aritmética que REBUILD. */
+  productCost: `select count(*)::int as n from products p
+where p.company_id = $1 and p.cost <> round(coalesce((
+  select case when sum(m.quantity) > 0.0001 then sum(m.quantity * m.unit_cost) / sum(m.quantity) else 0 end
+  from stock_moves m
+  where m.company_id = p.company_id and m.product_id = p.id
+    and m.move_type = 'opening' and m.origin = 'Corte Compaq' and m.location_to is not null
+), 0), 4)`,
+};
+
 /** Todas las tablas que el borrado toca: las de PURGE más sus hijas en cascada. */
 export function purgeTables() {
+  /** @type {Set<string>} */
   const out = new Set();
   for (const s of PURGE) {
     out.add(s.table);
@@ -251,6 +467,7 @@ export function keepTables() {
 }
 
 /** 'purge' | 'keep' | null (sin clasificar: la prueba "ninguna tabla olvidada" falla). */
+/** @param {string} table */
 export function classify(table) {
   if (purgeTables().includes(table)) return "purge";
   if (keepTables().includes(table)) return "keep";
@@ -261,16 +478,20 @@ export function classify(table) {
  * Corre el plan completo para UNA empresa. `run(text, params)` devuelve las
  * filas (la app: `sql.query`; las pruebas: PGlite `db.query(...).rows`). No
  * abre transacción: quien llama la abre (paso 4: `withTx`; pruebas:
- * `db.transaction`). Primero el candado (`purgeGuard`); luego PURGE y REBUILD.
- * Devuelve la empresa y el conteo por paso — es lo que va a bitácora.
+ * `db.transaction`). Primero el candado (`purgeGuard`, que con `expectName`
+ * exige además el nombre de la empresa tecleado — paso 4); luego PURGE y
+ * REBUILD. Devuelve la empresa y el conteo por paso — es lo que va a bitácora.
  */
-export async function runPurge(run, companyId) {
-  const company = await purgeGuard(run, companyId);
+/** @param {Run} run @param {number} companyId @param {NameOpts} [opts] */
+export async function runPurge(run, companyId, opts = {}) {
+  const company = await purgeGuard(run, companyId, opts);
+  /** @type {Array<{ step: number, table: string, kind: string, count: number }>} */
   const deleted = [];
   for (const s of PURGE) {
     const rows = await run(`with d as (${s.sql} returning 1) select count(*)::int as n from d`, [companyId]);
     deleted.push({ step: s.step, table: s.table, kind: s.kind, count: Number(rows[0]?.n ?? 0) });
   }
+  /** @type {Array<{ name: string, count: number }>} */
   const rebuilt = [];
   for (const r of REBUILD) {
     const rows = await run(`with d as (${r.sql} returning 1) select count(*)::int as n from d`, [companyId]);
