@@ -1105,6 +1105,24 @@ primera entrega, o desembolsa por partes, conforme sale cada entrega?* Sin
 esta respuesta no se puede fijar con qué tasa y desde qué día corre el
 financiamiento de la segunda entrega en adelante.
 
+### 4.17 El inicio no es un tablero — parte 2 del bloque de diseño, diagnosticada y sin construir (señalada por el dueño el 9-sep-2026 y otra vez el 15-sep-2026)
+**No es pregunta abierta: está decidido y diagnosticado, falta construirlo** — por
+eso no mueve el conteo de § 5, igual que 4.14. El dueño abrió el bloque de diseño
+el 9-sep con dos frases: *"el inicio no es un tablero"* y *"el menú no convence"*.
+El menú se construyó (parte 1, commit `3fdab61`); **el inicio no**. El 15-sep lo
+volvió a decir con otras palabras: *"está horrible y no dice nada esencial"*.
+Diagnóstico con evidencia en `DISENO-INVESTIGACION.md` § 2: en `index.tsx` las
+cifras que importan (Caja, Por cobrar con vencidas, Por pagar, Inventario) se
+pintan **en cuarto lugar**, después de 13 tarjetas de atajo fijas (`:26-40`), el
+diagrama de tres carriles que es un manual (`flujo.tsx:29-85`) y hasta cuatro
+avisos; y "Existencia por bodega" lista **todas** las ubicaciones tengan o no
+existencia, por cómo está escrita la consulta (`azagro.ts:376-381`) — de ahí las
+bodegas en cero. `DISENO-INVESTIGACION.md` § 3 ya enumera **todas** las cifras que
+el sistema sabe calcular hoy sin construir nada (`getDashboard`, `getCompanyPnl`,
+`getPanorama`, `listDealPnl`, `getUpcomingDue`, `getLiveStatement`), así que el
+trabajo es de orden y de criterio — qué se enseña primero y a quién —, no de
+cálculo nuevo. Queda pendiente junto con la **parte 3** (pestañas internas, 4.14).
+
 ## 5. Qué hacer con esto
 
 - Las **9 ABIERTAS** del punto 2 y las **preguntas sin contestar** del
