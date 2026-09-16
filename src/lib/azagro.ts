@@ -1111,6 +1111,7 @@ export const listPurchases = createServerFn({ method: "GET" })
       order by po.id desc
     `;
     const lines = await sql<{
+      id: number;
       po_id: number;
       product: string;
       qty: string;
@@ -1119,7 +1120,7 @@ export const listPurchases = createServerFn({ method: "GET" })
       uom: string;
       deliver_to: string;
     }>`
-      select pl.po_id, (p.code || ' — ' || p.name) as product, pl.qty::text, pl.qty_received::text, pl.unit_price::text,
+      select pl.id, pl.po_id, (p.code || ' — ' || p.name) as product, pl.qty::text, pl.qty_received::text, pl.unit_price::text,
         coalesce(pl.uom, p.uom) as uom, coalesce(pl.deliver_to,'') as deliver_to
       from purchase_lines pl
       join products p on p.id = pl.product_id

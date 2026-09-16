@@ -119,3 +119,26 @@ test('"FP de OC sin recibir" (unreceived, listInvoices): agrega event_ref is nul
   assert.ok(block.includes("po.state not in ('done','cancelled')"), "sigue limpiándose sola con deuda huérfana de verdad");
   assert.ok(block.includes("event_ref is null"), "y ya no marca las FP nuevas y correctas");
 });
+
+// ---------------------------------------------------------------------------
+// 7) Pantalla — /purchases: recibir cantidad por partida (paso 1.4).
+// ---------------------------------------------------------------------------
+test("purchases.tsx: el botón Recibir abre el diálogo de cantidad por partida (no dispara receivePurchase de un clic)", () => {
+  const s = src("src/routes/purchases.tsx");
+  assert.ok(s.includes("function ReceivePartialButton("), "el componente nuevo existe");
+  assert.ok(s.includes("<ReceivePartialButton"), "y se usa en la lista de órdenes");
+  assert.ok(!/onClick=\{async \(\) => \{\s*try \{\s*await receivePurchase\(\{ data: \{ poId: o\.id \} \}\);/.test(s), "ya no dispara de un clic sin cantidad");
+});
+
+test("purchases.tsx: 'Recibir todo lo pendiente' llama sin lines (el camino de hoy); confirmar cantidades llama con lines", () => {
+  const s = src("src/routes/purchases.tsx");
+  const body = fnBody(s, "ReceivePartialButton");
+  assert.ok(body.includes("void confirm(undefined)"), "recibir todo = sin lines");
+  assert.ok(body.includes("confirm(Object.entries(qtys)"), "recibir lo capturado = con lines");
+  assert.ok(s.includes("data: recvLines ? { poId: o.id, lines: recvLines } : { poId: o.id }"), "onReceive arma el data correcto en los dos casos");
+});
+
+test("listPurchases: sus renglones traen pl.id (falta antes de este bloque) para poder referenciar la partida", () => {
+  const body = fnBody(src("src/lib/azagro.ts"), "listPurchases");
+  assert.match(body, /select pl\.id, pl\.po_id,/);
+});
