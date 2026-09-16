@@ -1291,7 +1291,7 @@ export const receivePurchase = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
-    await assertCan(sql, context.userId, "purchases", "edit");
+    await assertCan(sql, context.userId, "purchases", "deliver");
     const po = await sql<{ id: number; location_id: number; name: string; state: string; fulfill_kind: string }>`
       select id, location_id, name, state, coalesce(fulfill_kind,'inventory') as fulfill_kind from purchase_orders
       where id = ${data.poId} and company_id = ${m.company_id}
@@ -1636,7 +1636,7 @@ export const deliverSale = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
-    await assertCan(sql, context.userId, "sales", "edit");
+    await assertCan(sql, context.userId, "sales", "deliver");
     const so = await sql<{
       id: number;
       location_id: number;
@@ -1815,7 +1815,7 @@ export const returnSale = createServerFn({ method: "POST" })
     await boot`alter table invoices add column if not exists order_id integer`;
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
-    await assertCan(sql, context.userId, "sales", "edit");
+    await assertCan(sql, context.userId, "sales", "deliver");
     const so = await sql<{
       id: number;
       name: string;

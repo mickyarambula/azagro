@@ -88,13 +88,15 @@ test("menú por rol: todo lo que se ve pasa por pathModule (permisos intactos)",
   const rules = [...acl.matchAll(/startsWith\("([^"]+)"\)\) return "([a-z]+)"/g)].map((m) => [m[1], m[2]]);
   const pathModule = (p) => (p === "/" ? "dashboard" : (rules.find(([pre]) => p.startsWith(pre)) ?? [null, null])[1]);
   for (const s of sections) assert.ok(pathModule(s.to), `pathModule conoce ${s.to}`);
+  // Paso 3.1 del bloque de parciales (Decisión 48): el nivel "deliver" existe;
+  // si el parser no lo conoce, se salta sales/purchases de almacén y cuenta mal.
   const block = (role) => {
     const i = acl.indexOf(`if (role === "${role}")`);
     const body = acl.slice(i, acl.indexOf("}", acl.indexOf("return {", i)));
-    return Object.fromEntries([...body.matchAll(/(\w+): "(edit|view|none)"/g)].map((m) => [m[1], m[2]]));
+    return Object.fromEntries([...body.matchAll(/(\w+): "(edit|deliver|view|none)"/g)].map((m) => [m[1], m[2]]));
   };
   const tail = acl.slice(acl.lastIndexOf("return {", acl.indexOf("export function pathModule")));
-  const cobranza = Object.fromEntries([...tail.slice(0, tail.indexOf("}")).matchAll(/(\w+): "(edit|view|none)"/g)].map((m) => [m[1], m[2]]));
+  const cobranza = Object.fromEntries([...tail.slice(0, tail.indexOf("}")).matchAll(/(\w+): "(edit|deliver|view|none)"/g)].map((m) => [m[1], m[2]]));
   const aclIds = [...acl.slice(0, acl.indexOf("export type AppRole")).matchAll(/id: "([a-z_]+)"/g)].map((m) => m[1]);
   const all = (lvl) => Object.fromEntries(aclIds.map((id) => [id, lvl]));
   const templates = {

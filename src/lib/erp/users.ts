@@ -256,7 +256,7 @@ export const updateMember = createServerFn({ method: "POST" })
       ownOnly: z.boolean(),
       displayName: z.string().optional(),
       resetAcl: z.boolean().optional(),
-      acl: z.record(z.string(), z.enum(["none", "view", "edit"])).optional(),
+      acl: z.record(z.string(), z.enum(["none", "view", "deliver", "edit"])).optional(),
     }),
   )
   .handler(async ({ context, data }) => {

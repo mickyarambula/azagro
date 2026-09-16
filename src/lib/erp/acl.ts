@@ -37,7 +37,10 @@ export const MODULES = [
 ] as const;
 
 export type ModuleId = (typeof MODULES)[number]["id"];
-export type AclLevel = "none" | "view" | "edit";
+// BLOQUE DE PARCIALES, paso 3.1 (Decisión 48): "deliver" = solo mover
+// mercancía — entregar, recibir, devolver — sin facturar ni editar el
+// documento. Solo significa algo en sales y purchases; edit lo incluye.
+export type AclLevel = "none" | "view" | "deliver" | "edit";
 export type AppRole =
   | "admin"
   | "gerencia"
@@ -150,11 +153,14 @@ export function templateAcl(role: AppRole): Record<ModuleId, AclLevel> {
     };
   }
   if (role === "almacen") {
+    // Decisión 48: entrega, recibe y devuelve; no factura ni edita el
+    // pedido/OC. Quien ya tenía "edit" guardado a mano lo conserva (loadAcl
+    // pisa esta plantilla con la fila): nada se degrada en silencio.
     return {
       dashboard: "view",
       quotes: "none",
-      sales: "edit",
-      purchases: "edit",
+      sales: "deliver",
+      purchases: "deliver",
       inventory: "edit",
       credit: "none",
       gastos: "none",
@@ -249,6 +255,10 @@ export async function assertCan(sql: Sql, userId: string, module: ModuleId, need
   if (need === "view" && have === "none") {
     await logDenied(m[0].company_id, userId, `sin permiso de ver ${module} (rol ${m[0].role})`);
     throw new Error("Sin permiso para ver este módulo");
+  }
+  if (need === "deliver" && have !== "deliver" && have !== "edit") {
+    await logDenied(m[0].company_id, userId, `sin permiso de entregar/recibir en ${module} (rol ${m[0].role})`);
+    throw new Error("Sin permiso para entregar, recibir o devolver en este módulo");
   }
   if (need === "edit" && have !== "edit") {
     await logDenied(m[0].company_id, userId, `sin permiso de editar ${module} (rol ${m[0].role})`);

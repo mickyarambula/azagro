@@ -239,6 +239,7 @@ function RolesMatrix() {
 
 function LevelChip({ level }: { level: AclLevel }) {
   if (level === "edit") return <span className="rounded bg-ok/15 px-1.5 py-0.5 font-medium text-ok">Editar</span>;
+  if (level === "deliver") return <span className="rounded bg-warn/15 px-1.5 py-0.5 font-medium text-warn">Entregar</span>;
   if (level === "view") return <span className="rounded bg-accent/10 px-1.5 py-0.5 font-medium text-accent">Ver</span>;
   return <span className="text-muted">—</span>;
 }
@@ -312,14 +313,15 @@ function MemberEditor({
                   <li key={id} className="flex flex-wrap items-center justify-between gap-2 py-2">
                     <span className="text-sm">{label}</span>
                     <div className="flex gap-1">
-                      {(["none", "view", "edit"] as AclLevel[]).map((opt) => (
+                      {/* "Entregar" (Decisión 48) solo en Ventas y Compras: mover mercancía sin facturar ni editar. */}
+                      {(id === "sales" || id === "purchases" ? (["none", "view", "deliver", "edit"] as AclLevel[]) : (["none", "view", "edit"] as AclLevel[])).map((opt) => (
                         <button
                           key={opt}
                           type="button"
                           className={cn("h-8 rounded-md px-2.5 text-[12px] font-medium", lv === opt ? "bg-brand text-white" : "border border-line hover:bg-paper")}
                           onClick={() => setAcl({ ...acl, [id]: opt })}
                         >
-                          {opt === "none" ? "Nada" : opt === "view" ? "Ver" : "Editar"}
+                          {opt === "none" ? "Nada" : opt === "view" ? "Ver" : opt === "deliver" ? "Entregar" : "Editar"}
                         </button>
                       ))}
                     </div>

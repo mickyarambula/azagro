@@ -28,14 +28,17 @@ const GUARDS = [
   // dinero y kardex (CRÍTICOS 1 y 2)
   // Cobrar/pagar vive en Cartera, no en Bancos (sesión de permisos, 7-sep-2026).
   { file: "src/lib/azagro.ts", fn: "registerPayment", guard: `assertCan(sql, context.userId, "credit", "edit")` },
-  { file: "src/lib/azagro.ts", fn: "receivePurchase", guard: `assertCan(sql, context.userId, "purchases", "edit")` },
-  { file: "src/lib/azagro.ts", fn: "deliverSale", guard: `assertCan(sql, context.userId, "sales", "edit")` },
+  // Paso 3.1 del bloque de parciales (Decisión 48): mover mercancía —
+  // entregar, recibir, devolver — pide "deliver" (edit lo incluye). Crear o
+  // editar el documento, y facturar, siguen en "edit" estricto.
+  { file: "src/lib/azagro.ts", fn: "receivePurchase", guard: `assertCan(sql, context.userId, "purchases", "deliver")` },
+  { file: "src/lib/azagro.ts", fn: "deliverSale", guard: `assertCan(sql, context.userId, "sales", "deliver")` },
   { file: "src/lib/azagro.ts", fn: "createPurchase", guard: `assertCan(sql, context.userId, "purchases", "edit")` },
   { file: "src/lib/azagro.ts", fn: "applyLateInterest", guard: `assertCan(sql, context.userId, "credit", "edit")` },
   { file: "src/lib/azagro.ts", fn: "createSale", guard: `assertCan(sql, context.userId, "sales", "edit")` },
   { file: "src/lib/azagro.ts", fn: "transferStock", guard: `assertCan(sql, context.userId, "inventory", "edit")` },
   { file: "src/lib/azagro.ts", fn: "adjustStock", guard: `assertCan(sql, context.userId, "inventory", "edit")` },
-  { file: "src/lib/azagro.ts", fn: "returnSale", guard: `assertCan(sql, context.userId, "sales", "edit")` },
+  { file: "src/lib/azagro.ts", fn: "returnSale", guard: `assertCan(sql, context.userId, "sales", "deliver")` },
   { file: "src/lib/erp/ops.ts", fn: "invoiceLiveMora", guard: `assertCan(sql, context.userId, "credit", "edit")` },
   { file: "src/lib/erp/ops.ts", fn: "reconcileMove", guard: `assertCan(sql, context.userId, "banks", "edit")` },
   { file: "src/lib/erp/ops.ts", fn: "saveContact", guard: `assertCan(sql, context.userId, "partners", "edit")` },

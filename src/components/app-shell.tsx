@@ -175,6 +175,7 @@ export function AppShell({ children, flush }: { children: React.ReactNode; flush
       can: (mod: ModuleId, need: AclLevel = "view") => {
         const have = acl[mod] ?? "none";
         if (need === "view") return have !== "none";
+        if (need === "deliver") return have === "deliver" || have === "edit";
         return have === "edit";
       },
     }),
