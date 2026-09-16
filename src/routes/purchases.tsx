@@ -108,14 +108,18 @@ function ReceivePartialButton(props: {
  * solo no se dibuja nada — ahí sigue sirviendo el botón de siempre
  * (`ReceiptReversalButton`, por OC).
  */
-function ReceiptEventsPanel(props: { poId: number; poName: string; onDone: () => void | Promise<void> }) {
+function ReceiptEventsPanel(props: { poId: number; poName: string; onDone: () => void | Promise<void>; refresh: string }) {
   const [events, setEvents] = useState<Awaited<ReturnType<typeof listReceiptEvents>> | null>(null);
 
+  // `refresh` cambia con cada recepción/reversa (suma de qty_received de la
+  // OC, que trae `load()` desde el padre) — sin esto, recibir una segunda
+  // vez no vuelve a pedir la lista de eventos, y el panel se queda mostrando
+  // solo el primero para siempre.
   useEffect(() => {
     void listReceiptEvents({ data: { poId: props.poId } })
       .then(setEvents)
       .catch(() => setEvents([]));
-  }, [props.poId]);
+  }, [props.poId, props.refresh]);
 
   if (!events || events.length <= 1) return null;
   const live = events.filter((e) => !e.reversed);
@@ -525,7 +529,14 @@ function Page() {
                             onDone={load}
                           />
                         )}
-                        {o.fulfill_kind !== "direct" && <ReceiptEventsPanel poId={o.id} poName={o.name} onDone={load} />}
+                        {o.fulfill_kind !== "direct" && (
+                          <ReceiptEventsPanel
+                            poId={o.id}
+                            poName={o.name}
+                            onDone={load}
+                            refresh={`${o.state}:${qlines.reduce((s, l) => s + Number(l.qty_received), 0)}`}
+                          />
+                        )}
                         {o.state === "confirmed" && (
                           <CancelChainButton
                             title="la orden de compra"

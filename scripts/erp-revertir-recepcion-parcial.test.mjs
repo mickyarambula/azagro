@@ -67,3 +67,10 @@ test("purchases.tsx: cuando hay más de un evento de recepción, se listan con s
   assert.ok(s.includes("listReceiptEvents"));
   assert.ok(s.includes("reverseReceiptEvent"));
 });
+
+test("ReceiptEventsPanel: vuelve a pedir la lista cuando cambia `refresh` (no solo al montar) — si no, una segunda recepción no aparece nunca", () => {
+  const body = fnBody(src("src/routes/purchases.tsx"), "ReceiptEventsPanel");
+  assert.match(body, /\}, \[props\.poId, props\.refresh\]\)/, "el efecto depende de refresh, no solo de poId");
+  const s = src("src/routes/purchases.tsx");
+  assert.match(s, /refresh=\{`\$\{o\.state\}:\$\{qlines\.reduce/, "el padre pasa una señal que cambia con cada recepción/reversa (qty_received acumulado)");
+});
