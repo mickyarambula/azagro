@@ -1,0 +1,74 @@
+# MAPA.md — Dónde vive cada cosa
+
+Tabla movida desde `CLAUDE.md` § Mapa el 16-sep-2026, byte por byte. Se consulta cuando hay que encontrar una función, una pantalla, una prueba o un documento; no se carga en cada sesión. Las reglas que no se negocian siguen en `CLAUDE.md` § No romper.
+
+| Qué | Dónde |
+|---|---|
+| Recibir / entregar / devolver / cobrar | `src/lib/azagro.ts` — van en `withTx()` |
+| **Cuándo nace la deuda con el proveedor** (Decisión 14): al recibir la mercancía, o al entregar y facturar si la OC es directa/brokeraje — nunca al capturar la OC. Idempotente; se detiene si el proveedor no tiene plazo capturado. Las FP viejas del defecto anterior se marcan derivándolo (su OC sin recibir), sin columna | `bornSupplierDebt` en `src/lib/azagro.ts`; aviso en `/` y marca en `/credit` |
+| Kardex + promedio móvil (`postStock` acepta `eventRef` y lo escribe) | `src/lib/erp/stock.ts` |
+| **Recepción parcial** (paso 1): `receivePartial` (evento `RCP`, valida contra lo pendiente), `bornSupplierDebtByReceipt` (una FP por recepción, idempotente por evento **y** OC), marca "FP de OC sin recibir" con `event_ref is null` | `src/lib/azagro.ts`; diálogo en `/purchases` |
+| **Reversa por recepción** (paso 2): `chainForReceiptEvent`/`reverseReceiptEvent` (resta `qty_received`, no lo pone en 0; OC a `confirmed` solo si queda pendiente), `listReceiptEvents`; las de por OC completa siguen intactas | `src/lib/erp/receipt-reversal.ts`; panel en `/purchases` |
+| **Entrega parcial y factura por entrega** (paso 3): `deliverPartial` (evento `ENV`), `issueDeliveryInvoice` (FV del evento, vencimientos desde la entrega), `invoiceDelivery` (`sales:edit`), `listDeliveryEvents` | `src/lib/azagro.ts`; panel "Entregas" y diálogo en `/sales/$orderId` |
+| **El cuadre (patrón A6)**: `reconcilePurchaseLine`/`reconcileSalesLine` puras + `purchaseLineGaps`/`salesLineGaps` contra la base; entregado sin facturar es `porFacturar`, no violación | `src/lib/erp/parciales.ts`; banners en `/inventory` |
+| Diálogo de cantidad por partida (recibir y entregar, uno solo) | `src/components/partial-qty-dialog.tsx` |
+| Mora / estado de cuenta | `src/lib/erp/credit.ts` |
+| Expediente (cadena SOL→…→FV) | `src/lib/erp/deal.ts` |
+| Catálogos Compaq (CL/PV/productos/almacenes) | `src/lib/erp/catalog.ts` + `compaq.ts` |
+| Corte / importar / respaldo | `src/lib/erp/cutover.ts`, ruta `/importar` |
+| Bitácora | `src/lib/erp/audit.ts`, ruta `/bitacora` |
+| Archivos del folio | `src/lib/erp/files.ts` |
+| RFQ sin pedido de cliente | `src/lib/erp/rfq.ts`, `/rfq/nuevo` |
+| Dos márgenes (contado/crédito), **margen sobre el precio**, precio↔margen, **sin margen por omisión** | `src/lib/erp/margins.ts` |
+| Escalera de plazos (Ajustes `quote_terms`), documento con dos precios | `src/lib/erp/ladder.ts`, `/quotes` panel "Ver" |
+| Candado de solicitud ya cotizada, y candado de solicitud cancelada (mismo `assertRequestOpen`, un estado más) | `src/lib/erp/request-lock.ts` |
+| **Reversa de devolución** (paso 8): salida al costo de regreso ligada al `return`, contra-abono del PAG virtual, NC por estado, `sat_cancelled_at` en el puente del folio | `src/lib/erp/return-reversal.ts`, `ReturnReversalButton` en `src/components/cancel-doc.tsx`; botón en `/sales/$orderId` por NC; fecha SAT en `/credit` (Folio fiscal) |
+| **Reversa de entrega/FV** (paso 7): NC por el total espejo + FV/FI `reversed`, ATC/FP por estado, kardex de regreso al costo de salida, pedido a `confirmed`; FV timbrada avisa y la NC sin timbrar se cuenta | `src/lib/erp/delivery-reversal.ts`, `DeliveryReversalButton` en `src/components/cancel-doc.tsx`; botón en `/sales/$orderId`; aviso en `/` y marca en `/credit` |
+| **Reversa de recepción** (paso 6): salida contraria al costo de entrada con tipo `reversal` y liga en el kardex; promedio mostrado con su número; bloqueo por salida posterior | `src/lib/erp/receipt-reversal.ts`, `ReceiptReversalButton` en `src/components/cancel-doc.tsx`; botón en `/purchases` |
+| **Reversa de cobro/pago** (paso 5): contra-PAG negativo + contra-abono + contra-movimiento de banco sin conciliar, ligados por `reverses_id`; la FI se queda; último abono vivo; cadena y números antes/después en pantalla | `src/lib/erp/reversal.ts`, `ReversalButton` en `src/components/cancel-doc.tsx`; botón en `/banks` y en `/credit` |
+| **Cancelar en cascada** (paso 4): OC confirmada sin recibir; pedido confirmado sin entregar con sus OC hijas y las FP viejas revertidas por estado; cadena completa en pantalla, todo o nada, permiso según lo que la cadena contenga | `src/lib/erp/cancel.ts`, `CancelChainButton` en `src/components/cancel-doc.tsx` |
+| **Cancelar lo liviano** (BLOQUE DE DESHACER, paso 1): solicitud (`cancelRequest`, sustituye al único borrado duro que tenía el sistema), cotización sin pedido (`cancelQuote`, solo draft/sent), pedido sin confirmar (`cancelOrder`, solo draft) — se marcan y se conservan, nunca se borran; permiso del módulo (no de quien capturó), motivo obligatorio, bitácora, un cancelado no se cancela ni revive. Un pedido confirmado (arrastra OC/FP) es el paso 4, todavía no construido. Componente compartido de pantalla (enseña qué se cancela, pregunta una vez) | `src/lib/erp/requests.ts`, `src/lib/erp/ops.ts`, `src/lib/erp/orders.ts`, `src/components/cancel-doc.tsx` |
+| **Menú** (bloque de diseño, parte 1): ocho módulos que coinciden con los permisos, `/bodegas` en Almacén o Contactos según el tab, secciones que el rol no puede abrir no se listan (B1), estrella por persona en `member_favorites` (llave = `SectionDef.key`) | `src/lib/nav.ts`, `src/components/app-shell.tsx`, `src/lib/erp/favorites.ts`, migración 0031; prueba `scripts/erp-menu.test.mjs` |
+| Interruptores de comisión / FEGA por política de cobro | `credit_policies`, `chargeRates` en `credit.ts`, panel en `/settings` |
+| Circuitos de financiamiento: catálogo (paso 0), **etiqueta** `circuit_code` que se guarda/hereda/muestra (paso 1), **selector** en solicitud/cotización directa/pedido directo — propone según el plazo, solo ADMINISTRADOR lo mueve, candado tras confirmar el pedido, solo Contado y Circuito ASR elegibles (paso 2), y **el motor lo lee** (paso 3): `circuitTerms` (comisión + base, se detiene sin comisión capturada), `priceRateFor` (TIIE en ASR / tasa de cobro en lineal), captura de la tabla de tasas (`saveFundingRate`) y de la comisión del circuito (`saveCircuitCommission`), ambas admin + bitácora, y **los reportes lo leen** (paso 4): `computeDealPnl` con comisión/base/las dos tasas congeladas en la FV (si no, en la cotización), `lineCost` (costo real, tasa de costo) y `protection` (tasa de cobro − tasa de costo) por partida y en totales, "sin dato" si falta la tasa de costo; el Panorama y la lista por pedido heredan; el reparto de mora NO (Fase 3). La mora (`credit.ts`) NO lee el circuito todavía | `src/lib/erp/circuits.ts`, `src/lib/erp/pricing.ts` (`FinancingBase`, `linealPriceFromMargin`, `linealMarginFromPrice`, `creditFromCashLineal`), `src/lib/erp/ladder.ts` (`financingBase`/`rateAt`), `src/lib/erp/reports.ts`, `src/components/circuit-select.tsx`, migraciones 0024/0025/0026 |
+| «Sin mora» apaga el interés | `NO_MORA_POLICY` / `policyChargesInterest` en `credit.ts` |
+| Quién está en cada política (panel de Ajustes, solo lectura, solo admin) | `src/lib/erp/policy-usage.ts`, `creditPolicyUsage` en `ops.ts` |
+| **Todo el texto que sale de la empresa** (notas de papeles, expediente filtrado, mensajes, explicación de la FI) | `src/lib/erp/doc-text.ts`; plantillas en `src/lib/print-doc.ts` |
+| Bloque "Por producto" del estado de cuenta (saldo, no venta) | `src/lib/erp/statement-products.ts`, `/statements` |
+| Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
+| **Circuito de financiamiento vigente** (lineal con Santa Rosa; fases de construcción) | `DISENO_FINANCIAMIENTO.md` |
+| **Cancelar/revertir un documento — diagnóstico y plan por pasos** (qué mueve cada documento, hasta dónde llega cada reversa, qué falta en la base, los casos que se rompen) | `DESHACER.md` |
+| **Borrar datos de prueba — bloque completo, pasos 1-6** (15-sep-2026, `ESTADO.md` § 4.15 cerrada): única excepción al principio de no borrar; toda la SQL vive en `scripts/purge-plan.mjs` y en ningún otro lado; el servidor (`purgePreview`, `purgeTestData`, `setLiveSince`, `clearLiveSince`) solo decide quién/cuándo/con qué confirmación — admin, `withTx`, candado del plan adentro, nombre tecleado + motivo, `borrado-de-pruebas` / `borrado-rechazado` / `arranque-real` / `arranque-real-retirado` en bitácora; sección "Datos de prueba" en `/importar` (solo admin) con el preview marcado como foto (no número exacto — la protección real es el nombre tecleado, Decisión 60); el candado `live_since` con salida es difícil y con rastro, no imposible (Decisión 57), un documento del mismo día no lo bloquea porque eso lo cubre la bitácora (Decisión 58), y una empresa sin renglón de Ajustes se trata como "en pruebas" (Decisión 59) | `BORRADO-PRUEBAS.md`, `scripts/purge-plan.mjs`, `src/lib/erp/purge.ts`, `src/routes/importar.tsx`, migración 0034 |
+| **Contradicciones entre documentos, preguntas ABIERTAS, comprobaciones numéricas** | `ESTADO.md` |
+| **Decisiones tomadas, una por renglón, con fecha** (se escribe el mismo día) | `DECISIONES.md` |
+| Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |
+| Barrido: ningún número de negocio en código | `scripts/erp-sin-numeros.test.mjs` |
+| Margen sobre precio + escalera (casos del dueño) | `scripts/erp-escalera.test.mjs` |
+| Estado de cuenta antes del vencimiento + pronto pago | `scripts/erp-estado-cuenta.test.mjs` |
+| Comisión / FEGA opcionales por política, «Sin mora», política del corte | `scripts/erp-politica-cobro.test.mjs` |
+| Circuitos: catálogo, herencia de la etiqueta, selector, migraciones 0025/0026 | `scripts/erp-circuitos.test.mjs`, `scripts/migrations-apply.test.mjs` |
+| BLOQUE DE DESHACER paso 0: migración 0029, ningún lector deja pasar un cancelado/revertido | `scripts/erp-cancelar.test.mjs` |
+| BLOQUE DE DESHACER paso 1: cancelar lo liviano, candados, un cancelado no se cancela ni revive | `scripts/erp-cancelar-liviano.test.mjs` |
+| BLOQUE DE DESHACER paso 2: la devolución entra al costo con el que salió; **ninguna devolución existente cambia de valor** | `scripts/erp-devolucion-costo.test.mjs` |
+| BLOQUE DE DESHACER paso 3: la deuda con el proveedor nace al recibir (y al entregar, en brokeraje) | `scripts/erp-fp-al-recibir.test.mjs` |
+| BLOQUE DE DESHACER paso 4: cancelar en cascada — nada que movió inventario o cartera pasa; **una factura revertida no revive** (prueba dedicada) | `scripts/erp-cancelar-cascada.test.mjs` |
+| BLOQUE DE DESHACER paso 5: reversa de cobro/pago — **banco y cartera idénticos al centavo por construcción**, la FI se queda, regla del último abono, los tres visibles y ligados | `scripts/erp-revertir-pago.test.mjs` |
+| BLOQUE DE DESHACER paso 6: reversa de recepción — existencia exacta, **el promedio se muestra movido con su número**, bloqueo por salida posterior, y recibir→revertir→recibir hace nacer deuda nueva | `scripts/erp-revertir-recepcion.test.mjs` |
+| BLOQUE DE DESHACER paso 7: reversa de entrega/FV — NC por el total espejo, FI se revierte (≠ paso 5), FP de brokeraje en cascada, FV timbrada avisa y la NC queda contada, revertir ≠ devolver en el diálogo | `scripts/erp-revertir-entrega.test.mjs` |
+| **BLOQUE C4 (borrado de datos de prueba) pasos 1-3**: migración 0034 (las seis cosas que solo nacían en runtime + `live_since`), el plan `scripts/purge-plan.mjs` (candado `purgeGuard` con `for update` y mensaje que nombra la salida, PURGE en orden, REBUILD, `runPurge`), grafo completo en dos empresas, idempotencia, todo o nada | `scripts/erp-borrado-pruebas.test.mjs` |
+| BLOQUE C4 paso 3: **ninguna tabla olvidada** — cada `create table` de `migrations/` y `src/` está en SE BORRA o SE CONSERVA de `purge-plan.mjs`; las hijas caen en cascada de verdad | `scripts/erp-tablas-clasificadas.test.mjs` |
+| BLOQUE C4 paso 4: el servidor usa el plan y no SQL propia; admin en pantalla y en servidor; DDL fuera → `withTx` → candado adentro; nombre + motivo; rechazo con conexión fresca; y **ningún `delete from` de una tabla de documentos en todo `src/`** | `scripts/erp-borrado-servidor.test.mjs` |
+| BLOQUE C4 paso 5: la sección en `/importar` solo para admin, pide `purgePreview` antes de `purgeTestData`, presenta el conteo como foto y no como número exacto, y las etiquetas nuevas en `/bitacora` | `scripts/erp-borrado-pantalla.test.mjs` |
+| BLOQUE DE DESHACER paso 8: reversa de devolución — salida al costo de regreso, contra-abono del PAG virtual sin banco, NC por estado, LIFO, bloqueo por revendida, amarre por folio de NC o bloqueo, `sat_cancelled_at` en el puente | `scripts/erp-revertir-devolucion.test.mjs` |
+| BLOQUE DE PARCIALES paso 0: el cuadre como función pura + contra PGlite | `scripts/erp-cuadre-parciales.test.mjs` |
+| BLOQUE DE PARCIALES pasos 1-2: recepción parcial, FP por evento, reversa por evento | `scripts/erp-recepcion-parcial.test.mjs`, `scripts/erp-revertir-recepcion-parcial.test.mjs` |
+| BLOQUE DE PARCIALES paso 3: entrega parcial, FV por evento, vencimientos desde la entrega, candado de la reversa completa, pantalla | `scripts/erp-entrega-parcial.test.mjs` |
+| BLOQUE DE PARCIALES paso 3.1: el nivel `deliver` (almacén entrega, no factura) | `scripts/erp-permiso-entregar.test.mjs` |
+| Antes de desplegar el paso 3: FP de órdenes sin recibir y proveedores sin plazo capturado (solo lectura, `DATABASE_URL`) | `scripts/erp-fp-sin-recibir.mjs` |
+| **Identidad ASR al centavo** (copia congelada del motor de antes del paso 3 vs el de ahora, +2,000 casos) + camino lineal contra DISENO § 5 (4,924.24 · 111,876.11 · 6,951.87) + partición del P&L | `scripts/erp-circuito-lineal.test.mjs` |
+| **Identidad del P&L por ASR** (partida y totales de antes del paso 4 vs ahora, +1,000 casos) + protección por separado en el lineal (4,857.40 + 66.84) + sin reparto de mora | `scripts/erp-reportes-circuito.test.mjs` |
+| Verificar el paso 1 contra producción: conteo por circuito, etiquetas vs regla, precio implícito antes/después (solo lectura, `DATABASE_URL`, `--guardar`/`--comparar`) | `scripts/erp-circuitos-verificacion.mjs` |
+| "Por producto" cuadra con la tabla de arriba | `scripts/erp-por-producto.test.mjs` |
+| Documentos que salen sin palabras internas | `scripts/erp-documento-limpio.test.mjs` |
+| ¿Factura duplicada? (solo lectura, con `DATABASE_URL`) | `scripts/erp-facturas-repetidas.mjs` |
+
