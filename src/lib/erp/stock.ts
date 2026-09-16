@@ -235,6 +235,8 @@ export async function postStock(
     date?: string;
     /** BLOQUE DE DESHACER: el movimiento que este contrario revierte. */
     reversesId?: number | null;
+    /** BLOQUE DE PARCIALES, paso 0(b): a cuál recepción/entrega pertenece este movimiento. */
+    eventRef?: string | null;
   },
 ) {
   await ensureStock(sql);
@@ -291,11 +293,11 @@ export async function postStock(
   await sql`
     insert into stock_moves (
       company_id, ref, move_type, date, origin, location_from, location_to,
-      product_id, quantity, unit_cost, created_by, reverses_id
+      product_id, quantity, unit_cost, created_by, reverses_id, event_ref
     )
     values (
       ${opts.companyId}, ${ref}, ${opts.moveType}, ${day}, ${opts.origin},
-      ${fromId}, ${toId}, ${opts.productId}, ${qty}, ${unitCost}, ${opts.userId}, ${opts.reversesId ?? null}
+      ${fromId}, ${toId}, ${opts.productId}, ${qty}, ${unitCost}, ${opts.userId}, ${opts.reversesId ?? null}, ${opts.eventRef ?? null}
     )
   `;
 

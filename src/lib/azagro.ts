@@ -420,10 +420,15 @@ export const getDashboard = createServerFn({ method: "GET" })
       where company_id = ${cid} and kind = 'customer' and name like 'NC-%' and state = 'reversed' and reverses_id is null
         and (coalesce(folio_fiscal,'') <> '' or coalesce(uuid_fiscal,'') <> '') and sat_cancelled_at is null
     `;
+    // BLOQUE DE PARCIALES, paso 1.3: con recepción parcial, una FP legítima
+    // también convive con su OC en 'confirmed' (todavía falta recibir el
+    // resto) — el po.state solo ya no basta. `event_ref is null` la limita a
+    // deuda huérfana DE VERDAD (nacida antes de este bloque, sin evento):
+    // toda FP nueva nace con su event_ref puesto y nunca se marca.
     const fpSinRecibir = await sql<{ n: number }>`
       select count(*)::int as n
       from invoices i
-      where i.company_id = ${cid} and i.kind = 'supplier' and i.state <> 'reversed'
+      where i.company_id = ${cid} and i.kind = 'supplier' and i.state <> 'reversed' and i.event_ref is null
         and exists (
           select 1 from purchase_orders po
           where po.company_id = i.company_id and po.name = i.origin
@@ -1276,7 +1281,12 @@ export async function bornSupplierDebt(
 
 export const receivePurchase = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ poId: z.number() }))
+  .validator(z.object({
+    poId: z.number(),
+    // BLOQUE DE PARCIALES, paso 1: cantidad por partida, opcional. Sin esto,
+    // el camino de hoy — recibir todo lo pendiente — no cambia en nada.
+    lines: z.array(z.object({ lineId: z.number(), qty: z.number().positive() })).optional(),
+  }))
   .handler(async ({ context, data }) => {
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
@@ -1289,6 +1299,26 @@ export const receivePurchase = createServerFn({ method: "POST" })
     if (!po[0] || po[0].state === "done" || po[0].state === "cancelled") throw new Error("Orden no disponible");
     if (po[0].fulfill_kind === "direct") {
       throw new Error("Esta OC es directa / brokeraje: no se recibe en bodega. La mercancía va en camino al cliente.");
+    }
+    if (data.lines && data.lines.length) {
+      const r = await receivePartial(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        poId: po[0].id,
+        poName: po[0].name,
+        locationId: po[0].location_id,
+        lines: data.lines,
+      });
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "recibir",
+        entity: "purchase",
+        entityId: po[0].id,
+        name: po[0].name,
+        detail: `Recepción parcial ${r.eventRef}${r.fp ? ` · nace ${r.fp} por pagar` : ""}`,
+      });
+      return { ok: true, fp: r.fp, eventRef: r.eventRef };
     }
     const lines = await sql<{ id: number; product_id: number; qty: string; qty_received: string; unit_price: string }>`
       select id, product_id, qty::text, qty_received::text, unit_price::text from purchase_lines where po_id = ${po[0].id}
@@ -1327,6 +1357,137 @@ export const receivePurchase = createServerFn({ method: "POST" })
     return { ok: true, fp };
     });
   });
+
+/**
+ * BLOQUE DE PARCIALES, paso 1.1: recepción parcial. Cantidad por partida,
+ * validada contra lo pendiente; un `event_ref` (serie `RCP`, folio_counters,
+ * A4) por LLAMADA, compartido por todos los movimientos de kardex y la FP de
+ * esta recepción. Plain function — sin `createServerFn` — para poder
+ * probarla contra PGlite; `receivePurchase` es el único que la llama.
+ */
+export async function receivePartial(
+  sql: Sql,
+  opts: {
+    companyId: number;
+    userId: string;
+    poId: number;
+    poName: string;
+    locationId: number;
+    lines: Array<{ lineId: number; qty: number }>;
+  },
+) {
+  const rows = await sql<{ last_number: number }>`
+    insert into folio_counters (company_id, series, last_number)
+    values (${opts.companyId}, 'RCP', 1)
+    on conflict (company_id, series) do update set last_number = folio_counters.last_number + 1
+    returning last_number
+  `;
+  const eventRef = `RCP/${String(rows[0]!.last_number).padStart(4, "0")}`;
+
+  const received: Array<{ productId: number; qty: number; unitPrice: number }> = [];
+  for (const l of opts.lines) {
+    const line = await sql<{ id: number; product_id: number; qty: string; qty_received: string; unit_price: string }>`
+      select id, product_id, qty::text, qty_received::text, unit_price::text from purchase_lines
+      where id = ${l.lineId} and po_id = ${opts.poId}
+      for update
+    `;
+    if (!line[0]) throw new Error("Esa partida no está en la orden");
+    const pending = Number(line[0].qty) - Number(line[0].qty_received);
+    if (l.qty > pending + 0.0001) {
+      throw new Error(`No puedes recibir más de lo pendiente (${pending}) en ${line[0].product_id}`);
+    }
+    await postStock(sql, {
+      companyId: opts.companyId,
+      userId: opts.userId,
+      moveType: "receipt",
+      origin: opts.poName,
+      productId: line[0].product_id,
+      quantity: l.qty,
+      locationTo: opts.locationId,
+      unitCost: Number(line[0].unit_price),
+      eventRef,
+    });
+    await sql`update purchase_lines set qty_received = qty_received + ${l.qty} where id = ${l.lineId}`;
+    received.push({ productId: line[0].product_id, qty: l.qty, unitPrice: Number(line[0].unit_price) });
+  }
+
+  const remaining = await sql<{ n: number }>`
+    select count(*)::int as n from purchase_lines where po_id = ${opts.poId} and qty_received >= qty - 0.0001
+  `;
+  const total = await sql<{ n: number }>`select count(*)::int as n from purchase_lines where po_id = ${opts.poId}`;
+  if ((remaining[0]?.n ?? 0) === (total[0]?.n ?? 0)) {
+    await sql`update purchase_orders set state = 'done' where id = ${opts.poId}`;
+  }
+
+  const fp = await bornSupplierDebtByReceipt(sql, {
+    companyId: opts.companyId,
+    userId: opts.userId,
+    poId: opts.poId,
+    poName: opts.poName,
+    eventRef,
+    received,
+  });
+  return { eventRef, fp };
+}
+
+/**
+ * BLOQUE DE PARCIALES, paso 1.2 (Decisión 28): una FP por RECEPCIÓN, no una
+ * sola vez por OC. Idempotente por `event_ref` (Decisión 42: la llave es el
+ * propio evento), no por OC como `bornSupplierDebt` — esa función se queda
+ * intacta para el camino de hoy y para el brokeraje de `deliverSale`.
+ * Importe = Σ(cantidad recibida en ESTE evento × precio unitario), no
+ * `po.total`: no nace completa al primer recibo. Definida después de
+ * `receivePurchase` a propósito, para no invadir el rango
+ * `[bornSupplierDebt, receivePurchase)` que usa `erp-trazabilidad.test.mjs`.
+ */
+export async function bornSupplierDebtByReceipt(
+  sql: Sql,
+  opts: {
+    companyId: number;
+    userId: string;
+    poId: number;
+    poName: string;
+    eventRef: string;
+    received: Array<{ productId: number; qty: number; unitPrice: number }>;
+    date?: string;
+  },
+) {
+  const already = await sql<{ id: number }>`
+    select id from invoices
+    where company_id = ${opts.companyId} and kind = 'supplier' and event_ref = ${opts.eventRef}
+      and state <> 'reversed'
+    limit 1
+  `;
+  if (already[0]) return null;
+  const po = await sql<{ partner_id: number; currency: string; fx_rate: string; partner: string }>`
+    select po.partner_id, coalesce(po.currency,'MXN') as currency,
+      coalesce(po.fx_rate,1)::text as fx_rate, p.name as partner
+    from purchase_orders po join partners p on p.id = po.partner_id
+    where po.id = ${opts.poId} and po.company_id = ${opts.companyId}
+  `;
+  if (!po[0]) throw new Error("Orden de compra no encontrada");
+  const days = await sql<{ payment_days: number | null }>`
+    select payment_days from partners where id = ${po[0].partner_id}
+  `;
+  if (!days[0] || days[0].payment_days == null) {
+    throw new Error(
+      `Falta el plazo de pago de ${po[0].partner}. Sin ese dato no se puede saber cuándo hay que pagarle esta recepción, ` +
+        `y por eso no se puede registrar la entrada. Pídele a compras, administración o gerencia que lo capture en la ` +
+        `ficha del proveedor (si es de contado, se captura 0). En cuanto esté, vuelve a recibir.`,
+    );
+  }
+  const day = (opts.date || todayMx()).slice(0, 10);
+  const due = addDays(day, days[0].payment_days);
+  const total = opts.received.reduce((s, r) => s + r.qty * r.unitPrice, 0);
+  const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${opts.companyId} and kind = 'supplier'`;
+  const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  await sql`
+    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, event_ref, currency, fx_agreed, created_by)
+    values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${total}, ${total},
+      ${opts.poName}, ${opts.eventRef}, ${po[0].currency}, ${Number(po[0].fx_rate)}, ${opts.userId})
+  `;
+  return iname;
+}
 
 export const listSales = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
@@ -1906,8 +2067,11 @@ export const listInvoices = createServerFn({ method: "POST" })
         -- Decisión 14) se MARCAN, no se revierten ni se dejan. La marca se
         -- deriva, sin columna: es deuda de una orden que todavía no se recibe.
         -- Se limpia sola al recibir o al cancelar, que es lo que pide la
-        -- decisión — sin migración ni proceso de limpieza.
-        (i.kind = 'supplier' and exists (
+        -- decisión — sin migración ni proceso de limpieza. Paso 1.3 (bloque
+        -- de parciales): event_ref is null la limita a deuda huérfana de
+        -- verdad — una FP de recepción parcial, legítima, nace con su evento
+        -- puesto y nunca se marca aunque su OC siga en 'confirmed'.
+        (i.kind = 'supplier' and i.event_ref is null and exists (
           select 1 from purchase_orders po
           where po.company_id = i.company_id and po.name = i.origin
             and po.state not in ('done','cancelled')
