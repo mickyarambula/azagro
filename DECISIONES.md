@@ -29,7 +29,7 @@ revisión)**: están escritas y decididas en documento, no construidas.
 | Kardex y costo | 20, 26, 27, 35 |
 | Permisos: quién puede qué | 24, 48 |
 | Menú y diseño de pantalla | 43, 44, 45 |
-| Recibir y entregar por partes (BLOQUE DE PARCIALES) | 46, 47, 48, 49, 50, 51, 52, 53, 54 |
+| Recibir y entregar por partes (BLOQUE DE PARCIALES) | 46, 47, 48, 49, 50, 51, 52, 53, 54, 61 |
 | Borrar datos de prueba (bloque C4) | 55, 56, 57, 58, 59, 60 |
 | Fecha | Decisión | Por qué | Dónde consta |
 |---|---|---|---|
@@ -178,6 +178,7 @@ revisión)**: están escritas y decididas en documento, no construidas.
 | 2026-09-15 | **DECISIÓN 58 — Un documento fechado el MISMO DÍA que se prendió `live_since` no bloquea "Regresar a pruebas"; lo cubre la bitácora, que tiene reloj propio.** `liveBlockers` compara la fecha de negocio de cada documento del grupo A contra la marca con `>` estricto (un día completo después), nunca `>=`. Lo que sí bloquea sin ambigüedad es un renglón de bitácora con `created_at` posterior al INSTANTE exacto de la marca (`LIVE.audit`, `LIVE_HARMLESS_ACTIONS` para lo que no cuenta como captura real). | La fecha de negocio la teclea la persona y puede haberse capturado antes de marcar; el reloj de la bitácora lo pone la base y no se puede antedatar. Si el mismo día bloqueara, un arranque a media mañana con una sola captura de esa mañana se quedaría sin salida limpia. | `scripts/purge-plan.mjs` (`LIVE.docs`, `LIVE.audit`); commit `262bc95` |
 | 2026-09-15 | **DECISIÓN 59 — Una empresa SIN renglón en `company_settings` se trata como "en pruebas", nunca como si ya hubiera arrancado.** `purgeGuard` / `purgeState` leen `live_since`; si el renglón no existe, sale nulo y el borrado no tiene obstáculo. La marca solo la prende un administrador a propósito (`setLiveSince` crea el renglón si falta). | Tratar "sin Ajustes capturados" como señal de arranque castigaría con un candado permanente a cualquier empresa nueva que todavía no abrió Ajustes — el caso más común en pruebas. | `BORRADO-PRUEBAS.md` § 4.2; `scripts/purge-plan.mjs` (`purgeGuard`, `LIVE.set`); commit `262bc95` |
 | 2026-09-15 | **DECISIÓN 60 — El conteo del preview de "Datos de prueba" es UNA FOTO, no un número exacto; la protección real es el nombre de la empresa tecleado.** `purgePreview` no bloquea filas ni abre transacción: puede quedar desactualizado entre el clic y el borrado. El candado de verdad es `runPurge`, que compara el nombre tecleado contra el nombre real **dentro** de la transacción, con `for update` sobre `companies` / `company_settings`, antes de la primera sentencia. | Un preview exacto exigiría bloquear filas solo para mostrar un número en pantalla — precisión que no vale el candado que estorbaría a cualquier otra pantalla mientras tanto. Mejor decir la verdad (es una foto) que fingir una exactitud que la lectura sin candado no puede dar. | `src/routes/importar.tsx`; `scripts/purge-plan.mjs` (`previewCounts`, `runPurge`); commits `262bc95`, `4c8b2ca` |
+| 2026-09-16 | **DECISIÓN 61 — Con un pedido entregado en dos o más partes (circuito lineal), el costo financiero de CADA entrega arranca el día de ESA entrega, no el día del pedido ni desde la primera entrega.** Contesta `ESTADO.md` § 4.16 ("¿Santa Rosa desembolsa todo desde la primera entrega, o por partes conforme sale cada una?"): la respuesta es por partes — cada entrega es su propio desembolso, con su propio reloj de días y su propia base (lo que esa entrega costó), igual que ya corre el plazo de cobro al cliente desde la Decisión 54. | Santa Rosa empieza a cobrar intereses a partir de que el producto sale y se factura al cliente (explicación del dueño); la segunda entrega, el día que sale la primera, no ha salido ni se ha facturado todavía, así que no puede estar generando costo financiero. Mismo principio que la regla 1 de "No romper" (nada de interés nace antes de tiempo) y el mismo criterio que ya fijó la Decisión 54, ahora aplicado al lado del costo. | `ESTADO.md` § 4.16; `PARCIALES.md` § 8 (paso 5); (diseño, borrador para revisión — `computeDealPnl` todavía toma solo la última FV) |
 
 ## Pendientes de decisión (no son decisiones todavía)
 
@@ -186,12 +187,14 @@ ABIERTAS en `ESTADO.md` § 2; contando una por una son **8** (L8a, H3, H4c, H4f,
 H5, H6, D-B, D-C — `ESTADO.md` § 0). El 9 quedó de antes de cerrar H4d y H4e el
 9-sep-2026. El texto original se conserva tal cual.
 Las **9 preguntas ABIERTAS** de `ESTADO.md` § 2 (sin cambio: verificado el
-15-sep-2026 que el bloque C4 no toca ninguna de las 9) y **10** de § 4
-(corrección de conteo, 15-sep-2026: el "9" de aquí venía del 5-sep-2026 y
-nunca se volvió a contar según creció § 4; el número real era **11** antes de
-cerrar **4.15** — bloque C4, completo hoy, Decisiones 55 a 60 — y ahora son
-**10**). Cuando el dueño conteste una, se agrega arriba con su fecha y se
-cambia de columna en `ESTADO.md`. Las cinco preguntas que gateaban la Fase 2 y la Fase 3 del diseño
+15-sep-2026 que el bloque C4 no toca ninguna de las 9; el conteo real hoy es
+**8**, ver la corrección arriba) y **9** de § 4 (corrección de conteo,
+15-sep-2026: el "9" de aquí venía del 5-sep-2026 y nunca se volvió a contar
+según creció § 4; el número real era **11** antes de cerrar **4.15** — bloque
+C4, completo el 15-sep, Decisiones 55 a 60 — y bajó a **10**; el 16-sep-2026
+se cerró **4.16** con la Decisión 61, y ahora son **9**). Cuando el dueño
+conteste una, se agrega arriba con su fecha y se cambia de columna en
+`ESTADO.md`. Las cinco preguntas que gateaban la Fase 2 y la Fase 3 del diseño
 (D-A, E2, H8b, 4.9, N1) quedaron cerradas el 5-sep-2026, todas en documento,
 ninguna construida. El 7-sep-2026 se cerraron otras siete de § 2 (L3a, L3b,
 L3c, L5, L6, H4a, H4b — Decisiones 9 a 16), también en documento, ninguna

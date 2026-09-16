@@ -80,8 +80,8 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 
 | Estado | Puntos |
 |---|---|
-| **Sin contestar** (10) | 4.1 (flete a Santa Rosa) · 4.2 (comisión + FEGA de la mora) · 4.3 (dólares) · 4.4 (límite de crédito) · 4.5 (quién absorbe el pronto pago) · 4.7 (estado de cuenta y Santa Rosa) · 4.8 (quién emite la FI) · 4.10 (instrucción de facturación) · 4.13 (permiso de Reportes) · 4.16 (desembolso de Santa Rosa por entrega parcial) |
-| Cerrados | 4.6 (Decisión 3.d) · 4.9 (Decisión 4) · 4.15 (bloque C4, 15-sep-2026) |
+| **Sin contestar** (9) | 4.1 (flete a Santa Rosa) · 4.2 (comisión + FEGA de la mora) · 4.3 (dólares) · 4.4 (límite de crédito) · 4.5 (quién absorbe el pronto pago) · 4.7 (estado de cuenta y Santa Rosa) · 4.8 (quién emite la FI) · 4.10 (instrucción de facturación) · 4.13 (permiso de Reportes) |
+| Cerrados | 4.6 (Decisión 3.d) · 4.9 (Decisión 4) · 4.15 (bloque C4, 15-sep-2026) · 4.16 (Decisión 61, 16-sep-2026) |
 | Decidido, falta construir (no cuenta como abierto) | 4.14 (pestañas) · 4.17 (el inicio) |
 
 **Corrección de conteo (16-sep-2026):** § 5 y `DECISIONES.md` "Pendientes" dicen **9** abiertas en § 2; son **8**. El 9 era del 5-sep-2026 (H4d y H4e abiertas, H4f sin existir); el 9-sep se cerraron las dos y después nació H4f. La nota del 15-sep que dice "el 9 sigue exacto" no volvió a contar.
@@ -1131,8 +1131,18 @@ aparte. Decisiones 55 a 60 (`DECISIONES.md`); commits `0c16c18`, `262bc95`,
 el navegador con Playwright, no solo por tipos (`BORRADO-PRUEBAS.md`, nota de
 método del paso 5, primera vez que se prueba así una pantalla del proyecto).
 
-### 4.16 Con qué desembolsa Santa Rosa una entrega parcial (anotado el 9-sep-2026, Decisión 54)
-**Dónde entra (15-sep-2026, paso 3 construido):** en el **costo** — el P&L con varias facturas, paso 5 —, no en la factura al cliente: la FV de cada entrega ya corre su plazo desde la fecha de esa entrega (Decisión 54, `issueDeliveryInvoice`). Sigue ABIERTA.
+### 4.16 Con qué desembolsa Santa Rosa una entrega parcial — CERRADO el 16-sep-2026, Decisión 61
+**Contestada.** Por partes, conforme sale cada entrega: cada una es su propio
+desembolso, con su propio reloj de días (arranca el día de ESA entrega, no el
+del pedido ni desde la primera) y su propia base (lo que esa entrega costó).
+Mismo criterio que ya fija la Decisión 54 para el lado del cliente, ahora
+aplicado al lado del costo. Sin construir: `computeDealPnl` (`src/lib/erp/
+reports.ts`) todavía toma solo la última FV del pedido — paso 5 del bloque de
+parciales, `PARCIALES.md` § 8.
+
+Lo que sigue abajo es el planteamiento original (9-sep-2026), como quedó
+escrito antes de la respuesta:
+
 La Decisión 54 fija la regla — el plazo de cada factura arranca el mismo día
 que el costo con Santa Rosa — pero deja pendiente el dato que la aterriza. Hoy
 el precio se congela en la cotización suponiendo un solo desembolso por todo
