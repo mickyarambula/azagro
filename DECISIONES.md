@@ -10,6 +10,27 @@ el dueño y bitácora de sesiones), `DISENO_FINANCIAMIENTO.md` (5-sep) y los
 commits de `main`. Las de DISENO están marcadas **(diseño, borrador para
 revisión)**: están escritas y decididas en documento, no construidas.
 
+## Cómo encontrar una decisión
+
+- Las decisiones **numeradas** empiezan el 5-sep-2026 (DECISIÓN 1) y van hasta la 60 (15-sep-2026). Se buscan por etiqueta: `grep -n 'DECISIÓN 47' DECISIONES.md`. Las **7 y 8** están en una sola fila, etiquetada en plural ("DECISIONES 7 y 8").
+- Las 49 filas anteriores (31-ago a 5-sep-2026) son las **sembradas** de HANDOFF, EXCEL_VS_SISTEMA y los commits: no llevan número; se buscan por tema.
+- Las filas que empiezan con **REGISTRO** son bitácora de construcción, no decisiones.
+- `scripts/erp-indice-docs.test.mjs` vigila que cada número del índice de abajo exista en la tabla.
+
+### Índice por tema
+
+| Tema | Decisiones |
+|---|---|
+| Circuito de financiamiento, tasas y comisión | 1, 3, 4, 5, 6, 7 y 8 |
+| Moneda y tipo de cambio | 2 |
+| Devoluciones de cliente y pagos de más ("algo salió mal", 7-sep) | 9, 10, 11, 12, 13 |
+| Deuda con el proveedor (FP): cuándo nace, con qué se detiene | 14, 23, 28, 29, 30, 36 |
+| Cancelar y revertir (BLOQUE DE DESHACER) | 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 31, 32, 33, 34, 35, 37, 38, 39, 40, 41, 42 |
+| Kardex y costo | 20, 26, 27, 35 |
+| Permisos: quién puede qué | 24, 48 |
+| Menú y diseño de pantalla | 43, 44, 45 |
+| Recibir y entregar por partes (BLOQUE DE PARCIALES) | 46, 47, 48, 49, 50, 51, 52, 53, 54 |
+| Borrar datos de prueba (bloque C4) | 55, 56, 57, 58, 59, 60 |
 | Fecha | Decisión | Por qué | Dónde consta |
 |---|---|---|---|
 | 2026-08-31 | La tasa de cobro al cliente es **TIIE + 9 %**, no el 18 % fijo del Excel viejo. | El archivo nuevo del Excel es el vigente; el 18 % es un fósil que ninguna fórmula usa. | HANDOFF Decisiones; EXCEL_VS_SISTEMA § 6 y § 9.7; commit `1ff31f2` |
@@ -160,6 +181,10 @@ revisión)**: están escritas y decididas en documento, no construidas.
 
 ## Pendientes de decisión (no son decisiones todavía)
 
+**Corrección de conteo (16-sep-2026):** el renglón de abajo dice **9** preguntas
+ABIERTAS en `ESTADO.md` § 2; contando una por una son **8** (L8a, H3, H4c, H4f,
+H5, H6, D-B, D-C — `ESTADO.md` § 0). El 9 quedó de antes de cerrar H4d y H4e el
+9-sep-2026. El texto original se conserva tal cual.
 Las **9 preguntas ABIERTAS** de `ESTADO.md` § 2 (sin cambio: verificado el
 15-sep-2026 que el bloque C4 no toca ninguna de las 9) y **10** de § 4
 (corrección de conteo, 15-sep-2026: el "9" de aquí venía del 5-sep-2026 y

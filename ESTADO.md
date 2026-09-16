@@ -52,6 +52,41 @@ Lo que dice cada documento, en una línea:
 
 ---
 
+## 0. Índice — léelo primero, y salta solo a lo que toque
+
+Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con `## N.` y cada pregunta con `### CLAVE.`: se llega con una búsqueda (`grep -n '^### H4c\.' ESTADO.md`) y se lee desde ahí. `scripts/erp-indice-docs.test.mjs` vigila que este índice cuadre con el cuerpo: si una pregunta cambia de estado, se actualiza aquí el mismo día (skill `cerrar-decision`).
+
+| § | Qué es | Estado |
+|---|---|---|
+| 1 | Contradicciones entre documentos (1.1 a 1.14) | Diagnóstico del 5-sep-2026; se consulta solo al tocar financiamiento |
+| 2 | Las preguntas abiertas, todas en una lista (34) | **8 ABIERTAS** — tabla abajo |
+| 3 | Tres comprobaciones numéricas contra el código | Referencia (3.d = los 320.08 del motor ASR) |
+| 4 | Lo que el diseño no contesta (15 puntos) | **10 sin contestar** — tabla abajo |
+| 5 | Qué hacer con esto | Bitácora de cierres, por fecha |
+| 6 | Hallazgo: la comisión no se congelaba en la cotización | CERRADO en el paso 3 |
+| 7 | Avance de construcción del catálogo de circuitos | Bitácora, pasos 0-4 |
+
+### § 2 por estado
+
+| Estado | Preguntas |
+|---|---|
+| **ABIERTA** (8) | L8a (ajuste de inventario: ¿pide costo?) · H3 (Sesión D) · H4c (devolución a proveedor) · H4f (candado sin salida en la reversa de devolución) · H5 (lotes y caducidad) · H6 (unidades de medida) · D-B (tasa del pronto pago) · D-C (plazo de Santa Rosa a Azagro) |
+| Resuelta en documento, no construida | L3a (Decisión 9) · L3b (10) · L3c (11) · L5 (12 y 13) · L6 (14) · H2 · H4a (16) · H4b (15) · H7 · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) |
+| Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
+| En construcción / construida | H4d (Decisiones 46 a 54; pasos 0-3 de `PARCIALES.md` hechos) · H4e (Decisión 48; construida el 15-sep-2026) |
+| No es pregunta | N2 (requisito verificado el 5-sep-2026) |
+
+### § 4 por estado
+
+| Estado | Puntos |
+|---|---|
+| **Sin contestar** (10) | 4.1 (flete a Santa Rosa) · 4.2 (comisión + FEGA de la mora) · 4.3 (dólares) · 4.4 (límite de crédito) · 4.5 (quién absorbe el pronto pago) · 4.7 (estado de cuenta y Santa Rosa) · 4.8 (quién emite la FI) · 4.10 (instrucción de facturación) · 4.13 (permiso de Reportes) · 4.16 (desembolso de Santa Rosa por entrega parcial) |
+| Cerrados | 4.6 (Decisión 3.d) · 4.9 (Decisión 4) · 4.15 (bloque C4, 15-sep-2026) |
+| Decidido, falta construir (no cuenta como abierto) | 4.14 (pestañas) · 4.17 (el inicio) |
+
+**Corrección de conteo (16-sep-2026):** § 5 y `DECISIONES.md` "Pendientes" dicen **9** abiertas en § 2; son **8**. El 9 era del 5-sep-2026 (H4d y H4e abiertas, H4f sin existir); el 9-sep se cerraron las dos y después nació H4f. La nota del 15-sep que dice "el 9 sigue exacto" no volvió a contar.
+
+---
 ## 1. Contradicciones entre documentos
 
 Cada punto: qué dice uno, qué dice otro, y cuál queda vigente. Empieza por el
@@ -1170,6 +1205,12 @@ cálculo nuevo. Queda pendiente junto con la **parte 3** (pestañas internas, 4.
   negocio (si Santa Rosa desembolsa por pedido o por entrega) para aplicarla.
   Diagnóstico completo en `PARCIALES.md`; también decididas en documento,
   ninguna construida.
+- **Corrección de conteo (16-sep-2026), al armar el índice (§ 0):** el "9" del
+  punto 2 en el primer renglón de esta sección **no** sigue exacto: contando
+  una por una las preguntas que empiezan con ABIERTA son **8** (L8a, H3, H4c,
+  H4f, H5, H6, D-B, D-C). Eran 9 el 5-sep (H4d y H4e abiertas, H4f sin
+  existir); el 9-sep se cerraron H4d y H4e y después nació H4f. Lo vigila
+  `scripts/erp-indice-docs.test.mjs` contra el índice.
 - Este archivo se actualiza cada vez que una pregunta cambie de columna.
 
 ---

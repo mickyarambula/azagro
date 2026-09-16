@@ -30,7 +30,13 @@ Si la decisión es un invariante — algo que **nunca** debe hacerse o que **sie
 
 Ojo: `scripts/erp-permissions.test.mjs` vigila frases exactas de la regla 10. Correr `npm test` después de tocar `CLAUDE.md`.
 
-## 4. Lo que NO se hace
+## 4. Los dos índices
+
+- `ESTADO.md` § 0: la pregunta cambia de fila (ABIERTA → "Resuelta en documento, no construida (Decisión N)") y el conteo entre paréntesis baja en uno.
+- `DECISIONES.md` "Índice por tema": el número nuevo se agrega al tema que le toca (si es de dos temas, en los dos).
+- `npm test` lo vigila (`scripts/erp-indice-docs.test.mjs`): si el índice no cuadra con el cuerpo, falla y dice qué clave sobra o falta.
+
+## 5. Lo que NO se hace
 
 - Contestar una pregunta ABIERTA en código sin el dueño.
 - Reabrir una decisión ya escrita porque parece mejor otra. Se propone como pregunta nueva.

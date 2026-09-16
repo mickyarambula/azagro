@@ -9,7 +9,7 @@ No se lee todo. Se lee lo que la tarea toca, y nada más:
 | Vas a tocar | Lee antes |
 |---|---|
 | Código por primera vez en la sesión | `HANDOFF.md` § Qué es · § Fórmulas vigentes · § Técnico · § Qué no hacer (el resto es bitácora de agosto) |
-| Precio, financiamiento, cartera, mora, el circuito con Santa Rosa | `DISENO_FINANCIAMIENTO.md` entero · `ESTADO.md` § 1 y § 2 · `DECISIONES.md` (buscar el tema) |
+| Precio, financiamiento, cartera, mora, el circuito con Santa Rosa | `DISENO_FINANCIAMIENTO.md` entero · `ESTADO.md` § 0 (el índice) y de ahí solo lo ABIERTO que toque · `DECISIONES.md` (índice por tema, luego `grep 'DECISIÓN N'`) |
 | Cancelar o revertir un documento | `DESHACER.md` · Decisiones 15-25 de `DECISIONES.md` |
 | Recibir / entregar parcial, FV por evento | `PARCIALES.md` § 5 y § 8 |
 | Borrar datos de prueba | `BORRADO-PRUEBAS.md` |
