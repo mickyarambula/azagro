@@ -44,13 +44,18 @@ export async function creditExposure(sql: Sql, companyId: number, partnerId: num
   // Apartado: pedidos a crédito confirmados O entregados (Decisión 47: en
   // bodega propia entregar no factura, y el pedido pasa a `done` al terminar
   // de entregar — sigue apartando hasta que se facture), menos lo ya
-  // facturado de cada uno (facturas vivas del pedido). Nunca negativo por
-  // pedido: uno ya facturado del todo aporta 0 solo.
+  // facturado de cada uno (facturas vivas del pedido) y menos lo CERRADO
+  // CORTO (paso 7, decisión del dueño 16-sep-2026: lo que ya nunca va a
+  // salir ni facturarse deja de ocupar línea — un pedido cerrado no sigue
+  // restando crédito para siempre). Nunca negativo por pedido: uno ya
+  // facturado del todo aporta 0 solo.
   const res = await sql<{ reserved: string }>`
     select coalesce(sum(greatest(0, so.total - coalesce((
       select sum(i.amount) from invoices i
       where i.company_id = so.company_id and i.order_id = so.id and i.kind = 'customer' and i.name like 'FV-%'
         and i.reverses_id is null and i.state <> 'reversed'
+    ), 0) - coalesce((
+      select sum(coalesce(sl.qty_closed_short, 0) * sl.unit_price) from sales_lines sl where sl.so_id = so.id
     ), 0))), 0)::text as reserved
     from sales_orders so
     where so.company_id = ${companyId} and so.partner_id = ${partnerId} and so.state in ('confirmed', 'done')

@@ -184,7 +184,9 @@ test("ficha del pedido: cada entrega viva del panel tiene su botón de revertir,
   const so = src("src/routes/sales.$orderId.tsx");
   assert.ok(so.includes("deliveryEventReversalPreview, deliveryReversalPreview, reverseDelivery, reverseDeliveryEvent"), "importa el camino por evento junto al de siempre");
   const body = fnBody(so, "Ficha");
-  assert.ok(body.includes("const showRevert = canEdit && !e.reversed && (events.length > 1 || state !== \"done\");"), "se apoya en el botón de arriba solo cuando ese sí aplica");
+  // Editada el 16-sep-2026 (paso 7): el botón de siempre exige factura viva, así que una entrega SIN facturar en un
+  // pedido `done` (un solo evento) no tenía cómo revertirse — el botón por evento también aparece cuando no hay FV.
+  assert.ok(body.includes("const showRevert = canEdit && !e.reversed && (events.length > 1 || state !== \"done\" || !e.fv);"), "se apoya en el botón de arriba solo cuando ese sí aplica (un evento, done, facturado)");
   assert.ok(body.includes("load={() => deliveryEventReversalPreview({ data: { soId: id, eventRef: e.eventRef } })}"), "preview por evento");
   assert.ok(body.includes("onConfirm={(reason) => reverseDeliveryEvent({ data: { soId: id, eventRef: e.eventRef, reason } })}"), "reversa por evento");
   assert.ok(body.includes("label={`Revertir ${e.eventRef}`}"), "el botón nombra el evento, no dice solo 'Revertir entrega'");

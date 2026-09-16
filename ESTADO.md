@@ -581,7 +581,7 @@ devolverle al proveedor; son dos cosas distintas, y la reversa de recepción
 (paso 6) no cubre H4c. H4c sigue **ABIERTA**.
 
 ### H4d. Recepciones y entregas parciales (LOGICA h.17)
-**En construcción — pasos 0 a 3 de `PARCIALES.md` construidos y verificados el 15-sep-2026** (recepción parcial con FP por evento, reversa por recepción, entrega parcial con una FV por evento y vencimientos desde la entrega — Decisiones 46, 47, 48, 54; en directo, entregar = facturar en el mismo acto). Faltan los pasos 4 a 7 (reversa por entrega, devolución y P&L con N facturas, límite de crédito por partes, cierre corto). Texto original:
+**En construcción — pasos 0 a 3 de `PARCIALES.md` construidos y verificados el 15-sep-2026** (recepción parcial con FP por evento, reversa por recepción, entrega parcial con una FV por evento y vencimientos desde la entrega — Decisiones 46, 47, 48, 54; en directo, entregar = facturar en el mismo acto). Faltan los pasos 4 a 7 (reversa por entrega, devolución y P&L con N facturas, límite de crédito por partes, cierre corto). **(16-sep-2026: los pasos 4 a 7 también están construidos — bloque completo, `PARCIALES.md` § 8.)** Texto original:
 **RESUELTA EN DOCUMENTO (Decisiones 46 a 54 del dueño, 9-sep-2026), no
 construida.** Diagnóstico completo y plan por pasos en `PARCIALES.md`. En
 corto: una factura por cada entrega (Decisión 46); se puede entregar sin

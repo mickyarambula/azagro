@@ -129,8 +129,9 @@ async function computeDealPnlMulti(
   }
   const expenses = await orderExpenses(sql, companyId, soId);
   const { mora, moraPendiente } = await orderMora(sql, companyId, soId);
-  const pend = await sql<{ product_id: number; code: string; name: string; uom: string; ordered: string; invoiced: string }>`
+  const pend = await sql<{ product_id: number; code: string; name: string; uom: string; ordered: string; closed_short: string; invoiced: string }>`
     select sl.product_id, p.code, p.name, coalesce(sl.uom, p.uom) as uom, sum(sl.qty)::text as ordered,
+      sum(coalesce(sl.qty_closed_short, 0))::text as closed_short,
       (select coalesce(sum(il.qty),0) from invoice_lines il join invoices i on i.id = il.invoice_id
         where i.company_id = ${companyId} and i.order_id = ${soId} and i.kind = 'customer' and i.name like 'FV-%'
           and i.reverses_id is null and i.state <> 'reversed' and il.product_id = sl.product_id)::text as invoiced
@@ -140,7 +141,8 @@ async function computeDealPnlMulti(
     order by min(sl.id)
   `;
   const uninvoiced: DealPnlUninvoiced[] = pend
-    .map((r) => ({ productId: r.product_id, code: r.code, name: r.name, uom: r.uom, qty: Math.round((Number(r.ordered) - Number(r.invoiced)) * 10000) / 10000 }))
+    // Paso 7: lo cerrado corto ya nunca se va a facturar — no es "sin facturar todavía".
+    .map((r) => ({ productId: r.product_id, code: r.code, name: r.name, uom: r.uom, qty: Math.round((Number(r.ordered) - Number(r.closed_short) - Number(r.invoiced)) * 10000) / 10000 }))
     .filter((r) => r.qty > 0.0001);
   return mergeDealPnl(
     parts.map((x) => ({

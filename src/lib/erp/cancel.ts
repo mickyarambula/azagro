@@ -114,7 +114,8 @@ async function chainForPurchase(sql: Sql, companyId: number, poId: number) {
   if (o.state === "done" || receipts.length) {
     blockers.push(
       `${o.name} ya se recibió en bodega${receipts.length ? ` (${receipts.map((r) => r.ref).join(", ")})` : ""}: la mercancía ya entró al inventario. ` +
-        "Eso no se cancela, se revierte: usa «Revertir recepción» en Compras → esa orden.",
+        "Eso no se cancela, se revierte: usa «Revertir recepción» en Compras → esa orden." +
+        (o.state === "confirmed" ? " Si lo que falta ya no va a llegar y lo recibido sí fue real, ciérrala corta: «Cerrar con lo recibido» en Compras (administrador o gerencia)." : ""),
     );
   }
   // Directa / brokeraje: nunca se recibe, pero si su pedido ya se entregó al
@@ -226,7 +227,8 @@ async function chainForSale(sql: Sql, companyId: number, soId: number) {
   if (s.state === "done" || deliveries.length || fvs.length) {
     blockers.push(
       `${s.name} ya se entregó y facturó${fvs.length ? ` (${fvs.map((f) => f.name).join(", ")})` : ""}: la mercancía ya salió y la factura ya existe. ` +
-        "Eso no se cancela, se revierte: usa «Revertir entrega» en el pedido.",
+        "Eso no se cancela, se revierte: usa «Revertir entrega» en el pedido." +
+        (s.state === "confirmed" ? " Si lo que falta ya no va a salir y lo entregado sí fue real, ciérralo corto: «Cerrar con lo entregado» en el pedido (administrador o gerencia)." : ""),
     );
   }
   const money = await moneyLinked(sql, companyId, "so_id", s.id);

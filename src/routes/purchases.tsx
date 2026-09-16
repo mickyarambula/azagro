@@ -8,7 +8,9 @@ import { SearchSelect, asOpts } from "@/components/search-select";
 import { SendButton } from "@/components/send-doc";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
-import { createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
+import { closeShortPurchase, createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
+import { CloseShortButton } from "@/components/close-short";
+import { useAccess } from "@/lib/access";
 import { CancelChainButton, ReceiptReversalButton } from "@/components/cancel-doc";
 import { PartialQtyDialog } from "@/components/partial-qty-dialog";
 import { cancelChainPreview, cancelPurchaseOrderChain } from "@/lib/erp/cancel";
@@ -85,6 +87,37 @@ export const Route = createFileRoute("/purchases")({
   }),
   component: Page,
 });
+
+/**
+ * BLOQUE DE PARCIALES, paso 7: «Cerrar con lo recibido». Componente aparte
+ * porque `Page` renderiza el AppShell y `useAccess()` solo tiene contexto
+ * DENTRO de él; aquí sí. Solo admin / gerencia, solo OC confirmada (no
+ * directa) con algo recibido y algo pendiente.
+ */
+function CloseShortPurchaseButton(props: {
+  o: { id: number; name: string; state: string; fulfill_kind: string };
+  qlines: Array<{ product: string; uom: string; qty: string; qty_received: string; qty_closed_short?: string }>;
+  onDone: () => void | Promise<void>;
+}) {
+  const { role } = useAccess();
+  const { o, qlines } = props;
+  const show =
+    (role === "admin" || role === "gerencia") && o.state === "confirmed" && o.fulfill_kind !== "direct" &&
+    qlines.some((l) => Number(l.qty_received) > 0.0001) && qlines.some((l) => Number(l.qty) - Number(l.qty_received) > 0.0001 + Number(l.qty_closed_short ?? 0));
+  if (!show) return null;
+  return (
+    <CloseShortButton
+      kind="purchase"
+      title="la orden de compra"
+      number={o.name}
+      pending={qlines
+        .filter((l) => Number(l.qty) - Number(l.qty_received) > 0.0001 + Number(l.qty_closed_short ?? 0))
+        .map((l) => ({ product: l.product, uom: l.uom, pending: Number(l.qty) - Number(l.qty_received) - Number(l.qty_closed_short ?? 0) }))}
+      onConfirm={(reason) => closeShortPurchase({ data: { poId: o.id, reason } })}
+      onDone={props.onDone}
+    />
+  );
+}
 
 function Page() {
   const { tab } = Route.useSearch();
@@ -392,7 +425,9 @@ function Page() {
                         {o.fulfill_kind === "direct"
                           ? "En camino"
                           : o.state === "done"
-                            ? "Recibida"
+                            ? o.closed_short_reason
+                              ? "Recibida (cerrada corta)"
+                              : "Recibida"
                             : o.state === "cancelled"
                               ? "Cancelada"
                               : "Por recibir"}
@@ -485,12 +520,13 @@ function Page() {
                             onDone={load}
                           />
                         )}
+                        <CloseShortPurchaseButton o={o} qlines={qlines} onDone={load} />
                         {o.state !== "done" && o.state !== "cancelled" && o.fulfill_kind !== "direct" && (
                           <ReceivePartialButton
                             poName={o.name}
                             pending={qlines
-                              .filter((l) => Number(l.qty) - Number(l.qty_received) > 0.0001)
-                              .map((l) => ({ lineId: l.id, product: l.product, uom: l.uom, pending: Number(l.qty) - Number(l.qty_received) }))}
+                              .filter((l) => Number(l.qty) - Number(l.qty_received) > 0.0001 + Number(l.qty_closed_short ?? 0))
+                              .map((l) => ({ lineId: l.id, product: l.product, uom: l.uom, pending: Number(l.qty) - Number(l.qty_received) - Number(l.qty_closed_short ?? 0) }))}
                             onReceive={async (recvLines) => {
                               await receivePurchase({ data: recvLines ? { poId: o.id, lines: recvLines } : { poId: o.id } });
                               await load();

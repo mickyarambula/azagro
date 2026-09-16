@@ -8,7 +8,7 @@ import { BANK_CATALOG, CREDIT_POLICY_CATALOG, TIIE_SEED } from "@/lib/erp/catalo
 import { syncCompaqCatalogs, linkSeedDestinos } from "@/lib/erp/compaq";
 import { rememberTrade } from "@/lib/erp/links";
 import { seedAcl, type AppRole } from "@/lib/erp/acl";
-import { activeMember, assertCan, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
+import { activeMember, assertCan, canRevert, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
 import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate, requireRate } from "@/lib/erp/credit";
 import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
@@ -930,7 +930,7 @@ export const listInventory = createServerFn({ method: "GET" })
       pending: string;
     }>`
       select pl.product_id, p.code as product_code, p.name as product_name, p.uom,
-        po.name as po_name, l.name as location, (pl.qty - pl.qty_received)::text as pending
+        po.name as po_name, l.name as location, (pl.qty - pl.qty_received - coalesce(pl.qty_closed_short,0))::text as pending
       from purchase_lines pl
       join purchase_orders po on po.id = pl.po_id
       join products p on p.id = pl.product_id
@@ -938,7 +938,7 @@ export const listInventory = createServerFn({ method: "GET" })
       where po.company_id = ${m.company_id}
         and po.state not in ('done','cancelled')
         and coalesce(po.fulfill_kind,'inventory') <> 'direct'
-        and pl.qty - pl.qty_received > 0.0001
+        and pl.qty - pl.qty_received - coalesce(pl.qty_closed_short,0) > 0.0001
       order by po.id desc
     `;
     const outgoing = await sql<{
@@ -951,7 +951,7 @@ export const listInventory = createServerFn({ method: "GET" })
       pending: string;
     }>`
       select sl.product_id, p.code as product_code, p.name as product_name, p.uom,
-        s.name as so_name, l.name as location, (sl.qty - sl.qty_delivered)::text as pending
+        s.name as so_name, l.name as location, (sl.qty - sl.qty_delivered - coalesce(sl.qty_closed_short,0))::text as pending
       from sales_lines sl
       join sales_orders s on s.id = sl.so_id
       join products p on p.id = sl.product_id
@@ -959,7 +959,7 @@ export const listInventory = createServerFn({ method: "GET" })
       where s.company_id = ${m.company_id}
         and s.state = 'confirmed'
         and coalesce(s.route_kind,'own') = 'own'
-        and sl.qty - sl.qty_delivered > 0.0001
+        and sl.qty - sl.qty_delivered - coalesce(sl.qty_closed_short,0) > 0.0001
       order by s.id desc
     `;
     const rawMismatch = await sql<{
@@ -1103,6 +1103,7 @@ export const listPurchases = createServerFn({ method: "GET" })
       location: string;
       total: string;
       currency: string;
+      closed_short_reason: string | null;
       fulfill_kind: string;
       so_id: number | null;
       so_name: string | null;
@@ -1110,6 +1111,7 @@ export const listPurchases = createServerFn({ method: "GET" })
       rfq_name: string | null;
     }>`
       select po.id, po.name, po.partner_id, pt.name as partner, po.date::text, po.state, l.name as location, po.total::text, po.currency,
+        po.closed_short_reason,
         coalesce(po.fulfill_kind,'inventory') as fulfill_kind,
         po.so_id, so.name as so_name, po.rfq_id, v.name as rfq_name
       from purchase_orders po
@@ -1126,11 +1128,12 @@ export const listPurchases = createServerFn({ method: "GET" })
       product: string;
       qty: string;
       qty_received: string;
+      qty_closed_short: string;
       unit_price: string;
       uom: string;
       deliver_to: string;
     }>`
-      select pl.id, pl.po_id, (p.code || ' — ' || p.name) as product, pl.qty::text, pl.qty_received::text, pl.unit_price::text,
+      select pl.id, pl.po_id, (p.code || ' — ' || p.name) as product, pl.qty::text, pl.qty_received::text, coalesce(pl.qty_closed_short,0)::text as qty_closed_short, pl.unit_price::text,
         coalesce(pl.uom, p.uom) as uom, coalesce(pl.deliver_to,'') as deliver_to
       from purchase_lines pl
       join products p on p.id = pl.product_id
@@ -1331,6 +1334,32 @@ export const receivePurchase = createServerFn({ method: "POST" })
       });
       return { ok: true, fp: r.fp, eventRef: r.eventRef };
     }
+    // Paso 7: si alguna partida ya se cerró corto, "todo lo pendiente" es lo
+    // pendiente SIN lo cerrado, y va por partidas (el camino por evento, que
+    // conoce la casilla). Una OC sin cierre corto sigue el camino de siempre.
+    const closed = await sql<{ id: number; pending: string }>`
+      select id, (qty - coalesce(qty_received,0) - coalesce(qty_closed_short,0))::text as pending
+      from purchase_lines where po_id = ${po[0].id} and coalesce(qty_closed_short,0) > 0
+    `;
+    if (closed.length) {
+      const all = await sql<{ id: number; pending: string }>`
+        select id, (qty - coalesce(qty_received,0) - coalesce(qty_closed_short,0))::text as pending
+        from purchase_lines where po_id = ${po[0].id} order by id
+      `;
+      const pendLines = all.map((l) => ({ lineId: l.id, qty: Number(l.pending) })).filter((l) => l.qty > 0.0001);
+      if (!pendLines.length) throw new Error("No queda nada pendiente por recibir en esta orden (lo demás se cerró corto).");
+      const r = await receivePartial(sql, { companyId: m.company_id, userId: context.userId, poId: po[0].id, poName: po[0].name, locationId: po[0].location_id, lines: pendLines });
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "recibir",
+        entity: "purchase",
+        entityId: po[0].id,
+        name: po[0].name,
+        detail: `Recepción ${r.eventRef} de lo pendiente sin lo cerrado corto${r.fp ? ` · nace ${r.fp} por pagar` : ""}`,
+      });
+      return { ok: true, fp: r.fp, eventRef: r.eventRef };
+    }
     const lines = await sql<{ id: number; product_id: number; qty: string; qty_received: string; unit_price: string }>`
       select id, product_id, qty::text, qty_received::text, unit_price::text from purchase_lines where po_id = ${po[0].id}
     `;
@@ -1397,13 +1426,14 @@ export async function receivePartial(
 
   const received: Array<{ productId: number; qty: number; unitPrice: number }> = [];
   for (const l of opts.lines) {
-    const line = await sql<{ id: number; product_id: number; qty: string; qty_received: string; unit_price: string }>`
-      select id, product_id, qty::text, qty_received::text, unit_price::text from purchase_lines
+    const line = await sql<{ id: number; product_id: number; qty: string; qty_received: string; qty_closed_short: string; unit_price: string }>`
+      select id, product_id, qty::text, qty_received::text, coalesce(qty_closed_short,0)::text as qty_closed_short, unit_price::text from purchase_lines
       where id = ${l.lineId} and po_id = ${opts.poId}
       for update
     `;
     if (!line[0]) throw new Error("Esa partida no está en la orden");
-    const pending = Number(line[0].qty) - Number(line[0].qty_received);
+    // Paso 7: lo cerrado corto no se recibe (ya nunca va a llegar).
+    const pending = Number(line[0].qty) - Number(line[0].qty_received) - Number(line[0].qty_closed_short);
     if (l.qty > pending + 0.0001) {
       throw new Error(`No puedes recibir más de lo pendiente (${pending}) en ${line[0].product_id}`);
     }
@@ -1423,7 +1453,7 @@ export async function receivePartial(
   }
 
   const remaining = await sql<{ n: number }>`
-    select count(*)::int as n from purchase_lines where po_id = ${opts.poId} and qty_received >= qty - 0.0001
+    select count(*)::int as n from purchase_lines where po_id = ${opts.poId} and qty_received >= qty - 0.0001 - coalesce(qty_closed_short,0)
   `;
   const total = await sql<{ n: number }>`select count(*)::int as n from purchase_lines where po_id = ${opts.poId}`;
   if ((remaining[0]?.n ?? 0) === (total[0]?.n ?? 0)) {
@@ -1656,11 +1686,13 @@ export const deliverSale = createServerFn({ method: "POST" })
     if (so[0].state !== "confirmed") throw new Error("Confirma el pedido antes de entregar");
     let lines = data.lines ?? [];
     if (!lines.length) {
-      const pend = await sql<{ id: number; qty: string; qty_delivered: string }>`
-        select id, qty::text, coalesce(qty_delivered,0)::text as qty_delivered from sales_lines where so_id = ${so[0].id} order by id
+      const pend = await sql<{ id: number; qty: string; qty_delivered: string; qty_closed_short: string }>`
+        select id, qty::text, coalesce(qty_delivered,0)::text as qty_delivered, coalesce(qty_closed_short,0)::text as qty_closed_short
+        from sales_lines where so_id = ${so[0].id} order by id
       `;
+      // Paso 7: lo cerrado corto ya nunca va a salir — no es pendiente.
       lines = pend
-        .map((l) => ({ lineId: l.id, qty: Number(l.qty) - Number(l.qty_delivered) }))
+        .map((l) => ({ lineId: l.id, qty: Number(l.qty) - Number(l.qty_delivered) - Number(l.qty_closed_short) }))
         .filter((l) => l.qty > 0.0001);
     }
     if (!lines.length) throw new Error("No queda nada pendiente por entregar en este pedido");
@@ -1718,13 +1750,14 @@ export async function deliverPartial(
 
   const delivered: DeliveredLine[] = [];
   for (const l of opts.lines) {
-    const line = await sql<{ id: number; product_id: number; qty: string; qty_delivered: string; unit_price: string }>`
-      select id, product_id, qty::text, coalesce(qty_delivered,0)::text as qty_delivered, unit_price::text
+    const line = await sql<{ id: number; product_id: number; qty: string; qty_delivered: string; qty_closed_short: string; unit_price: string }>`
+      select id, product_id, qty::text, coalesce(qty_delivered,0)::text as qty_delivered, coalesce(qty_closed_short,0)::text as qty_closed_short, unit_price::text
       from sales_lines where id = ${l.lineId} and so_id = ${so[0].id}
       for update
     `;
     if (!line[0]) throw new Error("Esa partida no está en el pedido");
-    const pending = Number(line[0].qty) - Number(line[0].qty_delivered);
+    // Paso 7: lo cerrado corto no se entrega (ya nunca va a salir).
+    const pending = Number(line[0].qty) - Number(line[0].qty_delivered) - Number(line[0].qty_closed_short);
     if (l.qty > pending + 0.0001) {
       throw new Error(`No puedes entregar más de lo pendiente (${pending}) en la partida ${line[0].product_id}`);
     }
@@ -1745,7 +1778,7 @@ export async function deliverPartial(
   }
 
   const pend = await sql<{ n: number }>`
-    select count(*)::int as n from sales_lines where so_id = ${so[0].id} and qty_delivered < qty - 0.0001
+    select count(*)::int as n from sales_lines where so_id = ${so[0].id} and qty_delivered < qty - 0.0001 - coalesce(qty_closed_short,0)
   `;
   const done = (pend[0]?.n ?? 0) === 0;
   if (done) await sql`update sales_orders set state = 'done' where id = ${so[0].id}`;
@@ -2050,6 +2083,151 @@ export const listDeliveryEvents = createServerFn({ method: "POST" })
       reversed: e.reversed,
       lines: lines.filter((l) => l.event_ref === e.event_ref).map((l) => ({ code: l.code, name: l.name, uom: l.uom, qty: Number(l.qty) })),
     }));
+  });
+
+/**
+ * BLOQUE DE PARCIALES, paso 7 (Decisión 50): cerrar corto un pedido — lo
+ * pendiente que YA NUNCA va a salir se cierra con motivo obligatorio (A5) y
+ * queda en `qty_closed_short` por partida; lo ya entregado y facturado no se
+ * toca. Con `pendiente = qty − entregado − cerrado_corto = 0` en todas las
+ * partidas el pedido pasa a `done` — un estado terminal normal, no un
+ * atasco (destraba PARCIALES.md § 4.1 sin deshacer nada). Solo admin /
+ * gerencia: es un juicio que no se deshace con un botón, como revertir.
+ * Sin `lines` cierra todo lo pendiente; con `lines`, solo esas cantidades.
+ */
+export const closeShortSale = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({
+    soId: z.number(),
+    reason: z.string().trim().min(1, "Escribe el motivo"),
+    lines: z.array(z.object({ lineId: z.number(), qty: z.number().positive() })).optional(),
+  }))
+  .handler(async ({ context, data }) => {
+    return withTx(async (sql) => {
+      const m = await requireCompany(sql, context.userId);
+      const me = await activeMember(sql, context.userId);
+      if (!canRevert(me.role)) throw new Error("Solo un administrador o gerencia puede cerrar corto un pedido: es una decisión que no se deshace.");
+      const so = await sql<{ id: number; name: string; state: string }>`
+        select id, name, state from sales_orders where id = ${data.soId} and company_id = ${m.company_id} for update
+      `;
+      if (!so[0]) throw new Error("Pedido no encontrado");
+      if (so[0].state !== "confirmed") {
+        throw new Error(so[0].state === "done" ? `${so[0].name} ya está completo: no hay pendiente que cerrar.` : `${so[0].name} no está confirmado: no hay pendiente que cerrar.`);
+      }
+      const lines = await sql<{ id: number; code: string; qty: string; qty_delivered: string; qty_closed_short: string }>`
+        select sl.id, p.code, sl.qty::text, coalesce(sl.qty_delivered,0)::text as qty_delivered, coalesce(sl.qty_closed_short,0)::text as qty_closed_short
+        from sales_lines sl join products p on p.id = sl.product_id where sl.so_id = ${so[0].id} order by sl.id
+      `;
+      const pendingOf = (l: (typeof lines)[number]) => Math.max(0, Number(l.qty) - Number(l.qty_delivered) - Number(l.qty_closed_short));
+      const targets = data.lines?.length
+        ? data.lines.map((x) => {
+            const l = lines.find((y) => y.id === x.lineId);
+            if (!l) throw new Error("Esa partida no está en el pedido");
+            if (x.qty > pendingOf(l) + 0.0001) throw new Error(`No puedes cerrar más de lo pendiente (${pendingOf(l)}) en ${l.code}.`);
+            return { line: l, qty: x.qty };
+          })
+        : lines.filter((l) => pendingOf(l) > 0.0001).map((l) => ({ line: l, qty: pendingOf(l) }));
+      if (!targets.length) throw new Error(`${so[0].name} no tiene pendiente que cerrar.`);
+      if (!lines.some((l) => Number(l.qty_delivered) > 0.0001)) {
+        throw new Error(`${so[0].name} no tiene nada entregado: cerrar corto es para lo que falta después de entregar algo. Si no va a salir nada, cancela el pedido.`);
+      }
+      for (const t of targets) {
+        await sql`update sales_lines set qty_closed_short = coalesce(qty_closed_short,0) + ${t.qty} where id = ${t.line.id}`;
+      }
+      const pend = await sql<{ n: number }>`
+        select count(*)::int as n from sales_lines
+        where so_id = ${so[0].id} and coalesce(qty_delivered,0) + coalesce(qty_closed_short,0) < qty - 0.0001
+      `;
+      const done = (pend[0]?.n ?? 0) === 0;
+      await sql`
+        update sales_orders set closed_short_at = now(), closed_short_by = ${context.userId}, closed_short_reason = ${data.reason}
+        where id = ${so[0].id} and company_id = ${m.company_id}
+      `;
+      if (done) await sql`update sales_orders set state = 'done' where id = ${so[0].id} and company_id = ${m.company_id}`;
+      const closed = targets.map((t) => ({ lineId: t.line.id, code: t.line.code, qty: t.qty }));
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "cerrar-corto",
+        entity: "sale",
+        entityId: so[0].id,
+        name: so[0].name,
+        detail: `Cerrado sin salir: ${closed.map((c) => `${c.code} ${c.qty}`).join(", ")} · ${done ? "pedido completo (entregado)" : "queda pendiente"} · lo entregado y facturado queda intacto · ${data.reason}`,
+      });
+      return { ok: true as const, closed, done };
+    });
+  });
+
+/**
+ * Paso 7 (Decisión 49): cerrar corto una orden de compra — lo que el
+ * proveedor ya no va a mandar. Igual que el pedido: `qty_closed_short` por
+ * partida, motivo obligatorio, `done` cuando nada queda pendiente, solo
+ * admin / gerencia. Una OC directa / brokeraje nunca se recibe (Decisión 29):
+ * se cierra con su pedido, no por aquí.
+ */
+export const closeShortPurchase = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({
+    poId: z.number(),
+    reason: z.string().trim().min(1, "Escribe el motivo"),
+    lines: z.array(z.object({ lineId: z.number(), qty: z.number().positive() })).optional(),
+  }))
+  .handler(async ({ context, data }) => {
+    return withTx(async (sql) => {
+      const m = await requireCompany(sql, context.userId);
+      const me = await activeMember(sql, context.userId);
+      if (!canRevert(me.role)) throw new Error("Solo un administrador o gerencia puede cerrar corto una orden de compra: es una decisión que no se deshace.");
+      const po = await sql<{ id: number; name: string; state: string; fulfill_kind: string }>`
+        select id, name, state, coalesce(fulfill_kind,'inventory') as fulfill_kind from purchase_orders
+        where id = ${data.poId} and company_id = ${m.company_id} for update
+      `;
+      if (!po[0]) throw new Error("Orden de compra no encontrada");
+      if (po[0].fulfill_kind === "direct") throw new Error(`${po[0].name} es directa / brokeraje: nunca se recibe en bodega, no hay pendiente de recepción que cerrar.`);
+      if (po[0].state !== "confirmed") {
+        throw new Error(po[0].state === "done" ? `${po[0].name} ya está completa: no hay pendiente que cerrar.` : `${po[0].name} no está confirmada: no hay pendiente que cerrar.`);
+      }
+      const lines = await sql<{ id: number; code: string; qty: string; qty_received: string; qty_closed_short: string }>`
+        select pl.id, p.code, pl.qty::text, coalesce(pl.qty_received,0)::text as qty_received, coalesce(pl.qty_closed_short,0)::text as qty_closed_short
+        from purchase_lines pl join products p on p.id = pl.product_id where pl.po_id = ${po[0].id} order by pl.id
+      `;
+      const pendingOf = (l: (typeof lines)[number]) => Math.max(0, Number(l.qty) - Number(l.qty_received) - Number(l.qty_closed_short));
+      const targets = data.lines?.length
+        ? data.lines.map((x) => {
+            const l = lines.find((y) => y.id === x.lineId);
+            if (!l) throw new Error("Esa partida no está en la orden");
+            if (x.qty > pendingOf(l) + 0.0001) throw new Error(`No puedes cerrar más de lo pendiente (${pendingOf(l)}) en ${l.code}.`);
+            return { line: l, qty: x.qty };
+          })
+        : lines.filter((l) => pendingOf(l) > 0.0001).map((l) => ({ line: l, qty: pendingOf(l) }));
+      if (!targets.length) throw new Error(`${po[0].name} no tiene pendiente que cerrar.`);
+      if (!lines.some((l) => Number(l.qty_received) > 0.0001)) {
+        throw new Error(`${po[0].name} no tiene nada recibido: cerrar corto es para lo que falta después de recibir algo. Si no va a llegar nada, cancela la orden.`);
+      }
+      for (const t of targets) {
+        await sql`update purchase_lines set qty_closed_short = coalesce(qty_closed_short,0) + ${t.qty} where id = ${t.line.id}`;
+      }
+      const pend = await sql<{ n: number }>`
+        select count(*)::int as n from purchase_lines
+        where po_id = ${po[0].id} and coalesce(qty_received,0) + coalesce(qty_closed_short,0) < qty - 0.0001
+      `;
+      const done = (pend[0]?.n ?? 0) === 0;
+      await sql`
+        update purchase_orders set closed_short_at = now(), closed_short_by = ${context.userId}, closed_short_reason = ${data.reason}
+        where id = ${po[0].id} and company_id = ${m.company_id}
+      `;
+      if (done) await sql`update purchase_orders set state = 'done' where id = ${po[0].id} and company_id = ${m.company_id}`;
+      const closed = targets.map((t) => ({ lineId: t.line.id, code: t.line.code, qty: t.qty }));
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "cerrar-corto",
+        entity: "purchase",
+        entityId: po[0].id,
+        name: po[0].name,
+        detail: `Cerrado sin llegar: ${closed.map((c) => `${c.code} ${c.qty}`).join(", ")} · ${done ? "orden completa (recibida)" : "queda pendiente"} · lo recibido y su deuda quedan intactos · ${data.reason}`,
+      });
+      return { ok: true as const, closed, done };
+    });
   });
 
 export const returnSale = createServerFn({ method: "POST" })

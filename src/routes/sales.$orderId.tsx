@@ -8,7 +8,8 @@ import { Expediente } from "@/components/expediente";
 import { DocFiles } from "@/components/doc-files";
 import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
-import { deliverSale, invoiceDelivery, listDeliveryEvents, receivePurchase, returnProposal, returnSale } from "@/lib/azagro";
+import { closeShortSale, deliverSale, invoiceDelivery, listDeliveryEvents, receivePurchase, returnProposal, returnSale } from "@/lib/azagro";
+import { CloseShortButton } from "@/components/close-short";
 import { PartialQtyDialog } from "@/components/partial-qty-dialog";
 import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
 import { CancelButton, CancelChainButton, DeliveryReversalButton, ReturnReversalButton } from "@/components/cancel-doc";
@@ -45,6 +46,7 @@ function Ficha() {
   const [state, setState] = useState("draft");
   const [cancelledAt, setCancelledAt] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState("");
+  const [closedShort, setClosedShort] = useState<{ at: string | null; reason: string }>({ at: null, reason: "" });
   const [invoices, setInvoices] = useState<Array<{ id: number; name: string; due_date: string; residual: string; state: string; reverses_id: number | null }>>([]);
   const [purchases, setPurchases] = useState<
     Array<{ id: number; name: string; partner: string; state: string; total: string; fulfill_kind: string }>
@@ -65,7 +67,7 @@ function Ficha() {
   const [obs, setObs] = useState("");
   const [printGuia, setPrintGuia] = useState(false);
   const [trail, setTrail] = useState("");
-  const [sold, setSold] = useState<Array<{ id: number; product_id: number; code: string; name: string; qty: string; qty_delivered: string; qty_returned: string; unit_price: string; uom: string }>>([]);
+  const [sold, setSold] = useState<Array<{ id: number; product_id: number; code: string; name: string; qty: string; qty_delivered: string; qty_returned: string; qty_closed_short?: string; unit_price: string; uom: string }>>([]);
   const [retQty, setRetQty] = useState<Record<number, number>>({});
   const [retReason, setRetReason] = useState("");
   // BLOQUE DE PARCIALES, paso 5 (Decisión 52): con dos o más facturas vivas,
@@ -102,6 +104,7 @@ function Ficha() {
     setState(o.state);
     setCancelledAt(o.cancelled_at);
     setCancelReason(o.cancel_reason || "");
+    setClosedShort({ at: o.closed_short_at ?? null, reason: o.closed_short_reason || "" });
     setInvoices(d.invoices);
     setPurchases(d.purchases ?? []);
     setSold(d.lines);
@@ -273,7 +276,7 @@ function Ficha() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h1 className="flex items-center gap-2 text-lg font-semibold">
           {form.name}
-          <span className="erp-chip">{state === "confirmed" && sold.some((l) => num(l.qty_delivered) > 0.0001) ? "Entregado parcial" : stateLabel(state)}</span>
+          <span className="erp-chip">{state === "confirmed" && sold.some((l) => num(l.qty_delivered) > 0.0001) ? "Entregado parcial" : state === "done" && closedShort.at ? "Entregado (cerrado corto)" : stateLabel(state)}</span>
         </h1>
         <div className="flex flex-wrap gap-2">
           <Link to="/sales" search={{ tab: "todos", q: "" }} className="erp-btn grid place-items-center">
@@ -315,8 +318,8 @@ function Ficha() {
               busyLabel="Entregando…"
               disabled={busy}
               pending={sold
-                .filter((l) => num(l.qty) - num(l.qty_delivered) > 0.0001)
-                .map((l) => ({ lineId: l.id, product: `${l.code} ${l.name}`, uom: l.uom, pending: num(l.qty) - num(l.qty_delivered) }))}
+                .filter((l) => num(l.qty) - num(l.qty_delivered) > 0.0001 + num(l.qty_closed_short ?? 0))
+                .map((l) => ({ lineId: l.id, product: `${l.code} ${l.name}`, uom: l.uom, pending: num(l.qty) - num(l.qty_delivered) - num(l.qty_closed_short ?? 0) }))}
               onConfirm={deliverLines}
             />
           )}
@@ -331,6 +334,18 @@ function Ficha() {
                 onDone={() => navigate({ to: "/sales", search: { tab: "todos", q: "" } })}
               />
             </>
+          )}
+          {(role === "admin" || role === "gerencia") && state === "confirmed" && sold.some((l) => num(l.qty_delivered) > 0.0001) && sold.some((l) => num(l.qty) - num(l.qty_delivered) > 0.0001 + num(l.qty_closed_short ?? 0)) && (
+            <CloseShortButton
+              kind="sale"
+              title="el pedido"
+              number={form.name}
+              pending={sold
+                .filter((l) => num(l.qty) - num(l.qty_delivered) > 0.0001 + num(l.qty_closed_short ?? 0))
+                .map((l) => ({ product: `${l.code} ${l.name}`, uom: l.uom, pending: num(l.qty) - num(l.qty_delivered) - num(l.qty_closed_short ?? 0) }))}
+              onConfirm={(reason) => closeShortSale({ data: { soId: id, reason } })}
+              onDone={load}
+            />
           )}
           {canEdit && state === "done" && (
             <DeliveryReversalButton
@@ -432,10 +447,12 @@ function Ficha() {
               // BLOQUE DE PARCIALES, paso 4, mitad B: revertir UNA entrega, no
               // el pedido completo. El botón de siempre (arriba, "Revertir
               // entrega") ya cubre el único caso que no necesita esto: un solo
-              // evento y el pedido ya `done`. En todo lo demás — 2+ eventos, o
-              // un evento con el pedido todavía pendiente — solo este botón
-              // llega: chainForDelivery (el de siempre) no exige `done`.
-              const showRevert = canEdit && !e.reversed && (events.length > 1 || state !== "done");
+              // evento, el pedido ya `done` y la entrega FACTURADA (ese camino
+              // exige factura viva). En todo lo demás — 2+ eventos, pedido
+              // todavía pendiente, o entrega sin facturar (Decisión 47) — solo
+              // este botón llega. (Paso 7: un pedido entregado sin facturar no
+              // tenía cómo revertirse; candado sin salida, cerrado aquí.)
+              const showRevert = canEdit && !e.reversed && (events.length > 1 || state !== "done" || !e.fv);
               return (
                 <li key={e.eventRef} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
                   <span>
@@ -473,6 +490,12 @@ function Ficha() {
         <p className="mb-3 rounded-md border border-line bg-cream px-3 py-2 text-[12px] text-ink-soft">
           Cancelado{cancelledAt ? ` el ${cancelledAt.slice(0, 10)}` : ""}
           {cancelReason ? ` · Motivo: ${cancelReason}` : ""}
+        </p>
+      ) : null}
+      {closedShort.at ? (
+        <p className="mb-3 rounded-md border border-line bg-cream px-3 py-2 text-[12px] text-ink-soft">
+          Cerrado corto el {closedShort.at.slice(0, 10)}: lo pendiente ya no va a salir; lo entregado y facturado queda como está.
+          {closedShort.reason ? ` · Motivo: ${closedShort.reason}` : ""}
         </p>
       ) : null}
       {error && <p className="mb-3 text-sm text-danger">{error}</p>}

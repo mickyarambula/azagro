@@ -538,7 +538,7 @@ export const reverseReceiptEvent = createServerFn({ method: "POST" })
         `;
       }
       const pendiente = await tx<{ n: number }>`
-        select count(*)::int as n from purchase_lines where po_id = ${data.poId} and qty_received < qty - 0.0001
+        select count(*)::int as n from purchase_lines where po_id = ${data.poId} and qty_received < qty - 0.0001 - coalesce(qty_closed_short,0)
       `;
       if ((pendiente[0]?.n ?? 0) > 0) {
         await tx`update purchase_orders set state = 'confirmed' where id = ${data.poId} and company_id = ${companyId}`;

@@ -214,6 +214,8 @@ export const getOrder = createServerFn({ method: "POST" })
       circuit_code: string | null;
       cancelled_at: string | null;
       cancel_reason: string | null;
+      closed_short_at: string | null;
+      closed_short_reason: string | null;
     }>`
       select id, name, partner_id, date::text, state, location_id, notes, total::text, currency, fx_rate::text,
         delivery_to, term_kind, invoice_days, credit_days, invoice_due::text, credit_due::text,
@@ -226,7 +228,8 @@ export const getOrder = createServerFn({ method: "POST" })
         coalesce(guia_sign_name,'') as guia_sign_name,
         coalesce(guia_obs,'') as guia_obs,
         quote_id, accepted_offer, circuit_code,
-        cancelled_at::text, cancel_reason
+        cancelled_at::text, cancel_reason,
+        closed_short_at::text, closed_short_reason
       from sales_orders where id = ${data.id} and company_id = ${companyId}
     `;
     if (!rows[0]) throw new Error("Pedido no encontrado");
@@ -240,13 +243,15 @@ export const getOrder = createServerFn({ method: "POST" })
       qty: string;
       qty_delivered: string;
       qty_returned: string;
+      qty_closed_short: string;
       unit_price: string;
       uom: string;
       code: string;
       name: string;
     }>`
       select sl.id, sl.product_id, sl.qty::text, coalesce(sl.qty_delivered,0)::text as qty_delivered,
-        coalesce(sl.qty_returned,0)::text as qty_returned, sl.unit_price::text, sl.uom, p.code, p.name
+        coalesce(sl.qty_returned,0)::text as qty_returned, coalesce(sl.qty_closed_short,0)::text as qty_closed_short,
+        sl.unit_price::text, sl.uom, p.code, p.name
       from sales_lines sl
       join products p on p.id = sl.product_id
       where sl.so_id = ${data.id}

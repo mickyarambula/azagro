@@ -88,9 +88,10 @@ export async function purchaseLineGaps(sql: SqlTag, companyId: number): Promise<
     product_name: string;
     qty: string;
     qty_received: string;
+    qty_closed_short: string;
   }>`
     select pl.id, pl.po_id, po.name as po_name, p.code as product_code, p.name as product_name,
-      pl.qty::text, pl.qty_received::text
+      pl.qty::text, pl.qty_received::text, coalesce(pl.qty_closed_short, 0)::text as qty_closed_short
     from purchase_lines pl
     join purchase_orders po on po.id = pl.po_id
     join products p on p.id = pl.product_id
@@ -98,7 +99,8 @@ export async function purchaseLineGaps(sql: SqlTag, companyId: number): Promise<
   `;
   const out: PurchaseLineGapRow[] = [];
   for (const r of rows) {
-    const g = reconcilePurchaseLine({ qty: Number(r.qty), qtyReceived: Number(r.qty_received) });
+    // Paso 7: lo cerrado corto es parte de la identidad (§ 5), no pendiente.
+    const g = reconcilePurchaseLine({ qty: Number(r.qty), qtyReceived: Number(r.qty_received), cerradaCorta: Number(r.qty_closed_short) });
     if (Math.abs(g.gap) > 0.0001) {
       out.push({ ...g, poId: r.po_id, poName: r.po_name, productCode: r.product_code, productName: r.product_name });
     }
@@ -126,10 +128,12 @@ export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<{ g
     qty: string;
     qty_delivered: string;
     qty_returned: string;
+    qty_closed_short: string;
     invoiced_qty: string;
   }>`
     select sl.id, sl.so_id, so.name as so_name, p.code as product_code, p.name as product_name,
       sl.qty::text, sl.qty_delivered::text, coalesce(sl.qty_returned, 0)::text as qty_returned,
+      coalesce(sl.qty_closed_short, 0)::text as qty_closed_short,
       coalesce((
         select sum(il.qty) from invoice_lines il
         join invoices i on i.id = il.invoice_id
@@ -149,6 +153,7 @@ export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<{ g
       qtyDelivered: Number(r.qty_delivered),
       qtyReturned: Number(r.qty_returned),
       invoicedQty: Number(r.invoiced_qty),
+      cerradaCorta: Number(r.qty_closed_short),
     });
     const row = { ...g, soId: r.so_id, soName: r.so_name, productCode: r.product_code, productName: r.product_name };
     if (Math.abs(g.gap) > 0.0001 || g.overInvoiced) gaps.push(row);
