@@ -181,3 +181,245 @@ export function repartirReversa(
   }
   return { restas, sobrante: resto };
 }
+
+/**
+ * BLOQUE DE PARCIALES, paso 5 (Decisión 61): sumar la utilidad de un pedido
+ * con N facturas a partir de la utilidad de cada factura, calculada aparte
+ * por el motor de siempre (cada una con sus propios días, su propia TIIE y su
+ * propia base). Pura: recibe las partes ya calculadas y los datos del pedido
+ * (gastos y mora, que van una sola vez) y devuelve el mismo objeto que da el
+ * motor para una factura, más el desglose por factura y lo que sigue sin
+ * facturar. Nada aquí lee tasas ni tablas: solo suma y reparte.
+ */
+export type PnlLine = {
+  productId: number;
+  code: string;
+  name: string;
+  qty: number;
+  uom: string;
+  saleUnit: number;
+  sale: number;
+  costUnit: number;
+  costSource: string;
+  cogs: number;
+  freightUnit: number;
+  freight: number;
+  other: number;
+  landed: number;
+  finance: number;
+  commission: number;
+  layer1: number;
+  layer2: number;
+  margin: number;
+  marginPct: number;
+  disbursed: number;
+  financierFinance: number;
+  lineCost: number | null;
+  protection: number | null;
+  revenueLine: number;
+  excluded: boolean;
+  excludeReason: string | null;
+};
+
+export type PnlPart = {
+  invoice: { id: number; name: string; eventRef: string | null; date: string; amount: number; residual: number; paidDate: string | null };
+  pnl: {
+    name: string;
+    currency: string;
+    creditDays: number;
+    circuit: string | null;
+    financingBase: string;
+    clientPrice: number;
+    disbursed: number;
+    financierFinance: number;
+    commissionRate: number | null;
+    costRate: number | null;
+    collectionRate: number | null;
+    spread: number;
+    lineCost: number | null;
+    protection: number | null;
+    financeRate: number | null;
+    tiieIssue: number | null;
+    tiieDate: string | null;
+    financialDays: number;
+    daysExceeded: number;
+    lines: PnlLine[];
+    revenue: number;
+    cogs: number;
+    freightQuote: number;
+    other: number;
+    commission: number;
+    layer1: number;
+    layer2: number;
+    finance: number;
+    financeBase: number;
+    discount: number;
+    fxIncome: number;
+  };
+};
+
+const r2 = (n: number) => Math.round(n * 100) / 100;
+const sum = <T,>(xs: T[], f: (x: T) => number) => xs.reduce((s, x) => s + f(x), 0);
+const sumOrNull = <T,>(xs: T[], f: (x: T) => number | null) => (xs.some((x) => f(x) == null) ? null : r2(sum(xs, (x) => f(x) ?? 0)));
+
+export function mergeDealPnl(
+  parts: PnlPart[],
+  order: {
+    expenses: Array<{ id: number; name: string; class: string; amount: number }>;
+    mora: number;
+    moraPendiente: number;
+    uninvoiced: Array<{ productId: number; code: string; name: string; uom: string; qty: number }>;
+  },
+) {
+  if (!parts.length) throw new Error("mergeDealPnl: sin facturas");
+  const last = parts[parts.length - 1]!.pnl;
+  // Partidas: una por producto, sumando lo de cada factura; los unitarios,
+  // ponderados por cantidad. Un producto que ninguna factura llevó no aparece
+  // (queda en `uninvoiced`).
+  const byProduct = new Map<number, PnlLine[]>();
+  for (const p of parts) for (const l of p.pnl.lines) if (l.qty > 0.0000001) byProduct.set(l.productId, [...(byProduct.get(l.productId) ?? []), l]);
+  const lines: PnlLine[] = [...byProduct.entries()].map(([productId, ls]) => {
+    const first = ls[0]!;
+    const excludedLs = ls.filter((l) => l.excluded);
+    const excluded = excludedLs.length > 0;
+    const qty = sum(ls, (l) => l.qty);
+    const sale = sum(ls, (l) => l.sale);
+    const cogs = sum(ls, (l) => l.cogs);
+    const freight = sum(ls, (l) => l.freight);
+    const other = sum(ls, (l) => l.other);
+    const revenueLine = sum(ls, (l) => l.revenueLine);
+    const margin = sum(ls, (l) => l.margin);
+    const included = ls.filter((l) => !l.excluded);
+    const inclQty = sum(included, (l) => l.qty);
+    return {
+      productId,
+      code: first.code,
+      name: first.name,
+      qty,
+      uom: first.uom,
+      saleUnit: qty > 0 ? sale / qty : first.saleUnit,
+      sale,
+      costUnit: excluded ? 0 : inclQty > 0 ? cogs / inclQty : 0,
+      costSource: (included[0] ?? first).costSource,
+      cogs,
+      freightUnit: inclQty > 0 ? freight / inclQty : first.freightUnit,
+      freight,
+      other,
+      landed: sum(ls, (l) => l.landed),
+      finance: sum(ls, (l) => l.finance),
+      commission: sum(ls, (l) => l.commission),
+      layer1: sum(ls, (l) => l.layer1),
+      layer2: sum(ls, (l) => l.layer2),
+      margin,
+      marginPct: !excluded && revenueLine > 0 ? (margin / revenueLine) * 100 : 0,
+      disbursed: sum(ls, (l) => l.disbursed),
+      financierFinance: r2(sum(ls, (l) => l.financierFinance)),
+      lineCost: sumOrNull(ls, (l) => l.lineCost),
+      protection: sumOrNull(ls, (l) => l.protection),
+      revenueLine,
+      excluded,
+      excludeReason: excluded ? [...new Set(excludedLs.map((l) => l.excludeReason ?? ""))].filter(Boolean).join("; ") || null : null,
+    };
+  });
+  const included = lines.filter((l) => !l.excluded);
+  const excludedLines = lines.filter((l) => l.excluded);
+  const excluded = { n: excludedLines.length, venta: sum(excludedLines, (l) => l.sale), motivos: [...new Set(excludedLines.map((l) => l.excludeReason!))] };
+  const expPedido = sum(order.expenses.filter((e) => e.class === "pedido"), (e) => e.amount);
+  const expOther = sum(order.expenses.filter((e) => e.class !== "pedido"), (e) => e.amount);
+  const revenue = sum(included, (l) => l.revenueLine);
+  const clientPrice = sum(included, (l) => l.sale);
+  const disbursed = sum(included, (l) => l.disbursed);
+  const financierFinance = r2(sum(included, (l) => l.financierFinance));
+  const lineCost = sumOrNull(included, (l) => l.lineCost);
+  const protection = sumOrNull(included, (l) => l.protection);
+  const cogs = sum(included, (l) => l.cogs);
+  const freightQuote = sum(included, (l) => l.freight);
+  const otherQuote = sum(included, (l) => l.other);
+  const commission = sum(included, (l) => l.commission);
+  const layer1 = sum(included, (l) => l.layer1);
+  const layer2 = sum(included, (l) => l.layer2);
+  const finance = commission + layer1 + layer2;
+  const financeBase = sum(included, (l) => l.landed);
+  const freight = freightQuote + expPedido;
+  // Pronto pago y diferencial cambiario: los de cada factura, sumados.
+  const discount = sum(parts, (p) => p.pnl.discount);
+  const fxIncome = sum(parts, (p) => p.pnl.fxIncome);
+  const margin = revenue - cogs - freight - otherQuote - expOther;
+  const netProfit = margin + order.mora + fxIncome - finance - discount;
+  // Cuánto se ha cobrado: TODAS las facturas, no solo la última.
+  const fvAmount = sum(parts, (p) => p.invoice.amount);
+  const fvResidual = sum(parts, (p) => p.invoice.residual);
+  const paidRatio = fvAmount > 0 ? Math.min(1, Math.max(0, (fvAmount - fvResidual) / fvAmount)) : 0;
+  const fullyPaid = parts.every((p) => p.invoice.residual <= 0.009);
+  const utilidadDevengada = netProfit;
+  const utilidadRealizada = netProfit - order.moraPendiente;
+  const utilidadCaja = fullyPaid ? utilidadRealizada : 0;
+  const utilidadProporcional = netProfit * paidRatio;
+  const invoices = parts.map((p) => ({
+    ...p.invoice,
+    financialDays: p.pnl.financialDays,
+    daysExceeded: p.pnl.daysExceeded,
+    tiieIssue: p.pnl.tiieIssue,
+    revenue: p.pnl.revenue,
+    cogs: p.pnl.cogs,
+    finance: p.pnl.finance,
+    financierFinance: p.pnl.financierFinance,
+    discount: p.pnl.discount,
+    // La utilidad de ESTA factura, sin gastos ni mora del pedido (van una vez, abajo).
+    netProfit: r2(p.pnl.revenue - p.pnl.cogs - p.pnl.freightQuote - p.pnl.other + p.pnl.fxIncome - p.pnl.finance - p.pnl.discount),
+  }));
+  return {
+    name: last.name,
+    currency: last.currency,
+    creditDays: last.creditDays,
+    circuit: last.circuit,
+    financingBase: last.financingBase,
+    clientPrice,
+    disbursed,
+    financierFinance,
+    commissionRate: last.commissionRate,
+    costRate: last.costRate,
+    collectionRate: last.collectionRate,
+    spread: last.spread,
+    lineCost,
+    protection,
+    financeRate: last.financeRate,
+    tiieIssue: last.tiieIssue,
+    tiieDate: last.tiieDate,
+    financialDays: last.financialDays,
+    daysExceeded: last.daysExceeded,
+    lines,
+    excluded,
+    expenses: order.expenses,
+    revenue,
+    cogs,
+    freight,
+    freightQuote,
+    expPedido,
+    other: otherQuote + expOther,
+    commission,
+    layer1,
+    layer2,
+    finance,
+    financeBase,
+    discount,
+    fxIncome,
+    margin,
+    marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
+    marginAfterFinance: netProfit,
+    netProfit,
+    netProfitPct: revenue > 0 ? (netProfit / revenue) * 100 : 0,
+    mora: order.mora,
+    moraPendiente: order.moraPendiente,
+    moraCobrada: order.mora - order.moraPendiente,
+    paidRatio,
+    fullyPaid,
+    utilidadDevengada,
+    utilidadRealizada,
+    utilidadCaja,
+    utilidadProporcional,
+    multi: true as const,
+    invoices,
+    uninvoiced: order.uninvoiced,
+  };
+}

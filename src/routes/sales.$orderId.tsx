@@ -8,7 +8,7 @@ import { Expediente } from "@/components/expediente";
 import { DocFiles } from "@/components/doc-files";
 import { SendButton } from "@/components/send-doc";
 import { useAccess } from "@/lib/access";
-import { deliverSale, invoiceDelivery, listDeliveryEvents, receivePurchase, returnSale } from "@/lib/azagro";
+import { deliverSale, invoiceDelivery, listDeliveryEvents, receivePurchase, returnProposal, returnSale } from "@/lib/azagro";
 import { PartialQtyDialog } from "@/components/partial-qty-dialog";
 import { cancelOrder, changeOrderTerm, getDealPnl, getOrder, markReceived, orderLookups, saveGuia, saveOrder } from "@/lib/erp/orders";
 import { CancelButton, CancelChainButton, DeliveryReversalButton, ReturnReversalButton } from "@/components/cancel-doc";
@@ -68,6 +68,12 @@ function Ficha() {
   const [sold, setSold] = useState<Array<{ id: number; product_id: number; code: string; name: string; qty: string; qty_delivered: string; qty_returned: string; unit_price: string; uom: string }>>([]);
   const [retQty, setRetQty] = useState<Record<number, number>>({});
   const [retReason, setRetReason] = useState("");
+  // BLOQUE DE PARCIALES, paso 5 (Decisión 52): con dos o más facturas vivas,
+  // a cuál abona la devolución. El sistema propone la factura donde viajó el
+  // producto (`returnProposal`); la persona confirma o cambia; si viajó en
+  // más de una, se pregunta. null = todavía no eligió.
+  const [retFv, setRetFv] = useState<number | null>(null);
+  const [retProposal, setRetProposal] = useState<Awaited<ReturnType<typeof returnProposal>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -153,6 +159,17 @@ function Ficha() {
     });
   }
 
+  const liveFvs = invoices.filter((i) => i.name.startsWith("FV-") && i.state !== "reversed" && !i.reverses_id);
+  useEffect(() => {
+    if (liveFvs.length < 2) { setRetProposal(null); return; }
+    const lines = sold.map((l) => ({ productId: l.product_id, qty: retQty[l.product_id] ?? 0 })).filter((l) => l.qty > 0);
+    let alive = true;
+    void returnProposal({ data: { soId: id, lines } })
+      .then((r) => { if (!alive) return; setRetProposal(r); setRetFv((cur) => (cur != null && r.invoices.some((i) => i.id === cur) ? cur : r.proposedId)); })
+      .catch(() => { if (alive) setRetProposal(null); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, liveFvs.length, JSON.stringify(retQty)]);
   useEffect(() => {
     void load().catch((e) => setError(e instanceof Error ? e.message : "Error"));
   }, [id]);
@@ -590,11 +607,42 @@ function Ficha() {
       )}
       {pnl && (
         <div className="mt-4">
-          {events.filter((e) => e.fv).length > 1 ? (
-            <p className="mb-2 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">
-              Este pedido tiene {events.filter((e) => e.fv).length} facturas vivas. La utilidad de abajo toma solo la última factura — el P&L con varias
-              facturas por pedido es el paso 5 del bloque de parciales, todavía no construido. No se finge el número.
-            </p>
+          {pnl.multi ? (
+            <div className="mb-3 overflow-x-auto erp-card">
+              <p className="px-3 pt-2 text-[12px] text-muted">
+                Este pedido tiene {pnl.invoices.length} factura{pnl.invoices.length === 1 ? "" : "s"}: la utilidad de abajo es la suma factura por factura — cada una con sus propios
+                días, su propia TIIE y solo lo que salió en esa entrega (Decisión 61). Gastos y mora del pedido, una sola vez.
+                {pnl.uninvoiced.length ? ` Sin facturar todavía (fuera del cálculo): ${pnl.uninvoiced.map((u) => `${u.code} ${u.qty} ${u.uom}`).join(", ")}.` : ""}
+              </p>
+              <table className="w-full min-w-[720px] text-left text-[12px]">
+                <thead className="text-[11px] uppercase tracking-wide text-muted">
+                  <tr>
+                    <th className="px-3 py-1 font-medium">Factura</th>
+                    <th className="px-3 py-1 font-medium">Emitida</th>
+                    <th className="px-3 py-1 text-right font-medium">Días</th>
+                    <th className="px-3 py-1 text-right font-medium">TIIE</th>
+                    <th className="px-3 py-1 text-right font-medium">{pnl.financingBase === "costo_margen" ? "A Santa Rosa" : "Venta"}</th>
+                    <th className="px-3 py-1 text-right font-medium">Costo fin.</th>
+                    <th className="px-3 py-1 text-right font-medium">Cobrado</th>
+                    <th className="px-3 py-1 text-right font-medium">Utilidad</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pnl.invoices.map((i) => (
+                    <tr key={i.id} className="border-t border-line">
+                      <td className="px-3 py-1 font-medium">{i.name}{i.eventRef ? <span className="ml-1 text-muted">· {i.eventRef}</span> : null}</td>
+                      <td className="px-3 py-1">{i.date}</td>
+                      <td className="px-3 py-1 text-right tabular-nums">{i.financialDays}{i.daysExceeded > 0 ? ` +${i.daysExceeded} exc.` : ""}</td>
+                      <td className="px-3 py-1 text-right tabular-nums">{i.tiieIssue != null ? pctDe(i.tiieIssue) : "—"}</td>
+                      <td className="px-3 py-1 text-right tabular-nums">{money(i.revenue)}</td>
+                      <td className="px-3 py-1 text-right tabular-nums">{money(pnl.financingBase === "costo_margen" ? i.financierFinance : i.finance)}</td>
+                      <td className="px-3 py-1 text-right tabular-nums">{money(i.amount - i.residual)} / {money(i.amount)}</td>
+                      <td className={`px-3 py-1 text-right tabular-nums ${i.netProfit < 0 ? "text-danger" : ""}`}>{money(i.netProfit)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ) : null}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <PnlKpi
@@ -755,12 +803,13 @@ function Ficha() {
           </ul>
         </div>
       )}
-      {canEdit && state === "done" && sold.some((l) => num(l.qty_delivered) - num(l.qty_returned) > 0.0001) && (
+      {canEdit && (state === "done" || state === "confirmed") && sold.some((l) => num(l.qty_delivered) - num(l.qty_returned) > 0.0001) && (
         <div className="mt-4 erp-card p-4">
           <h2 className="mb-1 text-sm font-semibold">Devolución del cliente</h2>
           <p className="mb-3 text-[12px] text-muted">
             La mercancía vuelve a la bodega de este pedido (kardex DEV). Se emite nota de crédito y baja el saldo de la FV si sigue abierta.
             Pedido directo: no hay movimiento en bodega Azagro, solo la NC.
+            {state === "confirmed" ? " El pedido sigue por entregar: se devuelve solo lo ya entregado." : ""}
           </p>
           <table className="w-full min-w-[520px] text-left text-[13px]">
             <thead className="text-[11px] uppercase tracking-wide text-muted">
@@ -793,6 +842,30 @@ function Ficha() {
               })}
             </tbody>
           </table>
+          {liveFvs.length > 1 ? (
+            <label className="mt-3 grid gap-1 text-[12px] font-medium uppercase tracking-wide text-muted">
+              Abonar a la factura
+              <select className="erp-input" value={retFv ?? ""} onChange={(e) => setRetFv(e.target.value ? Number(e.target.value) : null)}>
+                <option value="">— elige —</option>
+                {(retProposal?.invoices ?? liveFvs.map((i) => ({ id: i.id, name: i.name, date: "", residual: num(i.residual), eventRef: null as string | null, lines: [] as Array<{ productId: number; available: number }> }))).map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.name}
+                    {i.eventRef ? ` · ${i.eventRef}` : ""}
+                    {` · ${i.residual > 0.009 ? `saldo ${moneyIn(i.residual, form.currency)}` : "pagada: el crédito quedaría abierto, no bajaría saldo"}`}
+                    {retProposal ? ` · por devolver ${i.lines.map((l) => { const p = sold.find((x) => x.product_id === l.productId); return `${p?.code ?? l.productId} ${l.available}`; }).join(", ") || "nada"}` : ""}
+                    {retProposal?.proposedId === i.id ? " · propuesta: aquí viajó lo que se devuelve" : ""}
+                  </option>
+                ))}
+              </select>
+              <span className="normal-case tracking-normal">
+                {retProposal?.note
+                  ? retProposal.note
+                  : retProposal?.proposedId != null
+                    ? "El sistema propone la factura donde viajó el producto (Decisión 52); puedes cambiarla."
+                    : "Indica cuánto se devuelve y el sistema propone la factura donde viajó."}
+              </span>
+            </label>
+          ) : null}
           <label className="mt-3 grid gap-1 text-[12px] font-medium uppercase tracking-wide text-muted">
             Motivo
             <input className="erp-input" value={retReason} onChange={(e) => setRetReason(e.target.value)} placeholder="Daño, error de surtido, no ocupó…" />
@@ -810,15 +883,19 @@ function Ficha() {
                   setError("Indica cuánto se devuelve en al menos una partida");
                   return;
                 }
+                if (liveFvs.length > 1 && retFv == null) {
+                  setError("Este pedido tiene varias facturas: elige a cuál abona la devolución.");
+                  return;
+                }
                 setBusy(true);
                 setError(null);
                 try {
-                  const r = await returnSale({ data: { soId: id, reason: retReason, lines } });
+                  const r = await returnSale({ data: { soId: id, reason: retReason, lines, fvId: liveFvs.length > 1 ? (retFv ?? undefined) : undefined } });
                   const stock = r.direct ? "Sin movimiento de kardex (pedido directo)." : `Kardex ${r.refs.join(", ")}.`;
                   const cobro = r.applied
-                    ? `Se abonó ${moneyIn(r.applied, form.currency)} a la factura.`
+                    ? `Se abonó ${moneyIn(r.applied, form.currency)} a ${r.fv ?? "la factura"}.`
                     : r.leftover
-                      ? `La factura ya estaba pagada. Queda crédito ${r.nc} por ${moneyIn(r.leftover, form.currency)}.`
+                      ? `${r.fv ? `${r.fv} ya estaba pagada` : "No hay factura viva a la que abonar"}. Queda crédito ${r.nc} por ${moneyIn(r.leftover, form.currency)}.`
                       : "";
                   // Decisión 9 + Decisión 20: con qué costo entró cada partida
                   // y cómo quedó el promedio, con el número. Y si no se
@@ -836,6 +913,7 @@ function Ficha() {
                   setMsg(`Devolución ${r.nc}. ${stock} ${cobro} ${costo}`.trim());
                   setRetQty({});
                   setRetReason("");
+                  setRetFv(null);
                   await load();
                 } catch (err) {
                   setError(err instanceof Error ? err.message : "No se pudo devolver");

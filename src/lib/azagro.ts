@@ -2062,6 +2062,11 @@ export const returnSale = createServerFn({ method: "POST" })
       soId: z.number(),
       reason: z.string().optional().default(""),
       lines: z.array(z.object({ productId: z.number(), qty: z.number().positive() })).min(1),
+      // BLOQUE DE PARCIALES, paso 5 (Decisión 52): a cuál factura abona la
+      // devolución. La propone `returnProposal` (la factura donde viajó el
+      // producto); la persona confirma o cambia. Sin esto: la última viva,
+      // como siempre (pedidos de una sola entrega).
+      fvId: z.number().optional(),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -2087,7 +2092,10 @@ export const returnSale = createServerFn({ method: "POST" })
       for update
     `;
     if (!so[0]) throw new Error("Pedido no encontrado");
-    if (so[0].state !== "done") throw new Error("Solo se devuelve un pedido ya entregado.");
+    // BLOQUE DE PARCIALES, paso 5: ya no exige el pedido completo (`done`).
+    // Con entregas por partes un pedido puede tener mercancía en casa del
+    // cliente y seguir "por entregar"; lo que se devuelve es lo entregado.
+    if (so[0].state === "cancelled" || so[0].state === "draft") throw new Error("Solo se devuelve un pedido con mercancía entregada.");
     const lines = await sql<{
       id: number;
       product_id: number;
@@ -2100,8 +2108,38 @@ export const returnSale = createServerFn({ method: "POST" })
         coalesce(qty_returned,0)::text as qty_returned, unit_price::text
       from sales_lines where so_id = ${so[0].id}
     `;
+    if (!lines.some((l) => Number(l.qty_delivered) - Number(l.qty_returned) > 0.0001)) {
+      throw new Error("No hay nada entregado que devolver en este pedido.");
+    }
     const direct = so[0].route_kind === "supplier" || so[0].route_kind === "asr";
     const today = todayMx();
+    // La factura a la que abona (Decisión 52): la que la persona confirmó, o
+    // la última viva del pedido. Nunca una revertida (paso 4 la deja en
+    // `reversed` y el pedido vuelve a `confirmed`; aquí se excluye explícito,
+    // no por flujo).
+    const fv = data.fvId != null
+      ? await sql<{ id: number; residual: string; name: string }>`
+          select id, residual::text, name from invoices
+          where company_id = ${m.company_id} and id = ${data.fvId} and order_id = ${so[0].id}
+            and kind = 'customer' and name like 'FV-%' and state <> 'reversed' and reverses_id is null
+        `
+      : await sql<{ id: number; residual: string; name: string }>`
+          select id, residual::text, name from invoices
+          where company_id = ${m.company_id} and order_id = ${so[0].id} and kind = 'customer' and name like 'FV-%'
+            and state <> 'reversed' and reverses_id is null
+          order by id desc limit 1
+        `;
+    if (data.fvId != null && !fv[0]) throw new Error("Esa factura no es una factura viva de este pedido.");
+    // Una devolución abona a una factura (Decisión 38: devolver es una venta
+    // real de la que regresa mercancía). Si no hay factura viva, no hay venta
+    // que abonar: la mercancía que salió sin facturarse se regresa revirtiendo
+    // la entrega (paso 4), no con una nota de crédito sin factura. En directo
+    // la FV siempre nace con la entrega, así que ahí no aplica.
+    if (!fv[0]) {
+      throw new Error(
+        `${so[0].name} no tiene factura viva: no hay venta que abonar. Si la mercancía regresó sin haberse facturado, revierte esa entrega (panel de entregas, «Revertir ENV/…»).`,
+      );
+    }
     // Decisión 42: el folio de la NC se calcula antes de mover inventario, para
     // que el movimiento `return` lleve en `origin` la NC que lo causó — como el
     // `receipt` lleva la OC y el `delivery` el pedido. Así, dentro de un año,
@@ -2167,11 +2205,11 @@ export const returnSale = createServerFn({ method: "POST" })
     const nc = await sql<{ id: number }>`
       insert into invoices (
         company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin,
-        currency, order_id, inv_class, created_by, circuit_code
+        currency, order_id, inv_class, applies_to_id, created_by, circuit_code
       )
       values (
         ${m.company_id}, 'customer', ${ncName}, ${so[0].partner_id}, ${today}, ${today},
-        'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product', ${context.userId}, ${so[0].circuit_code}
+        'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product', ${fv[0]?.id ?? null}, ${context.userId}, ${so[0].circuit_code}
       )
       returning id
     `;
@@ -2184,11 +2222,6 @@ export const returnSale = createServerFn({ method: "POST" })
       `;
     }
 
-    const fv = await sql<{ id: number; residual: string; name: string }>`
-      select id, residual::text, name from invoices
-      where company_id = ${m.company_id} and order_id = ${so[0].id} and kind = 'customer' and name like 'FV-%'
-      order by id desc limit 1
-    `;
     let applied = 0;
     if (fv[0] && Number(fv[0].residual) > 0.009) {
       applied = Math.min(credit, Number(fv[0].residual));
@@ -2216,7 +2249,7 @@ export const returnSale = createServerFn({ method: "POST" })
       entity: "sale",
       entityId: so[0].id,
       name: so[0].name,
-      detail: `${ncName}${posted.length ? ` · ${posted.join(", ")}` : ""}${
+      detail: `${ncName}${fv[0] ? ` · abona a ${fv[0].name}${data.fvId != null ? " (elegida)" : ""}` : " · sin factura viva a la que abonar"}${posted.length ? ` · ${posted.join(", ")}` : ""}${
         costs.length ? ` · costo de salida ${costs.map((c) => (c.found ? c.unitCost.toFixed(4) : "SIN SALIDA")).join(", ")}` : ""
       }`,
     });
@@ -2244,6 +2277,7 @@ export const returnSale = createServerFn({ method: "POST" })
     return {
       ok: true,
       nc: ncName,
+      fv: fv[0]?.name ?? null,
       refs: posted,
       applied,
       leftover,
@@ -2252,6 +2286,68 @@ export const returnSale = createServerFn({ method: "POST" })
       costs,
     };
     });
+  });
+
+/**
+ * BLOQUE DE PARCIALES, paso 5 (Decisión 52): antes de devolver, en qué
+ * factura viajó cada producto y cuánto queda por devolver de cada una. Si una
+ * sola factura cubre todo lo que se va a devolver, se propone; si más de una
+ * lo cubre, se PREGUNTA (la persona elige); si ninguna sola lo cubre, también
+ * se pregunta y se dice por qué. Lo ya devuelto de cada factura se lee de las
+ * NC con `applies_to_id` (migración 0036); una NC vieja sin liga no se puede
+ * atribuir y se reporta aparte, sin adivinar.
+ */
+export const returnProposal = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ soId: z.number(), lines: z.array(z.object({ productId: z.number(), qty: z.number().positive() })) }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "view");
+    const fvs = await sql<{ id: number; name: string; date: string; residual: string; event_ref: string | null }>`
+      select id, name, date::text, residual::text, event_ref from invoices
+      where company_id = ${m.company_id} and order_id = ${data.soId} and kind = 'customer' and name like 'FV-%'
+        and state <> 'reversed' and reverses_id is null
+      order by id
+    `;
+    const invoiced = await sql<{ invoice_id: number; product_id: number; qty: string }>`
+      select il.invoice_id, il.product_id, sum(il.qty)::text as qty
+      from invoice_lines il join invoices i on i.id = il.invoice_id
+      where i.company_id = ${m.company_id} and i.order_id = ${data.soId} and i.kind = 'customer' and i.name like 'FV-%'
+        and i.state <> 'reversed' and i.reverses_id is null and il.product_id is not null
+      group by il.invoice_id, il.product_id
+    `;
+    const returned = await sql<{ applies_to_id: number | null; product_id: number; qty: string }>`
+      select i.applies_to_id, il.product_id, sum(il.qty)::text as qty
+      from invoice_lines il join invoices i on i.id = il.invoice_id
+      where i.company_id = ${m.company_id} and i.order_id = ${data.soId} and i.name like 'NC-%'
+        and i.state <> 'reversed' and i.reverses_id is null and il.product_id is not null
+      group by i.applies_to_id, il.product_id
+    `;
+    const invoices = fvs.map((f) => {
+      const lines = invoiced
+        .filter((x) => x.invoice_id === f.id)
+        .map((x) => {
+          const ret = returned.filter((r) => r.applies_to_id === f.id && r.product_id === x.product_id).reduce((s, r) => s + Number(r.qty), 0);
+          return { productId: x.product_id, invoiced: Number(x.qty), returned: ret, available: Math.max(0, Number(x.qty) - ret) };
+        });
+      return { id: f.id, name: f.name, date: f.date, residual: Number(f.residual), eventRef: f.event_ref, lines };
+    });
+    const unlinked = returned.filter((r) => r.applies_to_id == null).reduce((s, r) => s + Number(r.qty), 0);
+    const covers = (inv: (typeof invoices)[number]) =>
+      data.lines.every((l) => (inv.lines.find((x) => x.productId === l.productId)?.available ?? 0) >= l.qty - 0.0001);
+    const candidates = data.lines.length ? invoices.filter(covers) : [];
+    const proposedId = invoices.length <= 1 ? (invoices[0]?.id ?? null) : candidates.length === 1 ? candidates[0]!.id : null;
+    const ask = invoices.length > 1 && candidates.length !== 1;
+    const note =
+      invoices.length > 1 && data.lines.length && candidates.length === 0
+        ? "Ninguna factura sola cubre todo lo que se devuelve: elige a cuál abonar, o divide la devolución en dos."
+        : invoices.length > 1 && candidates.length > 1
+          ? "Lo que se devuelve viajó en más de una factura: elige a cuál abonar."
+          : unlinked > 0.0001
+            ? "Hay devoluciones anteriores sin liga a factura (de antes de la migración 0036): no se descuentan de ninguna."
+            : null;
+    return { invoices, proposedId, ask, candidateIds: candidates.map((c) => c.id), note };
   });
 
 export const listInvoices = createServerFn({ method: "POST" })

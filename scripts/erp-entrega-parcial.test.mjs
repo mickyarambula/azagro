@@ -190,10 +190,14 @@ test("ficha del pedido: panel de entregas (listDeliveryEvents) recargado con loa
   assert.ok(so.includes('"Entregado parcial"'), "el chip lo dice cuando hay entregado y queda pendiente");
 });
 
-test("ficha del pedido: con 2+ facturas vivas, el P&L avisa que toma solo la última (paso 5), no finge el número", () => {
+// Editada a propósito el 16-sep-2026 (paso 5 construido): el aviso "toma solo
+// la última factura — paso 5, todavía no construido" era el marcador de lo
+// que faltaba; hoy el P&L con N facturas existe y la ficha enseña el desglose
+// por factura en su lugar (erp-parciales-paso5.test.mjs lo fija).
+test("ficha del pedido: con 2+ facturas vivas, el P&L ya no avisa 'solo la última': enseña el desglose por factura (paso 5)", () => {
   const so = src("src/routes/sales.$orderId.tsx");
-  assert.ok(so.includes("events.filter((e) => e.fv).length > 1"), "cuenta las FV vivas");
-  assert.match(so, /solo la última factura[\s\S]{0,120}paso 5/, "lo dice, con el paso que lo arregla");
+  assert.ok(!/solo la última factura[\s\S]{0,120}paso 5/.test(so), "el aviso provisional se fue con el paso 5");
+  assert.ok(so.includes("{pnl.multi ? (") && so.includes("{pnl.invoices.map((i) => ("), "en su lugar, una fila por factura");
 });
 
 test("ficha del pedido: el botón Recibir de las OC hijas también pasa a deliver (almacén recibe)", () => {

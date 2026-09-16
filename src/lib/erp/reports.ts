@@ -4,6 +4,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { activeMember, assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { dateDMY, todayMx } from "@/lib/utils";
+import { mergeDealPnl } from "@/lib/erp/parciales";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
@@ -26,12 +27,168 @@ function daysExceededPreview(fv: { credit_due: string | null; due_date: string; 
   return Math.max(0, daysBetween(fv.credit_due || fv.due_date, end));
 }
 
+type DealFvRow = {
+  date: string;
+  due_date: string;
+  credit_due: string | null;
+  paid_date: string | null;
+  amount: string;
+  residual: string;
+  fx_result: string;
+  params_snap: string;
+  credit_days: number;
+};
+
 export async function computeDealPnl(sql: Sql, companyId: number, soId: number) {
   await sql`alter table purchase_orders add column if not exists so_id integer`;
   await sql`alter table sales_orders add column if not exists quote_id integer`;
   await sql`alter table quote_lines add column if not exists cost numeric(14,4) not null default 0`;
   await sql`alter table quote_lines add column if not exists freight numeric(14,4) not null default 0`;
   await sql`alter table quote_lines add column if not exists other_cost numeric(14,4) not null default 0`;
+  // La factura de venta manda: su fecha de emisión fija la TIIE de costo, y
+  // sus fechas de pago/plazo financiero fijan la Capa 2 y el pronto pago.
+  await sql`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
+  await sql`alter table invoices add column if not exists params_snap text not null default ''`;
+  const fv = await sql<DealFvRow>`
+    select date::text, due_date::text, credit_due::text, paid_date::text,
+      amount::text, residual::text, coalesce(fx_result,0)::text as fx_result,
+      coalesce(params_snap,'') as params_snap, coalesce(credit_days,0)::int as credit_days
+    from invoices
+    where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
+      and state <> 'reversed'
+    order by id desc limit 1
+  `;
+  // BLOQUE DE PARCIALES, paso 5 (Decisiones 46, 54, 61): con dos o más
+  // facturas vivas — o una sola factura que no cubre el pedido (entrega
+  // parcial con evento) — la utilidad se calcula FACTURA POR FACTURA, cada una
+  // con sus propios días, su propia TIIE y su propia base (solo lo que salió
+  // en esa entrega), y se suma. El camino de una sola entrega (arriba, la
+  // consulta de la última FV) queda intacto, byte a byte.
+  const fvsAll = await sql<DealFvRow & { id: number; name: string; event_ref: string | null }>`
+    select id, name, event_ref, date::text, due_date::text, credit_due::text, paid_date::text,
+      amount::text, residual::text, coalesce(fx_result,0)::text as fx_result,
+      coalesce(params_snap,'') as params_snap, coalesce(credit_days,0)::int as credit_days
+    from invoices
+    where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
+      and reverses_id is null and state <> 'reversed'
+    order by id
+  `;
+  let multi = fvsAll.length > 1;
+  if (!multi && fvsAll.length === 1 && fvsAll[0]!.event_ref != null) {
+    const q = await sql<{ ordered: string; invoiced: string }>`
+      select (select coalesce(sum(qty),0) from sales_lines where so_id = ${soId})::text as ordered,
+        (select coalesce(sum(il.qty),0) from invoice_lines il where il.invoice_id = ${fvsAll[0]!.id})::text as invoiced
+    `;
+    multi = Number(q[0]?.invoiced ?? 0) < Number(q[0]?.ordered ?? 0) - 0.0001;
+  }
+  if (multi) return computeDealPnlMulti(sql, companyId, soId, fvsAll);
+  const core = await dealPnlCore(sql, companyId, soId, { fv: fv[0], orderLevel: true });
+  return { ...core, multi: false as const, invoices: [] as DealPnlInvoice[], uninvoiced: [] as DealPnlUninvoiced[] };
+}
+
+export type DealPnlInvoice = {
+  id: number;
+  name: string;
+  eventRef: string | null;
+  date: string;
+  amount: number;
+  residual: number;
+  paidDate: string | null;
+  financialDays: number;
+  daysExceeded: number;
+  tiieIssue: number | null;
+  revenue: number;
+  cogs: number;
+  finance: number;
+  financierFinance: number;
+  discount: number;
+  netProfit: number;
+};
+export type DealPnlUninvoiced = { productId: number; code: string; name: string; uom: string; qty: number };
+
+/**
+ * Paso 5: la utilidad de un pedido con N facturas = Σ (utilidad de cada
+ * factura, calculada con el motor de siempre sobre lo que ESA factura
+ * facturó, con sus propios días y su propia TIIE — Decisión 61) + gastos y
+ * mora del pedido, una sola vez. Lo entregado sin facturar y lo pendiente
+ * quedan fuera y se reportan aparte, no se fingen.
+ */
+async function computeDealPnlMulti(
+  sql: Sql,
+  companyId: number,
+  soId: number,
+  fvs: Array<DealFvRow & { id: number; name: string; event_ref: string | null }>,
+) {
+  const parts: Array<{ fv: (typeof fvs)[number]; pnl: Awaited<ReturnType<typeof dealPnlCore>> }> = [];
+  for (const f of fvs) {
+    const ils = await sql<{ product_id: number; qty: string }>`
+      select product_id, sum(qty)::text as qty from invoice_lines where invoice_id = ${f.id} and product_id is not null group by product_id
+    `;
+    const qtyByProduct = new Map(ils.map((x) => [x.product_id, Number(x.qty)]));
+    parts.push({ fv: f, pnl: await dealPnlCore(sql, companyId, soId, { fv: f, qtyByProduct, orderLevel: false }) });
+  }
+  const expenses = await orderExpenses(sql, companyId, soId);
+  const { mora, moraPendiente } = await orderMora(sql, companyId, soId);
+  const pend = await sql<{ product_id: number; code: string; name: string; uom: string; ordered: string; invoiced: string }>`
+    select sl.product_id, p.code, p.name, coalesce(sl.uom, p.uom) as uom, sum(sl.qty)::text as ordered,
+      (select coalesce(sum(il.qty),0) from invoice_lines il join invoices i on i.id = il.invoice_id
+        where i.company_id = ${companyId} and i.order_id = ${soId} and i.kind = 'customer' and i.name like 'FV-%'
+          and i.reverses_id is null and i.state <> 'reversed' and il.product_id = sl.product_id)::text as invoiced
+    from sales_lines sl join products p on p.id = sl.product_id
+    where sl.so_id = ${soId}
+    group by sl.product_id, p.code, p.name, sl.uom, p.uom
+    order by min(sl.id)
+  `;
+  const uninvoiced: DealPnlUninvoiced[] = pend
+    .map((r) => ({ productId: r.product_id, code: r.code, name: r.name, uom: r.uom, qty: Math.round((Number(r.ordered) - Number(r.invoiced)) * 10000) / 10000 }))
+    .filter((r) => r.qty > 0.0001);
+  return mergeDealPnl(
+    parts.map((x) => ({
+      invoice: { id: x.fv.id, name: x.fv.name, eventRef: x.fv.event_ref, date: x.fv.date, amount: Number(x.fv.amount), residual: Number(x.fv.residual), paidDate: x.fv.paid_date },
+      pnl: x.pnl,
+    })),
+    { expenses, mora, moraPendiente, uninvoiced },
+  );
+}
+
+async function orderExpenses(sql: Sql, companyId: number, soId: number) {
+  let expenses: Array<{ id: number; name: string; class: string; amount: number }> = [];
+  try {
+    const exp = await sql<{ id: number; name: string; class: string; amount: string }>`
+      select id, name, class, amount::text from expenses where company_id = ${companyId} and so_id = ${soId} order by id
+    `;
+    expenses = exp.map((e) => ({ id: e.id, name: e.name, class: e.class, amount: Number(e.amount) }));
+  } catch {
+    expenses = [];
+  }
+  return expenses;
+}
+
+async function orderMora(sql: Sql, companyId: number, soId: number) {
+  let mora = 0;
+  let moraPendiente = 0;
+  try {
+    const mi = await sql<{ a: string; r: string }>`
+      select coalesce(sum(amount),0)::text as a, coalesce(sum(residual),0)::text as r from invoices
+      where company_id = ${companyId} and order_id = ${soId} and inv_class = 'interest'
+        and state <> 'reversed' and reverses_id is null
+    `;
+    mora = Number(mi[0]?.a ?? 0);
+    moraPendiente = Number(mi[0]?.r ?? 0);
+  } catch {
+    mora = 0;
+    moraPendiente = 0;
+  }
+  return { mora, moraPendiente };
+}
+
+/** El motor de siempre, para UNA factura (o ninguna: proyección del pedido). `qtyByProduct` = lo que facturó ESA factura; sin él, el pedido completo. */
+async function dealPnlCore(
+  sql: Sql,
+  companyId: number,
+  soId: number,
+  opts: { fv: DealFvRow | undefined; qtyByProduct?: Map<number, number>; orderLevel: boolean },
+) {
   const so = await sql<{
     name: string;
     currency: string;
@@ -51,29 +208,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   `;
   if (!so[0]) throw new Error("Pedido no encontrado");
   const pol = await policy(sql, companyId);
-  // La factura de venta manda: su fecha de emisión fija la TIIE de costo, y
-  // sus fechas de pago/plazo financiero fijan la Capa 2 y el pronto pago.
-  await sql`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
-  await sql`alter table invoices add column if not exists params_snap text not null default ''`;
-  const fv = await sql<{
-    date: string;
-    due_date: string;
-    credit_due: string | null;
-    paid_date: string | null;
-    amount: string;
-    residual: string;
-    fx_result: string;
-    params_snap: string;
-    credit_days: number;
-  }>`
-    select date::text, due_date::text, credit_due::text, paid_date::text,
-      amount::text, residual::text, coalesce(fx_result,0)::text as fx_result,
-      coalesce(params_snap,'') as params_snap, coalesce(credit_days,0)::int as credit_days
-    from invoices
-    where company_id = ${companyId} and order_id = ${soId} and kind = 'customer' and name like 'FV-%'
-      and state <> 'reversed'
-    order by id desc limit 1
-  `;
+  const fv: DealFvRow[] = opts.fv ? [opts.fv] : [];
   const today = todayMx();
   const issueDate = fv[0]?.date ?? so[0].date;
   // Si la factura guardó su foto de parámetros al emitirse, la utilidad se
@@ -173,7 +308,9 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     order by sl.id
   `;
   const lines = raw.map((l) => {
-    const qty = Number(l.qty);
+    // Paso 5: por factura, la cantidad es lo que ESA factura facturó (0 si
+    // este producto no viajó en ella); por pedido, la partida completa.
+    const qty = opts.qtyByProduct ? (opts.qtyByProduct.get(l.product_id) ?? 0) : Number(l.qty);
     const saleUnit = Number(l.unit_price);
     const poCost = l.po_cost != null ? Number(l.po_cost) : null;
     const quoteCost = l.quote_cost != null ? Number(l.quote_cost) : null;
@@ -293,31 +430,10 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
     venta: excludedLines.reduce((s, l) => s + l.sale, 0),
     motivos: [...new Set(excludedLines.map((l) => l.excludeReason!))],
   };
-  let expenses: Array<{ id: number; name: string; class: string; amount: number }> = [];
-  try {
-    const exp = await sql<{ id: number; name: string; class: string; amount: string }>`
-      select id, name, class, amount::text from expenses where company_id = ${companyId} and so_id = ${soId} order by id
-    `;
-    expenses = exp.map((e) => ({ id: e.id, name: e.name, class: e.class, amount: Number(e.amount) }));
-  } catch {
-    expenses = [];
-  }
+  const expenses = opts.orderLevel ? await orderExpenses(sql, companyId, soId) : [];
   const expPedido = expenses.filter((e) => e.class === "pedido").reduce((s, e) => s + e.amount, 0);
   const expOther = expenses.filter((e) => e.class !== "pedido").reduce((s, e) => s + e.amount, 0);
-  let mora = 0;
-  let moraPendiente = 0;
-  try {
-    const mi = await sql<{ a: string; r: string }>`
-      select coalesce(sum(amount),0)::text as a, coalesce(sum(residual),0)::text as r from invoices
-      where company_id = ${companyId} and order_id = ${soId} and inv_class = 'interest'
-        and state <> 'reversed' and reverses_id is null
-    `;
-    mora = Number(mi[0]?.a ?? 0);
-    moraPendiente = Number(mi[0]?.r ?? 0);
-  } catch {
-    mora = 0;
-    moraPendiente = 0;
-  }
+  const { mora, moraPendiente } = opts.orderLevel ? await orderMora(sql, companyId, soId) : { mora: 0, moraPendiente: 0 };
   // Solo las partidas con costo (y con TIIE cuando hace falta) entran al
   // cálculo; las excluidas se reportan aparte.
   // ASR: la venta es al cliente. Lineal: la venta de Azagro es la factura a

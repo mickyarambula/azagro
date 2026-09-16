@@ -1136,9 +1136,10 @@ método del paso 5, primera vez que se prueba así una pantalla del proyecto).
 desembolso, con su propio reloj de días (arranca el día de ESA entrega, no el
 del pedido ni desde la primera) y su propia base (lo que esa entrega costó).
 Mismo criterio que ya fija la Decisión 54 para el lado del cliente, ahora
-aplicado al lado del costo. Sin construir: `computeDealPnl` (`src/lib/erp/
-reports.ts`) todavía toma solo la última FV del pedido — paso 5 del bloque de
-parciales, `PARCIALES.md` § 8.
+aplicado al lado del costo. **Construido el mismo 16-sep-2026** (paso 5 del
+bloque de parciales, `PARCIALES.md` § 8): `computeDealPnl` calcula factura por
+factura con los días, la TIIE y la base de cada una (`dealPnlCore` +
+`mergeDealPnl`).
 
 Lo que sigue abajo es el planteamiento original (9-sep-2026), como quedó
 escrito antes de la respuesta:
