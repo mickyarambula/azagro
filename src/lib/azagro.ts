@@ -16,6 +16,7 @@ import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { purchaseLineGaps, salesLineGaps } from "@/lib/erp/parciales";
 import { todayMx } from "@/lib/utils";
 import { circuitTerms, inheritCircuit } from "@/lib/erp/circuits";
+import { computeDues, TERM_KINDS, type TermKind } from "@/lib/erp/order-terms";
 
 export type Role = AppRole;
 
@@ -1455,7 +1456,7 @@ export async function bornSupplierDebtByReceipt(
 ) {
   const already = await sql<{ id: number }>`
     select id from invoices
-    where company_id = ${opts.companyId} and kind = 'supplier' and event_ref = ${opts.eventRef}
+    where company_id = ${opts.companyId} and kind = 'supplier' and event_ref = ${opts.eventRef} and origin = ${opts.poName}
       and state <> 'reversed'
     limit 1
   `;
@@ -1632,160 +1633,37 @@ export const createSale = createServerFn({ method: "POST" })
 
 export const deliverSale = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ soId: z.number() }))
+  .validator(z.object({
+    soId: z.number(),
+    // BLOQUE DE PARCIALES, paso 3: cantidad por partida, opcional. Sin esto
+    // entrega todo lo pendiente. En bodega propia entregar YA NO factura
+    // (Decisión 47: la FV se emite después, por evento — invoiceDelivery);
+    // en directo/brokeraje sí, en el mismo acto (Decisión 29).
+    lines: z.array(z.object({ lineId: z.number(), qty: z.number().positive() })).optional(),
+  }))
   .handler(async ({ context, data }) => {
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "sales", "deliver");
-    const so = await sql<{
-      id: number;
-      location_id: number;
-      name: string;
-      state: string;
-      partner_id: number;
-      total: string;
-      invoice_due: string | null;
-      credit_due: string | null;
-      invoice_days: number | null;
-      credit_days: number | null;
-      policy_code: string | null;
-      date: string;
-      route_kind: string;
-      circuit_code: string | null;
-    }>`
-      select id, location_id, name, state, partner_id, total::text,
-        invoice_due::text, credit_due::text, invoice_days, credit_days, policy_code, date::text,
-        coalesce(route_kind,'own') as route_kind, circuit_code
-      from sales_orders
+    const so = await sql<{ id: number; name: string; state: string }>`
+      select id, name, state from sales_orders
       where id = ${data.soId} and company_id = ${m.company_id}
       for update
     `;
     if (!so[0] || so[0].state === "done" || so[0].state === "cancelled") throw new Error("Pedido no disponible");
     if (so[0].state !== "confirmed") throw new Error("Confirma el pedido antes de entregar");
-    const lines = await sql<{ id: number; product_id: number; qty: string; qty_delivered: string }>`
-      select id, product_id, qty::text, qty_delivered::text from sales_lines where so_id = ${so[0].id}
-    `;
-    const direct = so[0].route_kind === "supplier" || so[0].route_kind === "asr";
-    for (const line of lines) {
-      const pending = Number(line.qty) - Number(line.qty_delivered);
-      if (pending <= 0) continue;
-      if (!direct) {
-        await postStock(sql, {
-          companyId: m.company_id,
-          userId: context.userId,
-          moveType: "delivery",
-          origin: so[0].name,
-          productId: line.product_id,
-          quantity: pending,
-          locationFrom: so[0].location_id,
-        });
-      }
-      await sql`update sales_lines set qty_delivered = qty where id = ${line.id}`;
-    }
-    await sql`update sales_orders set state = 'done' where id = ${so[0].id}`;
-    // Decisión 14 en brokeraje: una OC directa nunca se recibe en bodega
-    // (receivePurchase la rechaza), así que su deuda nace aquí — al entregar y
-    // facturar es cuando la mercancía se movió de verdad del proveedor al
-    // cliente. Sin esto el brokeraje quedaría sin cuenta por pagar.
-    const fpsDirectas: string[] = [];
-    if (direct) {
-      const ocs = await sql<{ id: number; name: string }>`
-        select id, name from purchase_orders
-        where company_id = ${m.company_id} and so_id = ${so[0].id}
-          and coalesce(fulfill_kind,'inventory') = 'direct' and state <> 'cancelled'
-        order by id
+    let lines = data.lines ?? [];
+    if (!lines.length) {
+      const pend = await sql<{ id: number; qty: string; qty_delivered: string }>`
+        select id, qty::text, coalesce(qty_delivered,0)::text as qty_delivered from sales_lines where so_id = ${so[0].id} order by id
       `;
-      for (const oc of ocs) {
-        const fp = await bornSupplierDebt(sql, {
-          companyId: m.company_id,
-          userId: context.userId,
-          poId: oc.id,
-          poName: oc.name,
-        });
-        if (fp) fpsDirectas.push(fp);
-      }
+      lines = pend
+        .map((l) => ({ lineId: l.id, qty: Number(l.qty) - Number(l.qty_delivered) }))
+        .filter((l) => l.qty > 0.0001);
     }
-    const today = todayMx();
-    const invoiceDue = so[0].invoice_due || today;
-    const creditDue = so[0].credit_due || invoiceDue;
-    const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and kind = 'customer'`;
-    const iname = `FV-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-    const soMeta = await sql<{ currency: string; fx_rate: string }>`
-      select currency, fx_rate::text from sales_orders where id = ${so[0].id}
-    `;
-    const currency = soMeta[0]?.currency ?? "MXN";
-    const fx = Number(soMeta[0]?.fx_rate ?? 1);
-    const mxn = Number(so[0].total);
-    // Foto de parámetros al emitir: TIIE del mes de emisión y las tasas
-    // vigentes hoy. Con esto la utilidad y el costo financiero de ESTA
-    // factura siguen siendo explicables aunque después cambien Ajustes.
-    const pol = await policy(sql, m.company_id);
-    const tiieRows = await sql<{ date: string; rate: string }>`
-      select date::text, rate::text from tiie_rates where company_id = ${m.company_id} order by date
-    `;
-    // A crédito, sin renglón de TIIE vigente a la fecha de emisión no se
-    // factura: la entrega completa se revierte con el aviso. De contado no
-    // hay financiamiento que calcular: se guarda el renglón si existe y, si
-    // no, la foto queda sin TIIE (el reporte lo marca, no lo estima).
-    const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
-    const financedDays = so[0].credit_days ?? 0;
-    // Paso 3: comisión, base y las dos tasas son del circuito del documento.
-    // Si el pedido vino de cotización, lo congelado ahí manda; si no, el
-    // catálogo del circuito que financia. En el lineal la tasa que entra al
-    // precio es la de cobro congelada, no la TIIE.
-    const circuitOfSale = inheritCircuit(so[0].circuit_code, financedDays);
-    const qFrozen = await sql<{ commission_rate: string | null; cost_rate: string | null; collection_rate: string | null; tiie: string | null }>`
-      select commission_rate::text, cost_rate::text, collection_rate::text, tiie::text
-      from quotes q join sales_orders o on o.quote_id = q.id where o.id = ${so[0].id}
-    `;
-    const terms = financedDays > 0 ? await circuitTerms(sql, m.company_id, circuitOfSale) : null;
-    const lineal = terms?.financingBase === "costo_margen";
-    const tiiePick =
-      financedDays > 0 && !lineal
-        ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`)
-        : lineal
-          ? { rate: Number(qFrozen[0]?.collection_rate ?? qFrozen[0]?.tiie ?? 0), date: today }
-          : nearestRate(tiieTable, today);
-    const snap = JSON.stringify({
-      tiieIssue: tiiePick?.rate ?? null,
-      tiieDate: tiiePick?.date ?? null,
-      costSpread: pol.asrSpread,
-      commissionRate: qFrozen[0]?.commission_rate != null ? Number(qFrozen[0].commission_rate) : (terms?.commissionRate ?? null),
-      circuit: circuitOfSale,
-      financingBase: terms?.financingBase ?? null,
-      costRate: qFrozen[0]?.cost_rate != null ? Number(qFrozen[0].cost_rate) : null,
-      collectionRate: qFrozen[0]?.collection_rate != null ? Number(qFrozen[0].collection_rate) : null,
-      // Los días financiados de ESTE pedido: los mismos que fueron cobrados
-      // al cliente dentro del precio (0 = contado, sin circuito).
-      financialDays: financedDays,
-      collectionSpread: pol.collectionSpread,
-      fegaRate: pol.fegaRate,
-      earlyPayDays: pol.earlyPayDays,
-    });
-    const inv = await sql<{ id: number }>`
-      insert into invoices (
-        company_id, kind, name, partner_id, date, due_date, credit_due, state, amount, residual, origin,
-        currency, amount_fx, fx_agreed, inv_class, order_id, invoice_days, credit_days, policy_code,
-        created_by, params_snap, circuit_code
-      )
-      values (
-        ${m.company_id}, 'customer', ${iname}, ${so[0].partner_id}, ${today}, ${invoiceDue}, ${creditDue}, 'open',
-        ${mxn}, ${mxn}, ${so[0].name}, ${currency}, ${currency === "USD" && fx ? mxn / fx : 0}, ${fx}, 'product', ${so[0].id},
-        ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${so[0].policy_code ?? "NONE"},
-        ${context.userId}, ${snap}, ${inheritCircuit(so[0].circuit_code, so[0].credit_days ?? 0)}
-      )
-      returning id
-    `;
-    const sold = await sql<{ product_id: number; qty: string; unit_price: string }>`
-      select product_id, qty::text, unit_price::text from sales_lines where so_id = ${so[0].id}
-    `;
-    for (const line of sold) {
-      const amt = Number(line.qty) * Number(line.unit_price);
-      await sql`
-        insert into invoice_lines (invoice_id, product_id, qty, unit_price, amount)
-        values (${inv[0]!.id}, ${line.product_id}, ${Number(line.qty)}, ${Number(line.unit_price)}, ${amt})
-      `;
-    }
+    if (!lines.length) throw new Error("No queda nada pendiente por entregar en este pedido");
+    const r = await deliverPartial(sql, { companyId: m.company_id, userId: context.userId, soId: so[0].id, lines });
+    const fpsDirectas = r.fps;
     await writeAudit(sql, {
       companyId: m.company_id,
       userId: context.userId,
@@ -1793,11 +1671,276 @@ export const deliverSale = createServerFn({ method: "POST" })
       entity: "sale",
       entityId: so[0].id,
       name: so[0].name,
-      detail: `${iname}${fpsDirectas.length ? ` · brokeraje: nace ${fpsDirectas.join(", ")} por pagar` : ""}`,
+      detail: `${r.eventRef}${r.fv ? ` · ${r.fv}` : " · sin facturar todavía"}${r.done ? " · pedido completo" : " · queda pendiente"}${fpsDirectas.length ? ` · brokeraje: nace ${fpsDirectas.join(", ")} por pagar` : ""}`,
     });
-    return { ok: true, fps: fpsDirectas };
+    return { ok: true, eventRef: r.eventRef, fv: r.fv, fps: fpsDirectas, done: r.done };
     });
   });
+
+type DeliveredLine = { productId: number; qty: number; unitPrice: number };
+
+/**
+ * BLOQUE DE PARCIALES, paso 3.2: entrega parcial. Cantidad por partida,
+ * validada contra lo pendiente; un `event_ref` (serie `ENV`, folio_counters,
+ * A4) por LLAMADA, compartido por los movimientos de kardex y la FV de esta
+ * entrega. Plain function — sin `createServerFn` — igual que receivePartial;
+ * `deliverSale` es el único que la llama.
+ *
+ *   - Bodega propia: salida del kardex por partida con el evento; la FV NO
+ *     nace aquí (Decisión 47: entregar sin facturar) — la emite
+ *     `invoiceDelivery` cuando alguien con permiso de facturar lo pida.
+ *   - Directo/brokeraje: sin kardex; entregar = facturar en el mismo acto
+ *     (Decisión 29; decisión del dueño 15-sep-2026 — no hay kardex que
+ *     registre el evento): FV de este evento y FP por evento de cada OC
+ *     directa, con lo entregado al precio de esa OC.
+ *   - `done` solo cuando ninguna partida tiene pendiente.
+ */
+export async function deliverPartial(
+  sql: Sql,
+  opts: { companyId: number; userId: string; soId: number; lines: Array<{ lineId: number; qty: number }> },
+) {
+  const so = await sql<{ id: number; name: string; location_id: number; route_kind: string }>`
+    select id, name, location_id, coalesce(route_kind,'own') as route_kind
+    from sales_orders where id = ${opts.soId} and company_id = ${opts.companyId}
+  `;
+  if (!so[0]) throw new Error("Pedido no encontrado");
+  const direct = so[0].route_kind === "supplier" || so[0].route_kind === "asr";
+
+  const rows = await sql<{ last_number: number }>`
+    insert into folio_counters (company_id, series, last_number)
+    values (${opts.companyId}, 'ENV', 1)
+    on conflict (company_id, series) do update set last_number = folio_counters.last_number + 1
+    returning last_number
+  `;
+  const eventRef = `ENV/${String(rows[0]!.last_number).padStart(4, "0")}`;
+
+  const delivered: DeliveredLine[] = [];
+  for (const l of opts.lines) {
+    const line = await sql<{ id: number; product_id: number; qty: string; qty_delivered: string; unit_price: string }>`
+      select id, product_id, qty::text, coalesce(qty_delivered,0)::text as qty_delivered, unit_price::text
+      from sales_lines where id = ${l.lineId} and so_id = ${so[0].id}
+      for update
+    `;
+    if (!line[0]) throw new Error("Esa partida no está en el pedido");
+    const pending = Number(line[0].qty) - Number(line[0].qty_delivered);
+    if (l.qty > pending + 0.0001) {
+      throw new Error(`No puedes entregar más de lo pendiente (${pending}) en la partida ${line[0].product_id}`);
+    }
+    if (!direct) {
+      await postStock(sql, {
+        companyId: opts.companyId,
+        userId: opts.userId,
+        moveType: "delivery",
+        origin: so[0].name,
+        productId: line[0].product_id,
+        quantity: l.qty,
+        locationFrom: so[0].location_id,
+        eventRef,
+      });
+    }
+    await sql`update sales_lines set qty_delivered = qty_delivered + ${l.qty} where id = ${l.lineId}`;
+    delivered.push({ productId: line[0].product_id, qty: l.qty, unitPrice: Number(line[0].unit_price) });
+  }
+
+  const pend = await sql<{ n: number }>`
+    select count(*)::int as n from sales_lines where so_id = ${so[0].id} and qty_delivered < qty - 0.0001
+  `;
+  const done = (pend[0]?.n ?? 0) === 0;
+  if (done) await sql`update sales_orders set state = 'done' where id = ${so[0].id}`;
+
+  let fv: string | null = null;
+  const fpsDirectas: string[] = [];
+  if (direct) {
+    fv = await issueDeliveryInvoice(sql, { companyId: opts.companyId, userId: opts.userId, soId: so[0].id, eventRef, delivered });
+    // Decisión 29: la OC directa nunca se recibe, así que su deuda nace aquí
+    // — por evento (Decisión 28), con lo entregado al precio de ESA OC.
+    const ocs = await sql<{ id: number; name: string }>`
+      select id, name from purchase_orders
+      where company_id = ${opts.companyId} and so_id = ${so[0].id}
+        and coalesce(fulfill_kind,'inventory') = 'direct' and state <> 'cancelled'
+      order by id
+    `;
+    for (const oc of ocs) {
+      const pls = await sql<{ product_id: number; unit_price: string }>`
+        select product_id, unit_price::text from purchase_lines where po_id = ${oc.id}
+      `;
+      const received = delivered
+        .map((d) => {
+          const pl = pls.find((x) => x.product_id === d.productId);
+          return pl ? { productId: d.productId, qty: d.qty, unitPrice: Number(pl.unit_price) } : null;
+        })
+        .filter((x): x is { productId: number; qty: number; unitPrice: number } => x !== null);
+      if (!received.length) continue;
+      const fp = await bornSupplierDebtByReceipt(sql, {
+        companyId: opts.companyId,
+        userId: opts.userId,
+        poId: oc.id,
+        poName: oc.name,
+        eventRef,
+        received,
+      });
+      if (fp) fpsDirectas.push(fp);
+    }
+  }
+  return { eventRef, fv, fps: fpsDirectas, delivered, done };
+}
+
+/**
+ * BLOQUE DE PARCIALES, paso 3.3: la FV de UNA entrega (Decisión 46: una por
+ * evento). Renglones = lo que salió en ese evento — del kardex en bodega
+ * propia, de la llamada en directo —, al precio de la partida; importe =
+ * Σ(entregado × precio), nunca el pedido completo. Vencimientos desde la
+ * fecha de la ENTREGA (Decisión 54) con el plazo que se cobró en el precio
+ * (los días del pedido). La foto de parámetros es la de siempre: TIIE a la
+ * fecha de emisión (Decisión 40), circuito y tasas congeladas de la
+ * cotización. Idempotente por `event_ref`.
+ */
+export async function issueDeliveryInvoice(
+  sql: Sql,
+  opts: { companyId: number; userId: string; soId: number; eventRef: string; delivered?: DeliveredLine[] },
+) {
+  const already = await sql<{ name: string }>`
+    select name from invoices
+    where company_id = ${opts.companyId} and kind = 'customer' and event_ref = ${opts.eventRef} and state <> 'reversed'
+    limit 1
+  `;
+  if (already[0]) return already[0].name;
+  const so = await sql<{
+    id: number;
+    name: string;
+    partner_id: number;
+    invoice_due: string | null;
+    credit_due: string | null;
+    invoice_days: number | null;
+    credit_days: number | null;
+    policy_code: string | null;
+    date: string;
+    term_kind: string;
+    circuit_code: string | null;
+    currency: string;
+    fx_rate: string;
+  }>`
+    select id, name, partner_id, invoice_due::text, credit_due::text, invoice_days, credit_days, policy_code, date::text,
+      coalesce(term_kind,'contado') as term_kind, circuit_code, coalesce(currency,'MXN') as currency, coalesce(fx_rate,1)::text as fx_rate
+    from sales_orders where id = ${opts.soId} and company_id = ${opts.companyId}
+  `;
+  if (!so[0]) throw new Error("Pedido no encontrado");
+  const today = todayMx();
+
+  let delivered: DeliveredLine[];
+  let eventDate: string;
+  if (opts.delivered && opts.delivered.length) {
+    delivered = opts.delivered;
+    eventDate = today;
+  } else {
+    const moves = await sql<{ product_id: number; qty: string; day: string }>`
+      select product_id, sum(quantity)::text as qty, min(date)::text as day
+      from stock_moves
+      where company_id = ${opts.companyId} and origin = ${so[0].name} and event_ref = ${opts.eventRef} and move_type = 'delivery'
+      group by product_id
+    `;
+    if (!moves.length) throw new Error(`No hay entrega con el evento ${opts.eventRef} en ${so[0].name}`);
+    const prices = await sql<{ product_id: number; unit_price: string }>`
+      select product_id, unit_price::text from sales_lines where so_id = ${so[0].id}
+    `;
+    delivered = moves.map((mv) => {
+      const pl = prices.find((x) => x.product_id === mv.product_id);
+      if (!pl) throw new Error(`La entrega ${opts.eventRef} sacó un producto que no está en ${so[0].name}`);
+      return { productId: mv.product_id, qty: Number(mv.qty), unitPrice: Number(pl.unit_price) };
+    });
+    eventDate = moves.reduce((d, mv) => (mv.day < d ? mv.day : d), moves[0]!.day);
+  }
+
+  // Decisión 54: el plazo de ESTA factura arranca el día de su entrega, con
+  // los mismos días que se cobraron en el precio del pedido. Misma regla que
+  // decideQuote (computeDues), con otra fecha de arranque.
+  const termKind = (TERM_KINDS as readonly string[]).includes(so[0].term_kind) ? (so[0].term_kind as TermKind) : null;
+  if (!termKind) throw new Error(`Tipo de plazo desconocido en ${so[0].name}: ${so[0].term_kind}`);
+  const dues = computeDues({
+    date: eventDate,
+    termKind,
+    invoiceDays: so[0].invoice_days ?? 0,
+    creditDays: so[0].credit_days ?? 0,
+    invoiceDue: so[0].invoice_due ?? undefined,
+    creditDue: so[0].credit_due ?? undefined,
+  });
+  const invoiceDue = dues.invoiceDue;
+  const creditDue = dues.creditDue;
+
+  const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${opts.companyId} and kind = 'customer'`;
+  const iname = `FV-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const currency = so[0].currency;
+  const fx = Number(so[0].fx_rate);
+  const mxn = Math.round(delivered.reduce((s, d) => s + d.qty * d.unitPrice, 0) * 100) / 100;
+  // Foto de parámetros al emitir: TIIE del mes de emisión y las tasas
+  // vigentes hoy. Con esto la utilidad y el costo financiero de ESTA
+  // factura siguen siendo explicables aunque después cambien Ajustes.
+  const pol = await policy(sql, opts.companyId);
+  const tiieRows = await sql<{ date: string; rate: string }>`
+    select date::text, rate::text from tiie_rates where company_id = ${opts.companyId} order by date
+  `;
+  // A crédito, sin renglón de TIIE vigente a la fecha de emisión no se
+  // factura: la entrega completa se revierte con el aviso. De contado no
+  // hay financiamiento que calcular: se guarda el renglón si existe y, si
+  // no, la foto queda sin TIIE (el reporte lo marca, no lo estima).
+  const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+  const financedDays = so[0].credit_days ?? 0;
+  // Paso 3: comisión, base y las dos tasas son del circuito del documento.
+  // Si el pedido vino de cotización, lo congelado ahí manda; si no, el
+  // catálogo del circuito que financia. En el lineal la tasa que entra al
+  // precio es la de cobro congelada, no la TIIE.
+  const circuitOfSale = inheritCircuit(so[0].circuit_code, financedDays);
+  const qFrozen = await sql<{ commission_rate: string | null; cost_rate: string | null; collection_rate: string | null; tiie: string | null }>`
+    select commission_rate::text, cost_rate::text, collection_rate::text, tiie::text
+    from quotes q join sales_orders o on o.quote_id = q.id where o.id = ${so[0].id}
+  `;
+  const terms = financedDays > 0 ? await circuitTerms(sql, opts.companyId, circuitOfSale) : null;
+  const lineal = terms?.financingBase === "costo_margen";
+  const tiiePick =
+      financedDays > 0 && !lineal
+        ? requireRate(tiieTable, today, `emisión de ${iname} a crédito`)
+        : lineal
+          ? { rate: Number(qFrozen[0]?.collection_rate ?? qFrozen[0]?.tiie ?? 0), date: today }
+          : nearestRate(tiieTable, today);
+  const snap = JSON.stringify({
+    tiieIssue: tiiePick?.rate ?? null,
+    tiieDate: tiiePick?.date ?? null,
+    costSpread: pol.asrSpread,
+    commissionRate: qFrozen[0]?.commission_rate != null ? Number(qFrozen[0].commission_rate) : (terms?.commissionRate ?? null),
+    circuit: circuitOfSale,
+    financingBase: terms?.financingBase ?? null,
+    costRate: qFrozen[0]?.cost_rate != null ? Number(qFrozen[0].cost_rate) : null,
+    collectionRate: qFrozen[0]?.collection_rate != null ? Number(qFrozen[0].collection_rate) : null,
+    // Los días financiados de ESTE pedido: los mismos que fueron cobrados
+    // al cliente dentro del precio (0 = contado, sin circuito).
+    financialDays: financedDays,
+    collectionSpread: pol.collectionSpread,
+    fegaRate: pol.fegaRate,
+    earlyPayDays: pol.earlyPayDays,
+  });
+  const inv = await sql<{ id: number }>`
+    insert into invoices (
+      company_id, kind, name, partner_id, date, due_date, credit_due, state, amount, residual, origin,
+      currency, amount_fx, fx_agreed, inv_class, order_id, invoice_days, credit_days, policy_code,
+      created_by, params_snap, circuit_code, event_ref
+    )
+    values (
+      ${opts.companyId}, 'customer', ${iname}, ${so[0].partner_id}, ${today}, ${invoiceDue}, ${creditDue}, 'open',
+      ${mxn}, ${mxn}, ${so[0].name}, ${currency}, ${currency === "USD" && fx ? mxn / fx : 0}, ${fx}, 'product', ${so[0].id},
+      ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${so[0].policy_code ?? "NONE"},
+      ${opts.userId}, ${snap}, ${inheritCircuit(so[0].circuit_code, so[0].credit_days ?? 0)}, ${opts.eventRef}
+    )
+    returning id
+  `;
+  for (const d of delivered) {
+    const amt = Math.round(d.qty * d.unitPrice * 100) / 100;
+    await sql`
+      insert into invoice_lines (invoice_id, product_id, qty, unit_price, amount)
+      values (${inv[0]!.id}, ${d.productId}, ${d.qty}, ${d.unitPrice}, ${amt})
+    `;
+  }
+  return iname;
+}
 
 export const returnSale = createServerFn({ method: "POST" })
   .middleware([authMiddleware])

@@ -182,7 +182,7 @@ test("el diálogo dice, antes de preguntar, que revertir no es devolver — con 
   assert.ok(so.includes("reverseDelivery({ data: { soId: id, reason } })"));
 });
 
-test("Decisión 40 (cableado): al volver a entregar, deliverSale toma la TIIE de la tabla a la fecha de la entrega nueva", () => {
-  const body = fnBody(src("src/lib/azagro.ts"), "deliverSale");
+test("Decisión 40 (cableado): al volver a facturar, issueDeliveryInvoice toma la TIIE de la tabla a la fecha de emisión (paso 3: la FV se emite por evento)", () => {
+  const body = fnBody(src("src/lib/azagro.ts"), "issueDeliveryInvoice");
   assert.ok(body.includes("requireRate(tiieTable, today, `emisión de ${iname} a crédito`)"), "la tasa es la de la tabla HOY, no la de la entrega revertida");
 });

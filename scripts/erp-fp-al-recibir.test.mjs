@@ -73,11 +73,13 @@ test("brokeraje: la OC directa nunca se recibe, así que su deuda nace al entreg
   // La OC directa se rechaza en recepción: sin el camino de la entrega,
   // el brokeraje se quedaría sin cuenta por pagar.
   assert.ok(fnBody(az, "receivePurchase").includes("no se recibe en bodega"), "la directa no se recibe");
-  const entrega = fnBody(az, "deliverSale");
+  // Paso 3 del bloque de parciales: la entrega directa vive en deliverPartial y la
+  // FP nace POR EVENTO (Decisiones 28 + 29) con bornSupplierDebtByReceipt.
+  const entrega = fnBody(az, "deliverPartial");
   assert.ok(entrega.includes("if (direct) {"), "solo en pedido directo/brokeraje");
   assert.ok(entrega.includes("coalesce(fulfill_kind,'inventory') = 'direct' and state <> 'cancelled'"), "sus OC directas, sin las canceladas");
-  assert.ok(entrega.includes("await bornSupplierDebt(sql, {"), "ahí nace la deuda");
-  assert.ok(entrega.includes("brokeraje: nace ${fpsDirectas.join"), "y queda en bitácora");
+  assert.ok(entrega.includes("await bornSupplierDebtByReceipt(sql, {"), "ahí nace la deuda, por evento");
+  assert.ok(fnBody(az, "deliverSale").includes("brokeraje: nace ${fpsDirectas.join"), "y queda en bitácora");
 });
 
 test("la FP nace con la moneda y el tipo de cambio de su OC (antes el camino de recepción los perdía)", () => {

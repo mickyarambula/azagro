@@ -73,7 +73,9 @@ test("receivePartial: la OC solo pasa a 'done' cuando NINGUNA partida tiene pend
 test("bornSupplierDebtByReceipt: idempotente por event_ref, no por origin/OC", () => {
   const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebtByReceipt");
   assert.ok(body.includes("event_ref = ${opts.eventRef}"), "la llave es el evento");
-  assert.ok(!body.includes("origin = ${opts.poName}"), "no la de bornSupplierDebt (por OC)");
+  // Paso 3.2: la llave es evento Y OC — una entrega directa con dos OC al mismo
+  // evento tiene que producir dos FP; solo por evento, la segunda no nacía.
+  assert.ok(body.includes("event_ref = ${opts.eventRef} and origin = ${opts.poName}"), "evento + OC");
 });
 
 test("bornSupplierDebtByReceipt: importe = lo recibido en este evento, no po.total", () => {

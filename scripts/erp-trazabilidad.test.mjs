@@ -8,8 +8,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(root, p), "utf8");
 
 function fnBody(source, name) {
-  const start = source.indexOf(`export const ${name} `);
-  assert.notEqual(start, -1, `No existe export const ${name}`);
+  // Paso 3 del bloque de parciales: la FV se emite en una función plain
+  // (`export async function issueDeliveryInvoice`), no en un server fn.
+  const markers = [`export const ${name} `, `export async function ${name}(`];
+  const start = markers.map((m) => source.indexOf(m)).find((i) => i !== -1);
+  assert.notEqual(start, undefined, `No existe export ${name}`);
   const rest = source.slice(start + 10);
   const next = rest.search(/\nexport /);
   return next === -1 ? rest : rest.slice(0, next);
@@ -46,7 +49,9 @@ test("la FI guarda TIIE, spread, días, capital y FEGA, con autor y desglose", (
 
 test("la FV congela sus parámetros al emitirse (foto contra cambios futuros de Ajustes)", () => {
   const az = src("src/lib/azagro.ts");
-  const deliver = fnBody(az, "deliverSale");
+  // Paso 3 del bloque de parciales (Decisión 47): la FV ya no nace dentro de
+  // la entrega; la emite issueDeliveryInvoice, por evento. Misma foto, mismos literales.
+  const deliver = fnBody(az, "issueDeliveryInvoice");
   for (const campo of ["tiieIssue", "costSpread", "commissionRate", "financialDays", "collectionSpread", "fegaRate"]) {
     assert.ok(deliver.includes(campo), `la foto de la FV incluye ${campo}`);
   }
@@ -173,7 +178,7 @@ test("FV, FP, NC, FI, ATC y facturas de corte guardan quién las generó", () =>
   const cut = src("src/lib/erp/cutover.ts");
   const stock = src("src/lib/erp/stock.ts");
   assert.ok(stock.includes("add column if not exists created_by"), "la columna de autor existe");
-  assert.ok(fnBody(az, "deliverSale").includes("created_by"), "FV con autor");
+  assert.ok(fnBody(az, "issueDeliveryInvoice").includes("created_by"), "FV con autor (paso 3: se emite por evento)");
   // Decisión 14 (paso 3): la FP ya no nace con la OC — nace al recibir, o al
   // entregar si es brokeraje. Su autor vive donde nace, en bornSupplierDebt.
   assert.ok(!fnBody(az, "createPurchase").includes("'supplier'"), "createPurchase ya no crea la FP");
