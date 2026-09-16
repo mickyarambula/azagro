@@ -99,6 +99,29 @@ async function chainForDelivery(sql: Sql, companyId: number, soId: number, role:
   if (s.state === "cancelled") { blockers.push(`${s.name} está cancelado.`); return empty(); }
   if (s.state !== "done") { blockers.push(`${s.name} no se ha entregado: no hay entrega que revertir.`); return empty(); }
 
+  // BLOQUE DE PARCIALES, paso 3: este módulo es "un pedido = una entrega =
+  // una FV". Con dos eventos de entrega revertiría TODAS las salidas del
+  // kardex y UNA sola FV — inconsistente en silencio. Se detiene antes de
+  // tocar nada; la reversa por entrega es el paso 4.
+  const eventsLive = await sql<{ n: number }>`
+    select count(distinct event_ref)::int as n from stock_moves m
+    where m.company_id = ${companyId} and m.origin = ${s.name} and m.move_type = 'delivery' and m.event_ref is not null
+      and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+  `;
+  const fvsLive = await sql<{ n: number }>`
+    select count(*)::int as n from invoices
+    where company_id = ${companyId} and order_id = ${s.id} and kind = 'customer' and name like 'FV-%'
+      and state <> 'reversed' and reverses_id is null
+  `;
+  const nEvents = Math.max(eventsLive[0]?.n ?? 0, fvsLive[0]?.n ?? 0);
+  if (nEvents > 1) {
+    blockers.push(
+      `${s.name} tiene ${nEvents} entregas: se revierte por entrega, y eso es el paso 4 del bloque de parciales (todavía no construido). ` +
+        "Completo solo se revierte un pedido de una sola entrega.",
+    );
+    return empty();
+  }
+
   // Devolución previa: NC + PAG virtual + movimiento 'return'. Seis documentos
   // en cadena y la reversa de devolución es el paso 8. Se bloquea.
   const devs = await sql<{ name: string; qty: string }>`

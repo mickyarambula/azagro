@@ -117,3 +117,38 @@ test("bornSupplierDebtByReceipt: idempotente por evento Y por OC (dos OC directa
   const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebtByReceipt");
   assert.ok(body.includes("event_ref = ${opts.eventRef} and origin = ${opts.poName}"), "evento + OC");
 });
+
+// ---------------------------------------------------------------------------
+// 3.3 invoiceDelivery (server fn): facturar UNA entrega — solo con sales:edit
+//     (almacén no factura, Decisión 48); rechaza directo (ahí ya nació con la
+//     entrega), evento inexistente y evento ya facturado.
+// ---------------------------------------------------------------------------
+test("invoiceDelivery: exige sales:edit, rechaza directo / evento sin entrega / ya facturado, y emite con issueDeliveryInvoice", () => {
+  const body = fnBody(src("src/lib/azagro.ts"), "invoiceDelivery");
+  assert.ok(body.includes('assertCan(sql, context.userId, "sales", "edit")'), "facturar es edit, no deliver");
+  assert.ok(body.includes("eventRef: z.string()"), "por evento");
+  assert.match(body, /directo|brokeraje/, "en directo la FV ya nació con la entrega");
+  assert.ok(body.includes("ya está facturada"), "no se factura dos veces");
+  assert.ok(body.includes("await issueDeliveryInvoice(sql, {"), "misma función que usa el directo");
+  assert.ok(body.includes('action: "facturar-entrega"'), "bitácora propia");
+});
+
+test("listDeliveryEvents: un renglón por evento con su FV (o null) y si está revertido", () => {
+  const body = fnBody(src("src/lib/azagro.ts"), "listDeliveryEvents");
+  assert.ok(body.includes("m.event_ref is not null") && body.includes("m.move_type = 'delivery'"), "eventos del kardex (bodega propia)");
+  assert.ok(body.includes("kind = 'customer' and event_ref is not null"), "y los directos, que solo dejan FV");
+  assert.ok(body.includes("group by"), "un renglón por evento");
+});
+
+// ---------------------------------------------------------------------------
+// 3.4 (candado) chainForDelivery: "un pedido = una entrega = una FV". Con dos
+//     eventos revertiría todo el kardex y una sola FV. Se bloquea antes de
+//     tocar nada; la reversa por entrega es el paso 4.
+// ---------------------------------------------------------------------------
+test("chainForDelivery: con más de un evento vivo se bloquea antes de tocar nada (reversa por entrega = paso 4)", () => {
+  const body = fnBody(src("src/lib/erp/delivery-reversal.ts"), "chainForDelivery");
+  const i = body.indexOf("count(distinct event_ref)");
+  assert.ok(i > -1, "cuenta los eventos vivos del pedido");
+  assert.ok(i < body.indexOf("// La FV viva del pedido."), "ANTES de elegir una FV");
+  assert.match(body, /paso 4 del bloque de parciales/, "nombra el camino que falta, no finge");
+});

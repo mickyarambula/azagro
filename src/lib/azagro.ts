@@ -1942,6 +1942,114 @@ export async function issueDeliveryInvoice(
   return iname;
 }
 
+/**
+ * BLOQUE DE PARCIALES, paso 3.3: facturar UNA entrega ya hecha en bodega
+ * propia. Facturar es dinero: pide sales:edit — almacén (deliver) entrega
+ * pero no factura (Decisión 48). No se puede facturar lo que no salió
+ * (Decisión 47): exige una entrega viva con ese evento. En directo/brokeraje
+ * la FV ya nació con la entrega (Decisión 29): aquí se rechaza.
+ */
+export const invoiceDelivery = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ soId: z.number(), eventRef: z.string() }))
+  .handler(async ({ context, data }) => {
+    return withTx(async (sql) => {
+      const m = await requireCompany(sql, context.userId);
+      await assertCan(sql, context.userId, "sales", "edit");
+      const so = await sql<{ id: number; name: string; state: string; route_kind: string }>`
+        select id, name, state, coalesce(route_kind,'own') as route_kind from sales_orders
+        where id = ${data.soId} and company_id = ${m.company_id}
+        for update
+      `;
+      if (!so[0] || so[0].state === "cancelled") throw new Error("Pedido no disponible");
+      if (so[0].route_kind !== "own") {
+        throw new Error(`${so[0].name} es directo / brokeraje: su factura nació con la entrega, no se factura aparte.`);
+      }
+      const already = await sql<{ name: string }>`
+        select name from invoices
+        where company_id = ${m.company_id} and kind = 'customer' and event_ref = ${data.eventRef} and state <> 'reversed'
+        limit 1
+      `;
+      if (already[0]) throw new Error(`La entrega ${data.eventRef} ya está facturada (${already[0].name}).`);
+      const live = await sql<{ n: number }>`
+        select count(*)::int as n from stock_moves m
+        where m.company_id = ${m.company_id} and m.origin = ${so[0].name} and m.event_ref = ${data.eventRef} and m.move_type = 'delivery'
+          and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+      `;
+      if ((live[0]?.n ?? 0) === 0) {
+        throw new Error(`No hay entrega ${data.eventRef} viva en ${so[0].name}: no se factura lo que no salió.`);
+      }
+      const iname = await issueDeliveryInvoice(sql, { companyId: m.company_id, userId: context.userId, soId: so[0].id, eventRef: data.eventRef });
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "facturar-entrega",
+        entity: "sale",
+        entityId: so[0].id,
+        name: so[0].name,
+        detail: `${iname} por la entrega ${data.eventRef}`,
+      });
+      return { ok: true, fv: iname };
+    });
+  });
+
+/** Los eventos de entrega de un pedido, con su FV (o null) y si están revertidos — para la ficha del pedido. */
+export const listDeliveryEvents = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ soId: z.number() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const m = await requireCompany(sql, context.userId);
+    await assertCan(sql, context.userId, "sales", "view");
+    const so = await sql<{ id: number; name: string }>`
+      select id, name from sales_orders where id = ${data.soId} and company_id = ${m.company_id}
+    `;
+    if (!so[0]) throw new Error("Pedido no encontrado");
+    // Bodega propia deja kardex por evento; directo/brokeraje solo deja FV
+    // (nació con la entrega). Los dos caminos, un renglón por evento.
+    const events = await sql<{ event_ref: string; date: string; reversed: boolean; fv: string | null }>`
+      select e.event_ref, min(e.day)::text as date, bool_and(e.reversed) as reversed,
+        (select i.name from invoices i
+          where i.company_id = ${m.company_id} and i.kind = 'customer' and i.event_ref = e.event_ref and i.state <> 'reversed'
+          limit 1) as fv
+      from (
+        select m.event_ref, m.date as day, exists (select 1 from stock_moves r where r.reverses_id = m.id) as reversed
+        from stock_moves m
+        where m.company_id = ${m.company_id} and m.origin = ${so[0].name} and m.event_ref is not null and m.move_type = 'delivery'
+        union all
+        select i.event_ref, i.date as day, (i.state = 'reversed') as reversed
+        from invoices i
+        where i.company_id = ${m.company_id} and i.order_id = ${so[0].id} and i.kind = 'customer' and event_ref is not null
+          and i.reverses_id is null
+          and not exists (select 1 from stock_moves m2 where m2.company_id = i.company_id and m2.event_ref = i.event_ref)
+      ) e
+      group by e.event_ref
+      order by min(e.day), e.event_ref
+    `;
+    const fromStock = await sql<{ event_ref: string; code: string; name: string; uom: string; qty: string }>`
+      select m.event_ref, p.code, p.name, coalesce(p.uom,'') as uom, sum(m.quantity)::text as qty
+      from stock_moves m join products p on p.id = m.product_id
+      where m.company_id = ${m.company_id} and m.origin = ${so[0].name} and m.event_ref is not null and m.move_type = 'delivery'
+      group by m.event_ref, p.code, p.name, p.uom
+    `;
+    const fromInvoice = await sql<{ event_ref: string; code: string; name: string; uom: string; qty: string }>`
+      select i.event_ref, p.code, p.name, coalesce(p.uom,'') as uom, sum(il.qty)::text as qty
+      from invoices i join invoice_lines il on il.invoice_id = i.id join products p on p.id = il.product_id
+      where i.company_id = ${m.company_id} and i.order_id = ${so[0].id} and i.kind = 'customer' and i.event_ref is not null
+        and i.reverses_id is null
+        and not exists (select 1 from stock_moves m2 where m2.company_id = i.company_id and m2.event_ref = i.event_ref)
+      group by i.event_ref, p.code, p.name, p.uom
+    `;
+    const lines = [...fromStock, ...fromInvoice];
+    return events.map((e) => ({
+      eventRef: e.event_ref,
+      date: e.date,
+      fv: e.fv,
+      reversed: e.reversed,
+      lines: lines.filter((l) => l.event_ref === e.event_ref).map((l) => ({ code: l.code, name: l.name, uom: l.uom, qty: Number(l.qty) })),
+    }));
+  });
+
 export const returnSale = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
