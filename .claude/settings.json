@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/candado-produccion.sh",
+            "timeout": 15,
+            "statusMessage": "Candado de producción: revisando el comando…"
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/red-de-seguridad.sh",
+            "timeout": 180,
+            "statusMessage": "Red de seguridad: corriendo npm test y tsc antes del commit…"
+          }
+        ]
+      }
+    ]
+  }
+}
