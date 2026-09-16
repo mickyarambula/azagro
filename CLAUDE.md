@@ -62,6 +62,7 @@ Lee `HANDOFF.md` entero antes de tocar código. **Antes de tocar cualquier cosa 
 | Reglas de negocio (texto UI) | `src/lib/erp/rules.ts` |
 | **Circuito de financiamiento vigente** (lineal con Santa Rosa; fases de construcción) | `DISENO_FINANCIAMIENTO.md` |
 | **Cancelar/revertir un documento — diagnóstico y plan por pasos** (qué mueve cada documento, hasta dónde llega cada reversa, qué falta en la base, los casos que se rompen) | `DESHACER.md` |
+| **Borrar datos de prueba — diagnóstico y plan** (única excepción al principio de no borrar; qué tablas, en qué orden, candados, `live_since`, reversión de la salida, rastro) | `BORRADO-PRUEBAS.md` |
 | **Contradicciones entre documentos, preguntas ABIERTAS, comprobaciones numéricas** | `ESTADO.md` |
 | **Decisiones tomadas, una por renglón, con fecha** (se escribe el mismo día) | `DECISIONES.md` |
 | Fórmulas testeadas | `scripts/erp-formulas.test.mjs` |
