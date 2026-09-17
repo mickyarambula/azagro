@@ -1,103 +1,80 @@
-# Auditoría Azagro ERP — 29 de agosto de 2026
+# Auditoría completa del ERP — 16-sep-2026
 
-Diagnóstico solamente. No se tocó ningún archivo de código, solo se leyó y se corrieron pruebas.
+Documento vivo de la auditoría pedida por el dueño el 16-sep-2026: "operación
+real y escenarios diferentes, con pruebas y todo — bugs, errores, lo que
+falte, mejoras y nuevas implementaciones para hacer un sistema de primera".
 
----
+Cómo se lee: § 1 es lo que ya se sabía antes de auditar. § 2 en adelante lo
+llena la auditoría por fases. Cada hallazgo lleva archivo:línea, el escenario
+real que lo dispara, y si toca decisión del dueño (entonces va a `ESTADO.md`
+como pregunta, no se contesta en código — regla de `CLAUDE.md`).
 
-## 1. ¿Instala, pasan las pruebas, pasan los tipos?
+Fases:
 
-**`npm install`** — OK. Sin errores, sin vulnerabilidades.
-
-**`npx tsc --noEmit`** (revisión de tipos de todo el proyecto) — **OK, pasó limpio.** Cero errores de tipos en todo el código.
-
-**`npm test`** — **153 pruebas: 141 pasan, 12 fallan.**
-
-Lo importante: **las 6 pruebas de las fórmulas de cartera (`scripts/erp-formulas.test.mjs`) pasan todas** — promedio móvil, mora a 60 días, pronto pago, residual, límite de crédito. Esa es la parte que protege el dinero y todas están bien.
-
-Las 12 que fallan **no tienen nada que ver con Azagro**. Este proyecto se armó sobre una plantilla genérica ("Grok Build") que trae sus propias pruebas de fábrica: tarjetas para compartir en redes, banner de "instalar app", si el login viene apagado por defecto, si existen archivos de migración, etc. Esas pruebas de plantilla asumen un proyecto vacío recién creado (ej. "no debe haber migraciones todavía", "el login debe venir apagado"), y como Azagro ya tiene 14 migraciones y login real activado, esas pruebas de fábrica ya no aplican y fallan siempre. No revisan nada del negocio (crédito, kardex, cartera).
-
-**Clasificación: COSMÉTICO.** No bloquea nada hoy, pero ensucia el resultado de `npm test` — con 12 pruebas que fallan "siempre" es fácil que una prueba nueva que sí falle de verdad se pierda entre el ruido. Convendría borrar o silenciar esas 6 pruebas de plantilla en algún momento, no es urgente.
-
----
-
-## 2. ¿Hay revisión de tipos apagada?
-
-Se buscó `@ts-nocheck`, `@ts-ignore` y `@ts-expect-error` en todo `src/` y `server/`, con atención especial a `src/lib/azagro.ts` y `src/lib/erp/`.
-
-**Resultado: no hay ninguna en el código que se escribe a mano.** El único archivo con `@ts-nocheck` es `src/routeTree.gen.ts`, que es un archivo que genera automáticamente la librería de rutas (TanStack Router) — nadie lo edita a mano, es normal y esperado que traiga esa marca.
-
-**Clasificación: no es un hallazgo.** Todo el código de negocio (crédito, kardex, importación, folios) pasa por el chequeo de tipos estricto (`strict: true` en `tsconfig.json`), que es justamente lo que confirmó el punto 1.
-
----
-
-## 3. La ruta `/importar`: ¿acepta los dos CSV y es idempotente de verdad?
-
-Revisé el archivo de la pantalla (`src/routes/importar.tsx`) y la lógica detrás (`src/lib/erp/cutover.ts`).
-
-**Formato de los dos CSV — coincide exactamente con lo que describe HANDOFF.md:**
-- Saldos abiertos: `código, folio, fecha, vence, cargo, abono, saldo, moneda, lado` — coincide columna por columna, incluyendo detectar automáticamente si la fila es de cliente o de proveedor según la columna "lado".
-- Existencias: `código producto, bodega, cantidad, costo` — también coincide exactamente.
-
-**Idempotencia de saldos abiertos (cartera): sí, y está reforzada doble.**
-Cada fila se identifica con una llave única (`cliente/proveedor + código + folio`). Antes de insertar se revisa si ya existe esa llave, **y además** hay un índice único en la base de datos con esa misma llave — o sea, aunque algo fallara en la revisión manual, la base de datos misma rechazaría el duplicado. Pegar el mismo archivo dos veces no duplica nada; el sistema te dice cuántas filas "ya estaban" vs. cuántas son nuevas.
-
-**Idempotencia de existencias (inventario): sí, pero con un seguro más débil.**
-Antes de cargar una partida (producto + bodega), revisa si ya existe un movimiento de apertura de ese mismo producto/bodega marcado "Corte Compaq"; si ya existe, lo brinca. Esto funciona perfecto en el uso normal (pegar el mismo archivo dos veces, una después de otra). **Pero, a diferencia de cartera, no tiene un candado a nivel de base de datos** — solo la revisión de la aplicación. Si por accidente alguien diera doble clic muy rápido en "Cargar existencias" (dos peticiones casi al mismo tiempo), en teoría podría entrar duplicado, porque no hay un índice único que lo impida como sí lo hay en cartera.
-
-**Clasificación: FALTA (menor).** No es una falla del día a día — pegar el mismo CSV dos veces, que es el caso que preocupa, funciona bien. Pero falta el mismo candado de base de datos que ya tiene cartera, para blindarlo también contra un doble clic accidental. Se puede agregar cuando se quiera, es un cambio chico y no bloquea usar `/importar` ahora.
-
----
-
-## 4. Recibir / entregar / devolver / cobrar: ¿van en transacción con `FOR UPDATE`?
-
-Revisé las cuatro operaciones en `src/lib/azagro.ts` y el motor de kardex en `src/lib/erp/stock.ts`.
-
-| Operación | ¿Transacción (`withTx`)? | ¿`FOR UPDATE`? |
+| Fase | Qué | Estado |
 |---|---|---|
-| Recibir (`receivePurchase`) | Sí | Sí, bloquea la orden de compra antes de tocarla |
-| Entregar (`deliverSale`) | Sí | Sí, bloquea el pedido de venta antes de tocarlo |
-| Devolver (`returnSale`) | Sí | Sí, bloquea el pedido de venta antes de tocarlo |
-| Cobrar (`registerPayment`) | Sí | Sí, bloquea la factura antes de tocarla |
-
-Además, cada vez que cualquiera de estas cuatro operaciones toca el kardex (entra o sale mercancía), la función que mueve inventario (`postStock`) **también bloquea por separado** el producto y las existencias de la bodega afectada, antes de leer o escribir cantidades. Es decir, el candado no es solo sobre el documento (orden/pedido/factura), sino también sobre el inventario que se está moviendo. Esto es exactamente lo que pide CLAUDE.md y protege contra que dos personas cobren o entreguen lo mismo al mismo tiempo y se descuadre el kardex o la cartera.
-
-**Un hallazgo aparte, relacionado:** al cobrar, si la factura es de proveedor (pago saliente), el sistema revisa que haya saldo suficiente en el banco antes de pagar. Esa revisión de saldo de banco **no bloquea la cuenta de banco** (solo bloquea la factura). En el uso normal esto no se nota, pero si dos pagos salientes distintos se registraran contra el mismo banco casi al mismo tiempo, en teoría ambos podrían "ver" el mismo saldo disponible y los dos pasar, dejando el banco en negativo sin que el sistema lo hubiera detectado.
-
-**Clasificación:**
-- Las cuatro operaciones pedidas (recibir/entregar/devolver/cobrar): **sin hallazgos, están bien hechas.**
-- El candado faltante en el saldo de banco al pagar a proveedor: **FALTA (menor).** Es un caso de dos personas pagando desde la misma cuenta de banco casi al mismo segundo — poco probable en la operación diaria de Azagro, pero es la clase de descuido que CLAUDE.md pide evitar explícitamente ("cobros: transacción + FOR UPDATE").
+| 1 | Barrido en paralelo por 12 lentes + escenarios reales, verificación adversarial de cada hallazgo (3 jueces), síntesis y crítico de completitud | en curso |
+| 2 | Pruebas que reproduzcan cada bug confirmado (PGlite donde se pueda), en rojo antes de tocar código | pendiente |
+| 3 | Arreglos, en orden de riesgo de dinero, con red de seguridad y guía de prueba | pendiente |
+| 4 | Mejoras e implementaciones nuevas: propuesta al dueño, decisiones a `DECISIONES.md`, construcción por bloques | pendiente |
 
 ---
 
-## 5. Fórmulas de `credit.ts` vs. lo que exige CLAUDE.md
+## 1. Anotado antes de la auditoría (16-sep-2026)
 
-Se comparó línea por línea contra las reglas de CLAUDE.md y HANDOFF.md.
+### 1.1 Defecto conocido, sin corregir: `useAccess()` fuera del `AppShell` en cuatro pantallas
 
-| Regla exigida | ¿Cómo está en el código? | ¿Coincide? |
+Al reconstruir el inicio se encontró y corrigió este defecto en `index.tsx`:
+un componente de ruta que renderiza `<AppShell>` y llama `useAccess()` en el
+MISMO componente nunca recibe el contexto de permisos — `AccessProvider` vive
+dentro de `AppShell` y solo alcanza a sus hijos. Resultado: rol vacío, ningún
+permiso, y lo que dependa de `access.can()` / `access.role` se esconde o se
+comporta como "sin permiso". El patrón correcto ya existía documentado en
+`purchases.tsx` (`CloseShortPurchaseButton`) y ahora también en `index.tsx`
+(`InicioBody`).
+
+El mismo patrón (AppShell=1, Outlet=0, `useAccess()` en el componente de la
+ruta) aparece en:
+
+| Archivo | Dónde llama `useAccess()` | Verificado en navegador |
 |---|---|---|
-| Días **calendario exactos** (no meses de 30) | Resta fechas reales día por día (`daysBetween`) | Sí |
-| Interés = Cargo × (TIIE al vencimiento + 9%) × días / **360** | Exactamente esa fórmula, con la tasa TIIE + 9% de "spread de cobro" | Sí |
-| Interés **con signo** (negativo = pronto pago) | Los días se calculan con signo; si el pago fue antes del vencimiento, el interés sale negativo | Sí |
-| Comisión 1% + FEGA 2.04% = **3.04% una sola vez** sobre el cargo | Las constantes están puestas exactamente así (1% y 2.04%, suman 3.04%) y se cobran una sola vez sobre el cargo original, no sobre el saldo | Sí |
-| El estado de cuenta usa el Excel de trabajo, no el export crudo de Compaq | El código trae comentarios explícitos aclarando que replica el Excel de Grupo SL/SL Agrícola, con las mismas columnas (plazo, fecha de pago, días vencidos, interés, comisión+FEGA) | Sí |
-| FI (mora) solo si ya venció | La función de mora solo cobra si los días vencidos son mayores a cero | Sí |
-| El capital para el cálculo es el **cargo** (importe original), no el saldo | Así está explícito en el código y en el comentario que lo acompaña | Sí |
+| `src/routes/settings.tsx` | `Page`, línea ~25 (`can`, `role`) | No |
+| `src/routes/users.tsx` | `Page`, línea ~39 (`can`) | No |
+| `src/routes/importar.tsx` | línea ~381 (`role`) — la sección "Datos de prueba" | No |
+| `src/routes/quotes.tsx` | `Page`, línea ~129 (`isAdmin`) | No |
 
-Y las 6 pruebas automáticas de `scripts/erp-formulas.test.mjs` (promedio móvil, mora, pronto pago, residual, límite de crédito) confirman esto con números concretos, y **todas pasan**.
+Se detectó por estructura de código; falta comprobar en cada una si el efecto
+es cosmético o bloquea algo real. Entra a la fase 1 como hallazgo a verificar
+y a la fase 3 como arreglo (el mismo que ya se hizo dos veces).
 
-**Clasificación: sin hallazgos.** Las fórmulas de cartera coinciden con lo que pide CLAUDE.md, tanto en el código como en las pruebas.
+### 1.2 Estado operativo al 16-sep-2026 (resumen para el dueño)
+
+Para seguir operando en **doble facturación (ASR)** — el circuito con el que
+se ha operado todo hasta hoy — el sistema cubre el día a día: pedidos,
+entregas y recepciones parciales, facturación por entrega, cobranza, mora,
+pronto pago, cancelaciones y las cuatro reversas, corte inicial (saldos,
+existencias, bancos), borrado de datos de prueba, bitácora.
+
+Lo que falta y sí es operativo (de `ESTADO.md` § 2, ABIERTAS):
+
+- **H6 — Unidades de medida.** Una sola unidad por producto; comprar en una
+  y vender en otra no se puede.
+- **H4c — Devolución a proveedor.** No existe; la FP se queda viva.
+- **L8a — Costo en ajuste de inventario.** Entra al promedio sin preguntar.
+- **H3 — "Sesión D".** Barrido de uso real, sin fecha.
+- **H5 — Lotes y caducidad.** Diferido a propósito.
+
+Lo que solo importa al activar el circuito **lineal** (Santa Rosa factura al
+cliente) y hoy no bloquea: 4.1, 4.2, 4.3, 4.4, 4.5, 4.7, 4.8, 4.10, D-B, D-C.
+
+Menores: 4.13 (Reportes sin módulo de permiso propio), H4f (candado sin salida
+en un caso raro de reversa de devolución vieja).
+
+Falta también el **archivo real del export de Compaq** (H8a) para cotejar el
+formato del corte.
 
 ---
 
-## Resumen — qué hacer y en qué orden
+## 2. Hallazgos de la fase 1
 
-**ROTO (nada funciona):** ninguno. No se encontró nada roto.
-
-**FALTA (no existe y conviene agregarlo, ninguno urgente):**
-1. Ponerle a la carga de existencias de corte el mismo candado de base de datos que ya tiene la carga de saldos abiertos (para blindarla también contra un doble clic accidental, no solo contra pegar el CSV dos veces).
-2. Bloquear la cuenta de banco (no solo la factura) al registrar un pago a proveedor, para blindar contra dos pagos casi simultáneos desde el mismo banco.
-
-**COSMÉTICO (molesta pero no bloquea):**
-1. Las 12 pruebas que fallan en `npm test` son de la plantilla original ("Grok Build"), no de Azagro — conviene borrarlas o actualizarlas para que `npm test` en verde signifique algo, pero no urge.
-
-**En corto:** el motor de crédito, el kardex y la importación de corte están sólidos y coinciden con las reglas del negocio. Los dos "FALTA" son mejoras de blindaje contra casos raros (doble clic, dos pagos al mismo segundo), no bloquean operar mañana.
+_(la llena la auditoría)_
