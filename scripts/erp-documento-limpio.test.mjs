@@ -357,7 +357,8 @@ test("cableado: factura y factura de intereses", () => {
   assert.ok(cr.includes("left: invoiceLineLabel({ name: r.name, origin: r.origin, invClass: r.inv_class }),"), "la partida se traduce");
   assert.ok(!cr.includes("left: r.origin || r.name"), "el origen interno ya no se imprime tal cual");
   assert.ok(cr.includes("const expediente = expedienteFor(trail, audience);"), "expediente filtrado según quién recibe");
-  assert.ok(cr.includes('totalLabel: "Saldo",'));
+  // Decisión 75 (17-sep-2026, con OK del dueño): revertida imprime "Importe", no "Saldo" (ya no hay deuda viva).
+  assert.ok(cr.includes('totalLabel: r.state === "reversed" ? "Importe" : "Saldo",'));
   assert.ok(cr.includes("r.calc_client || interestInvoiceFallback("), "la FI explica su cuenta; las viejas, lo que tienen guardado");
   const ops = src("src/lib/erp/ops.ts");
   const fi = slice(ops, "export async function issueMoraInvoice", "export const invoiceLiveMora");

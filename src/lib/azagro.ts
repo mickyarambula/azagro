@@ -2728,8 +2728,9 @@ export const listInvoices = createServerFn({ method: "POST" })
           and (coalesce(i.folio_fiscal,'') <> '' or coalesce(i.uuid_fiscal,'') <> '') and i.sat_cancelled_at is null) as pendiente_sat,
         i.sat_cancelled_at::text,
         -- Decisión 75 (Altos #37): una factura revertida se imprime solo como
-        -- comprobante interno, marcada, con la fecha en que se revirtió.
-        i.cancelled_at::date::text as cancelled_at
+        -- comprobante interno, marcada, con la fecha en que se revirtió — en
+        -- el huso de Azagro (America/Mazatlan), no el del servidor.
+        to_char(i.cancelled_at at time zone 'America/Mazatlan', 'YYYY-MM-DD') as cancelled_at
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

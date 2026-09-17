@@ -333,7 +333,8 @@ function Page() {
                                   amount: moneyIn(r.amount, cur),
                                 },
                               ],
-                              totalLabel: "Saldo",
+                              // Revertida: "Importe", no "Saldo" — ya no hay deuda que ese número represente.
+                              totalLabel: r.state === "reversed" ? "Importe" : "Saldo",
                               total: moneyIn(r.residual, cur),
                               // La factura de intereses explica su cuenta con la
                               // fórmula y las cifras que se facturaron ese día.
@@ -344,16 +345,22 @@ function Page() {
                                     ? fxAdjustmentNote(r.calc)
                                     : undefined,
                             }),
-                            {
-                              module: "credit",
-                              title: paperTitle,
-                              number: r.name,
-                              party: r.partner,
-                              partnerId: r.partner_id,
-                              email: r.partner_email,
-                              phone: r.partner_phone,
-                              extra: expediente || undefined,
-                            },
+                            // Decisión 75: una revertida no se envía por NINGÚN
+                            // camino — sin `send`, la vista previa (doc-preview)
+                            // tampoco enseña «Enviar». "Documento" sigue
+                            // imprimiéndola, marcada, como comprobante interno.
+                            r.state === "reversed"
+                              ? undefined
+                              : {
+                                  module: "credit",
+                                  title: paperTitle,
+                                  number: r.name,
+                                  party: r.partner,
+                                  partnerId: r.partner_id,
+                                  email: r.partner_email,
+                                  phone: r.partner_phone,
+                                  extra: expediente || undefined,
+                                },
                           );
                           })()
                         }

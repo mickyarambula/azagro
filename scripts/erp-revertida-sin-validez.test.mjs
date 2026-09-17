@@ -34,12 +34,28 @@ test("cableado: la factura de Cartera pasa voided al letterhead cuando está rev
   assert.ok(cr.includes('voided: r.state === "reversed" ? (r.cancelled_at || "sí") : undefined,'), "Documento: marca con fecha, o \"sí\" si no hay fecha capturada");
   const iCond = cr.indexOf('{r.state !== "reversed" && (\n                      <SendButton');
   assert.notEqual(iCond, -1, "el bloque de Enviar está condicionado a que NO esté revertida");
+  // Una revertida no se envía por NINGÚN camino: "Documento" abre una vista
+  // previa (doc-preview.tsx) que trae su PROPIO botón "Enviar" si se le pasa
+  // `send` — sin candado aquí, ese camino la enviaba idéntica a una viva
+  // (hallazgo del revisor de dinero, NO PASA en la primera pasada).
+  assert.ok(cr.includes('r.state === "reversed"\n                              ? undefined\n                              : {'), "sin `send` para una revertida: doc-preview no ofrece Enviar");
+  assert.ok(cr.includes('totalLabel: r.state === "reversed" ? "Importe" : "Saldo",'), "\"Saldo\" implica deuda viva; una revertida ya no tiene una");
+});
+
+test("doc-preview.tsx: sin `send` no renderiza el botón Enviar (es la puerta que cierra el candado de credit.tsx)", () => {
+  const dp = src("src/components/doc-preview.tsx");
+  assert.ok(dp.includes("{send ? (") && dp.includes("<SendButton"), "el botón depende de que `send` venga con algo");
+});
+
+test("listInvoices: la fecha de revertida sale en el huso de Azagro, no el del servidor", () => {
+  const body = fnBody(src("src/lib/azagro.ts"), "listInvoices");
+  assert.ok(body.includes("to_char(i.cancelled_at at time zone 'America/Mazatlan', 'YYYY-MM-DD') as cancelled_at"));
 });
 
 test("listInvoices trae cancelled_at para poder estampar la fecha en el papel", () => {
   const body = fnBody(src("src/lib/azagro.ts"), "listInvoices");
   assert.ok(body.includes("cancelled_at: string | null;"));
-  assert.ok(body.includes("i.cancelled_at::date::text as cancelled_at"));
+  assert.ok(body.includes("to_char(i.cancelled_at at time zone 'America/Mazatlan', 'YYYY-MM-DD') as cancelled_at"));
 });
 
 test("la Decisión 75 vive en DECISIONES.md", () => {
