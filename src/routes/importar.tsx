@@ -50,6 +50,8 @@ function Page() {
   // columna, y eso es un número de negocio decidido por el sistema.
   const [policies, setPolicies] = useState<Awaited<ReturnType<typeof listCreditPolicies>>>([]);
   const [policyCode, setPolicyCode] = useState("");
+  // Decisión 72: días del plazo financiero de los saldos del corte (la columna «vence» es cobranza, día 120).
+  const [creditDays, setCreditDays] = useState("");
 
   useEffect(() => {
     void dbStatus()
@@ -136,6 +138,22 @@ function Page() {
             Decide si estas facturas generan mora y si se les cobra comisión y FEGA. No hay valor por omisión: sin
             elegirla no se pega nada. Se cambia después factura por factura, no aquí.
           </p>
+          <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+            Días de plazo financiero de estos saldos
+            <input
+              className={Number(creditDays) > 0 ? "erp-input" : "erp-input border-warn"}
+              type="number"
+              min={1}
+              step={1}
+              value={creditDays}
+              onChange={(e) => setCreditDays(e.target.value)}
+              placeholder="150"
+            />
+          </label>
+          <p className="mt-1 text-[12px] text-muted">
+            La columna «vence» del CSV es el vencimiento de cobranza; el interés corre desde la fecha de cada factura
+            más estos días («Interés desde»). Sin capturarlos no se pega nada.
+          </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
@@ -158,12 +176,12 @@ function Page() {
             <button
               type="button"
               className="erp-btn-primary"
-              disabled={busy || !csvInv.trim() || !policyCode}
+              disabled={busy || !csvInv.trim() || !policyCode || !(Number(creditDays) > 0)}
               onClick={async () => {
                 setBusy(true);
                 setError(null);
                 try {
-                  const r = await applyOpenInvoices({ data: { csv: csvInv, policyCode } });
+                  const r = await applyOpenInvoices({ data: { csv: csvInv, policyCode, creditDays: Math.round(Number(creditDays)) } });
                   const pol = policies.find((p) => p.code === policyCode);
                   setMsg(
                     `Cartera de corte: ${r.inserted} nuevas, ${r.skipped} ya estaban (no se duplicaron)${r.rejected.length ? `, ${r.rejected.length} rechazadas` : ""}. Política ${pol?.name ?? policyCode}.`,

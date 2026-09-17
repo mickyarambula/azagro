@@ -311,6 +311,10 @@ export async function applyOpenInvoiceRows(
     circuitCode: string;
     rows: InvRow[];
     today?: string;
+    // Decisión 72: días del plazo financiero de estos saldos (la columna
+    // «vence» del CSV es el día 120). cutover.ts lo exige; sin él (solo
+    // pruebas viejas) la factura queda como antes: sin credit_due.
+    creditDays?: number;
     foldName: (s: string) => string;
   },
 ) {
@@ -361,12 +365,18 @@ export async function applyOpenInvoiceRows(
     // El abono que ya traía en Compaq queda registrado: el saldo de aquí
     // en adelante es cargo − abono de corte − pagos capturados en el sistema.
     const openingPaid = Math.max(0, cargo - r.saldo);
+    // Decisión 72: «vence» (due_date) es cobranza; la mora corre desde
+    // credit_due = fecha + días elegidos en /importar, y credit_days lo dice.
+    // Solo al cliente: la deuda con el proveedor no lleva plazo financiero
+    // (la mora es de cartera por cobrar) y escribírselo sería un dato falso.
+    const cd = r.kind === "customer" && o.creditDays && o.creditDays > 0 ? Math.round(o.creditDays) : null;
     await sql`
-      insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by, circuit_code, amount_fx, fx_agreed)
+      insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by, circuit_code, amount_fx, fx_agreed, credit_due, credit_days)
       values (
         ${o.companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}, ${r.date}, ${r.due}, 'open',
         ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${o.policyCode}, ${o.userId},
-        ${r.kind === "customer" ? o.circuitCode : null}, ${usd ? cargoUsd : 0}, ${usd ? rate : 1}
+        ${r.kind === "customer" ? o.circuitCode : null}, ${usd ? cargoUsd : 0}, ${usd ? rate : 1},
+        ${cd == null ? null : r.date}::date + ${cd ?? 0}::int, ${cd ?? 0}
       )
     `;
     inserted += 1;

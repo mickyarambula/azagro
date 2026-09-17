@@ -171,10 +171,41 @@ test("#9 (Decisión 70): sin TC en la tabla, la fila USD se rechaza con motivo y
 test("cableado: cutover.ts pasa la fecha de hoy al preview y al apply (el TC del corte se busca a esa fecha)", () => {
   const c = src("src/lib/erp/cutover.ts");
   assert.ok(c.includes("previewOpenInvoiceRows(sql, { companyId, rows: parsed, today: todayMx() })"));
-  assert.ok(c.includes("foldName,\n        today: todayMx(),\n      });"));
+  assert.ok(c.includes("foldName,\n        today: todayMx(),\n        creditDays: data.creditDays,\n      });"));
   const core = src("src/lib/erp/cutover-core.ts");
   assert.ok(core.includes("(${today ?? null}::date is null or date <= ${today ?? null}::date)\n    order by date desc limit 1"), "último renglón con fecha ≤ la del corte");
   assert.ok(!core.includes("toISOString"), "el core no calcula 'hoy': se lo pasa cutover.ts (todayMx)");
+});
+
+// ---------------------------------------------------------------------------
+// #19 — plazo financiero de los saldos del corte (Decisión 72)
+// ---------------------------------------------------------------------------
+test("#19 (Decisión 72): con días de plazo financiero, cada saldo nace con credit_due = fecha + días y credit_days = días; «vence» sigue siendo cobranza", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const rows = parseOpenInvoices("CL0001,A-292,2025-11-01,2026-03-01,150000,20000,130000,MXN,cliente\nPR0001,P-7,2025-12-15,2026-01-14,800,0,800,MXN,proveedor", HOY);
+  await applyOpenInvoiceRows(sql, { companyId: 1, userId: "u1", rows, policyCode: "ESTANDAR", circuitCode: "ASR", foldName, today: HOY, creditDays: 150 });
+  const inv = await sql`select name, date::text as date, due_date::text as due, credit_due::text as credit_due, credit_days from invoices where company_id = 1 order by id`;
+  assert.deepEqual(inv[0], { name: "A-292", date: "2025-11-01", due: "2026-03-01", credit_due: "2026-03-31", credit_days: 150 }, "vence (120) para cobranza; interés desde el día 150");
+  assert.deepEqual(inv[1], { name: "P-7", date: "2025-12-15", due: "2026-01-14", credit_due: null, credit_days: 0 }, "la deuda con el proveedor no lleva plazo financiero");
+  // Decisiones 68-69 en la puerta de producción: «Sin mora» con plazo no nace (regla única, guardSaleTerms).
+  const c = src("src/lib/erp/cutover.ts");
+  assert.ok(c.includes("await guardSaleTerms(sql, companyId, { creditDays: data.creditDays, policyCode: data.policyCode });"), "misma regla que los otros cuatro nacimientos");
+  await db.close();
+});
+
+test("#19 (Decisión 72): sin días (solo pruebas viejas) la factura queda como antes — sin credit_due, credit_days 0; cutover.ts los exige y la pantalla no deja cargar sin ellos", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const rows = parseOpenInvoices("CL0001,A-292,2025-11-01,2026-03-01,150000,20000,130000,MXN,cliente", HOY);
+  await applyOpenInvoiceRows(sql, { companyId: 1, userId: "u1", rows, policyCode: "NONE", circuitCode: "ASR", foldName, today: HOY });
+  assert.deepEqual(await sql`select credit_due, credit_days from invoices where company_id = 1`, [{ credit_due: null, credit_days: 0 }]);
+  const c = src("src/lib/erp/cutover.ts");
+  assert.ok(c.includes('creditDays: z.number().int().positive("Captura los días del plazo financiero de estos saldos (p. ej. 150).")'), "la puerta de producción lo exige");
+  assert.ok(c.includes("creditDays: data.creditDays,") && c.includes("plazo financiero ${data.creditDays} días (Decisión 72)"), "se pasa al core y queda en bitácora");
+  const ui = src("src/routes/importar.tsx");
+  assert.ok(ui.includes("Días de plazo financiero de estos saldos") && ui.includes("disabled={busy || !csvInv.trim() || !policyCode || !(Number(creditDays) > 0)}"), "sin días no hay botón");
+  await db.close();
 });
 
 // ---------------------------------------------------------------------------

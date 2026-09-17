@@ -8,6 +8,7 @@ import { todayMx } from "@/lib/utils";
 import { foldName } from "@/lib/erp/catalog";
 import { ensureInvoiceExtras, postStock } from "@/lib/erp/stock";
 import { CIRCUIT_LABEL, CUTOVER_CIRCUIT } from "@/lib/erp/circuits";
+import { guardSaleTerms } from "@/lib/erp/sale-terms";
 import {
   applyOpenInvoiceRows,
   applyStockRows,
@@ -95,7 +96,14 @@ export const previewOpenInvoices = createServerFn({ method: "POST" })
  */
 export const applyOpenInvoices = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ csv: z.string().min(3), policyCode: z.string().min(1) }))
+  .validator(
+    z.object({
+      csv: z.string().min(3),
+      policyCode: z.string().min(1),
+      // Decisión 72: días del plazo financiero; sin capturarlos no se pega nada.
+      creditDays: z.number().int().positive("Captura los días del plazo financiero de estos saldos (p. ej. 150)."),
+    }),
+  )
   .handler(async ({ context, data }) => {
     const boot = await getSql();
     await boot`alter table invoices add column if not exists cutover_key text`;
@@ -117,6 +125,12 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
           `Elige la política de cobro con la que entran estos saldos: «${data.policyCode}» no existe en Ajustes → Políticas de cobro.`,
         );
       }
+      // Decisión 72 + Decisiones 68-69: con plazo financiero, cada saldo de
+      // cliente es un documento a crédito y la política tiene que cuadrar con
+      // el plazo — «Sin mora» con 150 días no nace aquí tampoco (hallazgo del
+      // revisor de dinero, 17-sep-2026). Misma regla única que saveOrder,
+      // createSale, decideQuote y la OC del cliente.
+      await guardSaleTerms(sql, companyId, { creditDays: data.creditDays, policyCode: data.policyCode });
       const parsed = parseOpenInvoices(data.csv);
       const { inserted, skipped, rejected } = await applyOpenInvoiceRows(sql, {
         companyId,
@@ -126,6 +140,7 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         rows: parsed,
         foldName,
         today: todayMx(),
+        creditDays: data.creditDays,
       });
       await writeAudit(sql, {
         companyId,
@@ -133,7 +148,7 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         action: "corte",
         entity: "invoice",
         name: "Saldos abiertos Compaq",
-        detail: `entraron ${inserted}, ya estaban ${skipped}, rechazadas ${rejected.length} · política de cobro ${pol[0].name} (${pol[0].code}) · circuito ${CIRCUIT_LABEL[CUTOVER_CIRCUIT]}${rejectNote(rejected)}`,
+        detail: `entraron ${inserted}, ya estaban ${skipped}, rechazadas ${rejected.length} · política de cobro ${pol[0].name} (${pol[0].code}) · plazo financiero ${data.creditDays} días (Decisión 72) · circuito ${CIRCUIT_LABEL[CUTOVER_CIRCUIT]}${rejectNote(rejected)}`,
       });
       return { inserted, skipped, rejected };
     });

@@ -214,9 +214,10 @@ test("cableado: «Sin mora» apaga interés, comisión, FEGA, TIIE y pronto pago
 test("cableado: el importador pide la política y no acepta una que no existe", () => {
   const cut = src("src/lib/erp/cutover.ts");
   const apply = cut.slice(cut.indexOf("export const applyOpenInvoices"), cut.indexOf("async function logImportFailure"));
+  // Decisión 72 (17-sep-2026, con OK del dueño): el validador también exige los días del plazo financiero.
   assert.ok(
-    apply.includes('z.object({ csv: z.string().min(3), policyCode: z.string().min(1) })'),
-    "el servidor exige la política, no la supone",
+    apply.includes("csv: z.string().min(3),\n      policyCode: z.string().min(1),") && apply.includes("creditDays: z.number().int().positive("),
+    "el servidor exige la política (y el plazo financiero), no los supone",
   );
   assert.ok(apply.includes("select code, name from credit_policies where company_id = ${companyId} and code = ${data.policyCode}"), "y valida que exista");
   // El insert vive en cutover-core.ts (paso 0 del corte, 16-sep-2026);
@@ -229,7 +230,7 @@ test("cableado: el importador pide la política y no acepta una que no existe", 
   const page = src("src/routes/importar.tsx");
   assert.ok(page.includes("Política de cobro de estos saldos"), "la pantalla la pide");
   assert.ok(page.includes('<option value="">Elige la política…</option>'), "nace vacía, sin proponer una");
-  assert.ok(page.includes("disabled={busy || !csvInv.trim() || !policyCode}"), "sin elegirla no se pega nada");
+  assert.ok(page.includes("disabled={busy || !csvInv.trim() || !policyCode || !(Number(creditDays) > 0)}"), "sin elegirla (ni el plazo financiero, Decisión 72) no se pega nada");
 });
 
 // ---------------------------------------------------------------------------
