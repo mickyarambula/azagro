@@ -195,7 +195,7 @@ returning live_since`,
   clear: "update company_settings set live_since = null where company_id = $1 and live_since is not null returning 1",
   docs: [
     { what: "expenses", sql: "select count(*)::int as n from expenses where company_id = $1 and (date > ($2::timestamptz)::date or created_at > $2::timestamptz)" },
-    { what: "bank_moves", sql: "select count(*)::int as n from bank_moves where company_id = $1 and date > ($2::timestamptz)::date" },
+    { what: "bank_moves", sql: "select count(*)::int as n from bank_moves where company_id = $1 and cutover_key is null and date > ($2::timestamptz)::date" },
     { what: "payments", sql: "select count(*)::int as n from payments where company_id = $1 and date > ($2::timestamptz)::date" },
     { what: "invoices", sql: "select count(*)::int as n from invoices where company_id = $1 and cutover_key is null and date > ($2::timestamptz)::date" },
     { what: "customer_pos", sql: "select count(*)::int as n from customer_pos where company_id = $1 and (po_date > ($2::timestamptz)::date or created_at > $2::timestamptz)" },
@@ -287,7 +287,13 @@ export const PURGE = [
     why: "rompe el ciclo bank_moves.expense_id ↔ expenses.bank_move_id (0008)",
     sql: "update expenses set bank_move_id = null where company_id = $1 and bank_move_id is not null",
   },
-  { step: 2, table: "bank_moves", kind: "delete", sql: "delete from bank_moves where company_id = $1" },
+  {
+    step: 2,
+    table: "bank_moves",
+    kind: "delete",
+    keeps: "los saldos iniciales del corte de Compaq (cutover_key, Decisión 63)",
+    sql: "delete from bank_moves where company_id = $1 and cutover_key is null",
+  },
   { step: 3, table: "expenses", kind: "delete", sql: "delete from expenses where company_id = $1" },
   { step: 4, table: "payments", kind: "delete", children: ["payment_allocs"], sql: "delete from payments where company_id = $1" },
   {

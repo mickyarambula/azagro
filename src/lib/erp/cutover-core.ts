@@ -21,7 +21,10 @@ export type InvRow = {
   abono: number;
   saldo: number;
   currency: "MXN" | "USD";
-  kind: "customer" | "supplier";
+  // "unknown" = la columna «lado» no dice cliente o proveedor (vacía, ausente
+  // o con otra palabra). No se adivina (hallazgo #7, regla 9): la fila se
+  // rechaza con motivo en el apply y se marca en el preview.
+  kind: "customer" | "supplier" | "unknown";
 };
 
 export type StockRow = {
@@ -38,9 +41,47 @@ function splitCsv(text: string) {
     .filter((l) => l && !l.startsWith("#"));
 }
 
+/**
+ * Celdas de una fila. Con tabulador es TSV (Excel). Con comas, CSV real
+ * (RFC 4180): un campo entre comillas puede traer comas adentro ("GRUPO
+ * AGRICOLA, S.A. DE C.V.", "1,500.00") y una comilla doblada ("") es una
+ * comilla literal. Antes era `split(",")`: la coma de la razón social corría
+ * todas las columnas una posición y la fila entraba con dinero de la columna
+ * equivocada, sin aviso (hallazgo #10).
+ */
 function cells(line: string) {
   if (line.includes("\t")) return line.split("\t").map((c) => c.trim());
-  return line.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+  // Comillas sin par (TUBO 2",001,10,50 — pulgadas en un código): no es un
+  // campo entrecomillado; se lee como siempre para que la fila no desaparezca.
+  if (((line.match(/"/g) || []).length & 1) === 1) return line.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
+  const out: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quoted) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else quoted = false;
+      } else cur += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ",") {
+      out.push(cur.trim());
+      cur = "";
+    } else cur += ch;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+/** El lado del saldo, por la columna 9 y solo por ella: cliente o proveedor; lo demás no se adivina. */
+function sideOf(lado: string): InvRow["kind"] {
+  const v = (lado || "").trim();
+  if (/^(prov|proveedor|proveedores|por\s*pagar|pagar|cxp|c\s*x\s*p|supplier|fp)$/i.test(v)) return "supplier";
+  if (/^(cli|cliente|clientes|por\s*cobrar|cobrar|cxc|c\s*x\s*c|customer|fv)$/i.test(v)) return "customer";
+  return "unknown";
 }
 
 function num(v: string) {
@@ -54,7 +95,9 @@ export function parseOpenInvoices(raw: string, today: string): InvRow[] {
   for (const line of lines) {
     const c = cells(line);
     if (!c[0] || (/codigo|código|partner|cliente|proveedor|folio/i.test(c[0]!) && out.length === 0)) continue;
-    const kind = /prov|pagar|supplier|fp/i.test(c[8] || c[0] || "") ? "supplier" : "customer";
+    // Hallazgo #7: antes, sin columna «lado», miraba la columna 1 (el CÓDIGO
+    // del socio) y, como no decía "prov", todo entraba como cuenta por cobrar.
+    const kind = sideOf(c[8] || "");
     const folio = (c[1] || c[2] || "").replace(/\s+/g, "-");
     const saldo = num(c[6] || c[5] || "0");
     if (!folio || Math.abs(saldo) < 0.009) continue;
@@ -102,12 +145,18 @@ function sameMoney(a: number, b: number) {
   return Math.abs(a - b) < 0.009;
 }
 
-export async function previewOpenInvoiceRows(sql: Sql, o: { companyId: number; rows: InvRow[] }) {
-  const rows: (InvRow & { key: string; partnerName: string; partnerId: number; skip: boolean; differs?: string })[] = [];
+export async function previewOpenInvoiceRows(sql: Sql, o: { companyId: number; rows: InvRow[]; today?: string }) {
+  const rows: (InvRow & { key: string; partnerName: string; partnerId: number; skip: boolean; differs?: string; problem?: string })[] = [];
+  const fx = await fxAtCutover(sql, o.companyId, o.today);
   for (const r of o.rows) {
     const key = cutoverKeyOf(r);
-    const exists = await sql<{ id: number; amount: string; opening_paid: string }>`
-      select id, amount::text, coalesce(opening_paid, 0)::text as opening_paid
+    const problem = rowProblem(r, fx);
+    if (problem) {
+      rows.push({ ...r, key, partnerName: "", partnerId: 0, skip: false, problem });
+      continue;
+    }
+    const exists = await sql<{ id: number; amount: string; opening_paid: string; fx_agreed: string }>`
+      select id, amount::text, coalesce(opening_paid, 0)::text as opening_paid, coalesce(fx_agreed, 0)::text as fx_agreed
       from invoices where company_id = ${o.companyId} and cutover_key = ${key} limit 1
     `;
     const partner = await sql<{ id: number; name: string }>`
@@ -119,8 +168,12 @@ export async function previewOpenInvoiceRows(sql: Sql, o: { companyId: number; r
     // eso no se compara contra residual).
     let differs: string | undefined;
     if (exists[0]) {
-      const storedCargo = Number(exists[0].amount);
-      const storedSaldo = storedCargo - Number(exists[0].opening_paid);
+      // Decisión 70: lo guardado de una fila USD está en pesos al TC del
+      // corte; se compara en dólares, en la moneda del CSV, para que un TC
+      // distinto hoy no alarme por nada.
+      const div = r.currency === "USD" && Number(exists[0].fx_agreed) > 0 ? Number(exists[0].fx_agreed) : 1;
+      const storedCargo = Number(exists[0].amount) / div;
+      const storedSaldo = (Number(exists[0].amount) - Number(exists[0].opening_paid)) / div;
       const csvCargo = r.cargo || r.saldo + r.abono;
       if (!sameMoney(storedCargo, csvCargo) || !sameMoney(storedSaldo, r.saldo)) {
         differs = `Folio ${r.folio}: ya está cargado con cargo ${storedCargo} y saldo de corte ${storedSaldo}; el CSV trae cargo ${csvCargo} y saldo ${r.saldo}. No se aplica — si el bueno es el nuevo, se corrige la factura a mano.`;
@@ -137,10 +190,60 @@ export async function previewOpenInvoiceRows(sql: Sql, o: { companyId: number; r
   }
   return {
     rows,
-    open: rows.filter((r) => !r.skip).length,
+    open: rows.filter((r) => !r.skip && !r.problem).length,
     skipped: rows.filter((r) => r.skip).length,
     differing: rows.filter((r) => r.differs).length,
+    problems: rows.filter((r) => r.problem).length,
   };
+}
+
+function sideProblem(r: InvRow) {
+  return `Fila ${r.partnerCode} · folio ${r.folio}: la columna «lado» no dice cliente o proveedor (viene vacía o con otra palabra). No se adivina: corrige el CSV y vuelve a pegar.`;
+}
+
+/**
+ * Lo que detiene una fila ANTES de mirar el catálogo, en el mismo orden en el
+ * apply y en el preview: sin lado (hallazgo #7) y saldo negativo (Decisión
+ * 71: un anticipo o NC abierta de Compaq no entra como factura — hoy se
+ * colapsaría a $0 al primer recálculo — se rechaza a la vista y se captura
+ * cuando exista el saldo a favor de la Decisión 12).
+ */
+function rowProblem(r: InvRow, fx: FxPick | null): string | null {
+  if (r.kind === "unknown") return sideProblem(r);
+  if (r.saldo < 0) {
+    return `Fila ${r.partnerCode} · folio ${r.folio}: saldo a favor (${r.saldo} ${r.currency}). Un anticipo o nota de crédito abierta de Compaq no entra como factura; se captura cuando exista el saldo a favor del cliente (Decisión 71).`;
+  }
+  if (r.currency === "USD" && !fx) {
+    return `Fila ${r.partnerCode} · folio ${r.folio}: saldo en dólares y no hay tipo de cambio en la tabla para la fecha del corte. Captúralo en Ajustes → Tipo de cambio y vuelve a pegar (Decisión 70: no se inventa un TC).`;
+  }
+  return null;
+}
+
+export type FxPick = { rate: number; date: string };
+
+/**
+ * Decisión 70: el TC del corte es el último renglón de la tabla con fecha ≤ la
+ * fecha del corte (hoy). Sin renglón, las filas en USD se rechazan — regla 9.
+ */
+export async function fxAtCutover(sql: Sql, companyId: number, today?: string): Promise<FxPick | null> {
+  // Sin fecha (solo pruebas): el último renglón de la tabla. cutover.ts
+  // siempre pasa todayMx() — aquí no se calcula "hoy" (sería UTC).
+  const rows = await sql<{ date: string; usd_mxn: string }>`
+    select date::text, usd_mxn::text from fx_rates
+    where company_id = ${companyId} and (${today ?? null}::date is null or date <= ${today ?? null}::date)
+    order by date desc limit 1
+  `;
+  return rows[0] && Number(rows[0].usd_mxn) > 0 ? { rate: Number(rows[0].usd_mxn), date: rows[0].date } : null;
+}
+
+/**
+ * USD × TC al centavo, sin el error de coma flotante: 999.99 × 18.5 es
+ * 18,499.815 exacto, pero la máquina calcula 18,499.81499… y `Math.round`
+ * daría 18,499.81. Con centavos y millonésimas enteros el producto es exacto
+ * y el redondeo es el de la aritmética, no el del float.
+ */
+function usdToMxn(usd: number, rate: number) {
+  return Math.round((Math.round(usd * 100) * Math.round(rate * 1e6)) / 1e6) / 100;
 }
 
 /**
@@ -207,6 +310,7 @@ export async function applyOpenInvoiceRows(
     policyCode: string;
     circuitCode: string;
     rows: InvRow[];
+    today?: string;
     foldName: (s: string) => string;
   },
 ) {
@@ -216,13 +320,20 @@ export async function applyOpenInvoiceRows(
   // las válidas entran. El reintento es seguro: lo ya cargado se salta por
   // cutover_key.
   const rejected: { reason: string }[] = [];
-  for (const r of o.rows) {
+  const fx = await fxAtCutover(sql, o.companyId, o.today);
+  for (const row of o.rows) {
+    let r = row;
     const key = cutoverKeyOf(r);
     const exists = await sql<{ id: number }>`
       select id from invoices where company_id = ${o.companyId} and cutover_key = ${key} limit 1
     `;
     if (exists[0]) {
       skipped += 1;
+      continue;
+    }
+    const problem = rowProblem(r, fx);
+    if (problem) {
+      rejected.push({ reason: problem });
       continue;
     }
     let partner = await sql<{ id: number }>`
@@ -238,16 +349,24 @@ export async function applyOpenInvoiceRows(
       rejected.push({ reason: `No está en catálogo el código ${r.partnerCode} (folio ${r.folio}). Carga catálogos Compaq primero.` });
       continue;
     }
+    // Decisión 70: una fila en dólares entra en PESOS al TC del corte (como
+    // toda FV USD del sistema, Decisión 2): cargo, abono y saldo en pesos,
+    // amount_fx = el cargo en USD, fx_agreed = ese TC. Una fila MXN no pasa
+    // por aquí y no cambia ni un centavo.
+    const usd = row.currency === "USD";
+    const cargoUsd = row.cargo || row.saldo + row.abono;
+    const rate = usd ? fx!.rate : 1;
+    if (usd) r = { ...row, cargo: usdToMxn(row.cargo, rate), abono: usdToMxn(row.abono, rate), saldo: usdToMxn(row.saldo, rate) };
     const cargo = r.cargo || r.saldo + r.abono;
     // El abono que ya traía en Compaq queda registrado: el saldo de aquí
     // en adelante es cargo − abono de corte − pagos capturados en el sistema.
     const openingPaid = Math.max(0, cargo - r.saldo);
     await sql`
-      insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by, circuit_code)
+      insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by, circuit_code, amount_fx, fx_agreed)
       values (
         ${o.companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}, ${r.date}, ${r.due}, 'open',
         ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${o.policyCode}, ${o.userId},
-        ${r.kind === "customer" ? o.circuitCode : null}
+        ${r.kind === "customer" ? o.circuitCode : null}, ${usd ? cargoUsd : 0}, ${usd ? rate : 1}
       )
     `;
     inserted += 1;

@@ -203,7 +203,7 @@ export const purgeTestData = createServerFn({ method: "POST" })
           entity: "company",
           entityId: me.company_id,
           name: res.company.name,
-          detail: `${data.reason} · borrado: ${deleted} · reconstruido: ${rebuilt} · conservado: el corte de Compaq (facturas con cutover_key, INI 'Corte Compaq', CSV del corte) y ${kept}`,
+          detail: `${data.reason} · borrado: ${deleted} · reconstruido: ${rebuilt} · conservado: el corte de Compaq (facturas y saldos iniciales de bancos con cutover_key, INI 'Corte Compaq', CSV del corte) y ${kept}`,
         });
         return { company: { id: res.company.id, name: res.company.name }, deleted: res.deleted, rebuilt: res.rebuilt };
       });

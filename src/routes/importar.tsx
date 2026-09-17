@@ -109,7 +109,7 @@ function Page() {
           <p className="font-semibold">2. Saldos abiertos (CxC / CxP)</p>
           <p className="mt-1 text-muted">
             Pega CSV o TSV: <code className="text-[12px]">código, folio, fecha, vence, cargo, abono, saldo, moneda, lado</code>.
-            Solo filas con saldo. Lado = cliente o proveedor.
+            Solo filas con saldo. Lado = cliente o proveedor, obligatorio: una fila sin lado se rechaza, no se adivina. Si una razón social lleva coma, va entre comillas.
           </p>
           <textarea
             className="erp-input mt-2 min-h-28 font-mono text-[12px]"
@@ -183,9 +183,17 @@ function Page() {
           {preview && (
             <div className="mt-2 text-[12px] text-muted">
               <p>
-                {preview.open} entrarían · {preview.skipped} ya están · {preview.rows.filter((r) => !r.partnerId).length} sin catálogo
+                {preview.open} entrarían · {preview.skipped} ya están · {preview.rows.filter((r) => !r.partnerId && !r.problem).length} sin catálogo
                 {preview.differing > 0 && <span className="text-warn"> · {preview.differing} con otros importes</span>}
+                {preview.problems > 0 && <span className="text-danger"> · {preview.problems} se rechazarían</span>}
               </p>
+              {preview.problems > 0 && (
+                <ul className="mt-1 list-disc pl-4 text-danger">
+                  {preview.rows.filter((r) => r.problem).map((r) => (
+                    <li key={r.key}>{r.problem}</li>
+                  ))}
+                </ul>
+              )}
               {preview.differing > 0 && (
                 <ul className="mt-1 list-disc pl-4 text-warn">
                   {preview.rows.filter((r) => r.differs).map((r) => (

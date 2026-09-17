@@ -82,7 +82,7 @@ export const previewOpenInvoices = createServerFn({ method: "POST" })
     const companyId = await cid(sql, context.userId);
     await sql`alter table invoices add column if not exists cutover_key text`;
     const parsed = parseOpenInvoices(data.csv);
-    return previewOpenInvoiceRows(sql, { companyId, rows: parsed });
+    return previewOpenInvoiceRows(sql, { companyId, rows: parsed, today: todayMx() });
   });
 
 /**
@@ -125,6 +125,7 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         circuitCode: CUTOVER_CIRCUIT,
         rows: parsed,
         foldName,
+        today: todayMx(),
       });
       await writeAudit(sql, {
         companyId,

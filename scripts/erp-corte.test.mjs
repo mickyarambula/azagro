@@ -97,6 +97,9 @@ async function freshDb() {
   await db.exec(`insert into locations (company_id, code, name) values (1, '001', 'Bodega Mochis')`);
   await db.exec(`insert into banks (company_id, name, account, currency) values (1, 'BBVA Operativa', '0123456789', 'MXN')`);
   await db.exec(`insert into banks (company_id, name, account, currency, opening) values (1, 'Banorte Vieja', '999', 'MXN', 5000)`);
+  // Decisión 70 (17-sep-2026, con OK del dueño): la fila USD del CSV fijo entra
+  // en pesos al TC del corte; sin este renglón se rechazaría "sin TC".
+  await db.exec(`insert into fx_rates (company_id, date, usd_mxn) values (1, '2026-09-16', 18.5)`);
   return db;
 }
 
