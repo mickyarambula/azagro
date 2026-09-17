@@ -1892,3 +1892,73 @@ Es un hueco real y verificable: la única pantalla de decisión antes de una ope
 
 **Nota:** solo 1 de 3 jueces alcanzaron a correr en este. El único que corrió (impacto) dijo que SÍ es real, severidad media — no es un descarte del panel, es un hallazgo con un solo voto a favor y ninguno en contra. Se deja aquí, no en confirmados, porque la regla de esta auditoría exige 2 de 3 para confirmar y aquí no se alcanzó ese número; pero tampoco fue refutado por nadie.
 
+## 3. Causa raíz y grupos
+
+### GRUPO A — una venta a crédito nace sin condiciones válidas y nadie la detiene (#2, #4, #1)
+
+Son el mismo problema en tres capas:
+
+- **#2:** la política "Sin mora" es el valor por omisión en tres lugares a la vez: el formulario (`src/routes/sales.nuevo.tsx:36` arranca con una política NONE por defecto), la columna (`src/lib/azagro.ts:118,125`: default 'NONE') y la herencia a la FV (`src/lib/azagro.ts:2034`: `so[0].policy_code ?? "NONE"`). El servidor no valida nada (`src/lib/erp/orders.ts:67` es `z.string()` a secas). Por eso "no capturó política" y "eligió Sin mora" son indistinguibles. Detalle que confirma que es defecto y no diseño: el camino por cotización (`decideQuote`, `src/lib/erp/ops.ts:1645`) elige ESTANDAR; el pedido directo elige NONE. Dos nacimientos, dos políticas.
+
+- **#4:** `credit_days = 0` significa dos cosas distintas según quién lo lea. `computeDues` (`src/lib/erp/order-terms.ts:21-35`) para Fecha/Cosecha regresa los días tal como vienen del formulario aunque creditDue esté a 180 días. Con 0, la FV nace como contado para todo lo que decide al emitir (`src/lib/azagro.ts:1990-2010`: `financedDays = 0` → circuito CONTADO, sin TIIE, sin costo financiero) pero como "usa 150 de Ajustes" para el pronto pago (`src/lib/erp/ops.ts:2111`: `credit_days || pol.creditDays`). Mismo número, dos verdades.
+
+- **#1:** el consumidor rellena lo que el nacimiento dejó vacío. El `||` de `src/lib/erp/ops.ts:2111` es el mismo defecto de #4 visto desde el cobro. Pero #1 tiene una mitad independiente: aunque el pedido naciera perfecto, `applyInvoicePayment` bonifica sin consultar la política (`src/lib/erp/ops.ts:2087`; su SELECT ni siquiera trae `policy_code`, `src/lib/erp/ops.ts:1939-1945`), mientras el estado de cuenta sí la consulta (`src/lib/erp/ops.ts:2504`). Eso hay que arreglarlo en el cobro, pase lo que pase con el nacimiento.
+
+**Regla que no existe:** un pedido a crédito nace con política elegida (nunca heredada) y con plazo financiero en días > 0 derivado de una sola fuente; `credit_days = 0` es contado y nada más; ningún lector lo rellena con Ajustes.
+
+**Dónde debe vivir:** en `src/lib/erp/order-terms.ts` — `computeDues` deriva `creditDays = creditDue − fecha` para Fecha/Cosecha, y una sola función de validación que llamen `saveOrder`, `createSale` y `decideQuote`. Más quitar el default 'NONE' de la columna (migración, mismo patrón de 0019 y 0039: vacío no es cero). Y en `applyInvoicePayment`, la compuerta `policyChargesInterest`.
+
+**SÍ se rompen entre sí** si van por separado. Si arreglas #1 primero, toda venta a Cosecha con 0 pierde el pronto pago de golpe. Si arreglas #2 solo en el servidor sin el formulario vacío ni una salida explícita, bloqueas ventas "sin mora" legítimas. **Orden obligado: #4 → #2 → #1.** Un solo bloque.
+
+### GRUPO B — el corte de Compaq (#7, #10, #9, #8, #11): cinco, no tres
+
+- **#7 y #10** son el mismo parser tolerante (`src/lib/erp/cutover-core.ts:41-44` y `:57`): `split(",")` ingenuo y "si no reconozco el lado, es cliente". Mecánicos, sin decisión. Se refuerzan: arreglado #7, un desalineamiento por comillas deja de entrar en silencio y se vuelve rechazo visible. **Orden: #10 → #7, o juntos.**
+
+- **#9** NO es del límite de crédito: las FV del sistema guardan `amount` en pesos al TC pactado (`src/lib/azagro.ts:2028-2033`), así que `sum(residual)` está en una sola unidad para todo lo que nace aquí. La mezcla la produce solo el importador (`src/lib/erp/cutover-core.ts:246-251`: `residual = saldo crudo con currency = USD` y `amount_fx = 0`). Necesita decisión del dueño: ¿a qué TC entra un saldo USD del corte? Es la 4.3/L4a aplicada al importador.
+
+- **#8:** la causa es que "saldo a favor del cliente" no existe como concepto (Decisiones 11 y 12, decididas y sin construir). El colapso a $0 (`src/lib/erp/stock.ts:362`) hoy no lo alcanza ningún camino — `src/lib/erp/ops.ts:1957` bloquea abonar con saldo ≤ 0. Es latente. Depende del dueño.
+
+- **#11** es puro mantenimiento (`scripts/purge-plan.mjs:290`): el plan de borrado nació el 15-sep y la marca de bancos el 16-sep; nadie lo actualizó. El punto único es que el plan tenga UNA definición de "marcas del corte" que usen el borrado, el preview y la prueba — hoy son tres listas a mano.
+
+**Regla que no existe:** un dato de negocio que el CSV no trae claramente no se adivina: se rechaza la fila (Decisión 66 aplicada al lado, la moneda y las comillas). **Dónde:** `cells()` y `parseOpenInvoices` en `src/lib/erp/cutover-core.ts`. Dentro del grupo, **#10 antes que #7.**
+
+### GRUPO C — escrituras de dinero sin transacción ni candado (#3)
+
+`invoiceLiveMora` y `applyLateInterest` llaman `issueMoraInvoice` con `getSql()` suelto, sin `withTx`; adentro, la FV se lee sin `for update` (`src/lib/erp/ops.ts:2700`) y el folio sale de `count(*)+1` (`src/lib/erp/ops.ts:2814`). El índice único de folios (0015) solo salva si los dos cuentan antes de que alguno inserte; si el segundo cuenta después, obtiene otro folio y ya leyó `interest_invoiced` viejo → dos FI. El cobro sí lo hace bien (`src/lib/erp/ops.ts:1949`, `for update` dentro de `withTx`).
+
+Es sistémico: siguen numerando por `count(*)` la FV (`src/lib/azagro.ts:1974`), la FP (1355, 1592), la NC (2391), el PAG (2472, `src/lib/erp/ops.ts:2014`, 2117), el ATC (2051) y la FI. Solo RCP/ENV usan `folio_counters` (bloque A4).
+
+**Regla:** toda escritura de dinero corre en `withTx` con `for update` sobre su documento ancla, y el folio sale de `folio_counters`. **Dónde:** el candado en `issueMoraInvoice`; los folios en un solo `nextFolio(serie)` sobre `folio_counters`. **Nota:** `scripts/erp-permissions.test.mjs:116` exige un literal de la llamada, el callback de `withTx` se tiene que seguir llamando `sql`.
+
+### GRUPO D — la partida identificada por producto, no por renglón (#5)
+
+`src/routes/sales.$orderId.tsx:168` guarda la casilla en `retQty[l.product_id]` y manda `{productId, qty}`; `returnSale` hace `lines.find(l => l.product_id === take.productId)` (`src/lib/azagro.ts:2404`) y se queda con la primera. Misma familia del bug de `reverseReceiptEvent` ("por producto, no por partida") y de lo que `repartirReversa` ya resuelve en las entregas.
+
+**Regla:** la partida es `sales_lines.id`; `product_id` nunca identifica un renglón (ya es así en `deliverPartial`/`receivePartial`, que reciben `lineId`). **Dónde:** `returnSale` recibe `lineId` y valida por renglón con `for update`; la pantalla se indexa por `l.id`; `returnProposal` propone por renglón. **Independiente de los demás.**
+
+### GRUPO E — la cancelación no aprendió que hay entregas parciales (#6)
+
+`src/lib/erp/cancel.ts:124`: el único candado para OC directa es `so_state === "done"`. Desde el bloque de parciales, un pedido con dos entregas sigue `confirmed` aunque ya facturó y ya nació FP real por evento — y la búsqueda de FP (`src/lib/erp/cancel.ts:138-165`) no distingue la FP del defecto viejo (sin `event_ref`) de la real (con `event_ref`): la ofrece como reversible con una nota que es falsa. Encima, `src/lib/azagro.ts:1863` excluye OC canceladas al buscar dónde nace la FP de la siguiente entrega: la deuda futura muere en silencio.
+
+**Regla:** en directo, "movió mercancía" = existe FP viva con `event_ref` en esa OC (o entrega viva del pedido con sus productos), no el estado del pedido. **Dónde:** `chainForPurchase`, con el mismo predicado que ya usa `chainForSale`. **Candado con salida:** revertir esa entrega por evento primero. **Independiente.**
+
+### EL PATRÓN QUE CRUZA D, E Y PARTE DE A
+
+Los tres usan un dato como sustituto de otro que ya no representa: `credit_days = 0` por "contado", `product_id` por "partida", `so_state = done` por "ya movió mercancía". Eran ciertos antes de parciales y de los plazos por fecha; ese bloque los invalidó y nadie barrió los lectores viejos. **Vale una pasada buscando esos tres sustitutos: seguro hay hermanos.**
+
+### ORDEN POR RIESGO REAL PARA EL NEGOCIO
+
+1. **A (nacimiento del crédito)** — le pasa a cada pedido directo hoy y a las ventas a cosecha. Perdona pronto pago que no existía o nunca cobra mora/comisión/FEGA. Silencioso.
+
+2. **C (FI sin candado)** — acción rutinaria de cobranza; cobra dos veces al cliente; la FI no tiene reversa propia. Fácil de arreglar.
+
+3. **D (devolución por producto)** — requiere producto repetido en dos partidas; cuando pasa, NC del doble y existencia inflada.
+
+4. **E (cancelar OC directa)** — brokeraje + parcial + cancelar: raro, pero borra deuda real con proveedor sin rastro útil.
+
+5. **B (corte)** — último por decisión del dueño. #10 → #7 → #11 son mecánicos; #9 y #8 esperan decisión (4.3/L4a y Decisiones 11-12).
+
+### NOTA AL MARGEN, fuera de los 11
+
+La FP en dólares guarda `amount` en la moneda de la OC (`src/lib/azagro.ts:1595`, total sin convertir), así que del lado proveedor sí podría haber mezcla de monedas en "Por pagar" y en la proyección — no verificado, va a la ronda de los 56.
+
