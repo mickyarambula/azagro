@@ -8,28 +8,18 @@ import { todayMx } from "@/lib/utils";
 import { foldName } from "@/lib/erp/catalog";
 import { ensureInvoiceExtras, postStock } from "@/lib/erp/stock";
 import { CIRCUIT_LABEL, CUTOVER_CIRCUIT } from "@/lib/erp/circuits";
+import {
+  applyOpenInvoiceRows,
+  applyStockRows,
+  parseOpenInvoices as parseOpenInvoicesCore,
+  parseStockSnap,
+  previewOpenInvoiceRows,
+} from "@/lib/erp/cutover-core";
 
 async function cid(sql: Sql, userId: string) {
   const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
   if (!rows[0]) throw new Error("Sin empresa");
   return rows[0].company_id;
-}
-
-function splitCsv(text: string) {
-  return text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"));
-}
-
-function cells(line: string) {
-  if (line.includes("\t")) return line.split("\t").map((c) => c.trim());
-  return line.split(",").map((c) => c.trim().replace(/^"|"$/g, ""));
-}
-
-function num(v: string) {
-  const n = Number(String(v || "0").replace(/,/g, "").replace(/[^0-9.-]/g, ""));
-  return Number.isFinite(n) ? n : 0;
 }
 
 export const dbStatus = createServerFn({ method: "GET" })
@@ -74,41 +64,9 @@ export const exportBackup = createServerFn({ method: "GET" })
     };
   });
 
-const invRow = z.object({
-  partnerCode: z.string(),
-  folio: z.string(),
-  date: z.string(),
-  due: z.string(),
-  cargo: z.number(),
-  abono: z.number(),
-  saldo: z.number(),
-  currency: z.enum(["MXN", "USD"]),
-  kind: z.enum(["customer", "supplier"]),
-});
-
-export function parseOpenInvoices(raw: string): z.infer<typeof invRow>[] {
-  const lines = splitCsv(raw);
-  const out: z.infer<typeof invRow>[] = [];
-  for (const line of lines) {
-    const c = cells(line);
-    if (!c[0] || /codigo|código|partner|cliente|proveedor|folio/i.test(c[0]!) && out.length === 0) continue;
-    const kind = /prov|pagar|supplier|fp/i.test(c[8] || c[0] || "") ? "supplier" : "customer";
-    const folio = (c[1] || c[2] || "").replace(/\s+/g, "-");
-    const saldo = num(c[6] || c[5] || "0");
-    if (!folio || Math.abs(saldo) < 0.009) continue;
-    out.push({
-      partnerCode: (c[0] || "").toUpperCase(),
-      folio,
-      date: (c[2] || c[3] || todayMx()).slice(0, 10),
-      due: (c[3] || c[4] || c[2] || todayMx()).slice(0, 10),
-      cargo: num(c[4] || c[5] || "0"),
-      abono: num(c[5] || "0"),
-      saldo,
-      currency: /usd|dll/i.test(c[7] || "") ? "USD" : "MXN",
-      kind,
-    });
-  }
-  return out;
+/** El parseo vive en cutover-core.ts (probado en PGlite); aquí solo se le pone la fecha de hoy. */
+export function parseOpenInvoices(raw: string) {
+  return parseOpenInvoicesCore(raw, todayMx());
 }
 
 export const previewOpenInvoices = createServerFn({ method: "POST" })
@@ -120,24 +78,7 @@ export const previewOpenInvoices = createServerFn({ method: "POST" })
     const companyId = await cid(sql, context.userId);
     await sql`alter table invoices add column if not exists cutover_key text`;
     const parsed = parseOpenInvoices(data.csv);
-    const rows = [];
-    for (const r of parsed) {
-      const key = `${r.kind}:${r.partnerCode}:${r.folio}`;
-      const exists = await sql<{ id: number }>`
-        select id from invoices where company_id = ${companyId} and cutover_key = ${key} limit 1
-      `;
-      const partner = await sql<{ id: number; name: string }>`
-        select id, name from partners where company_id = ${companyId} and upper(code) = ${r.partnerCode} limit 1
-      `;
-      rows.push({
-        ...r,
-        key,
-        partnerName: partner[0]?.name ?? "",
-        partnerId: partner[0]?.id ?? 0,
-        skip: Boolean(exists[0]),
-      });
-    }
-    return { rows, open: rows.filter((r) => !r.skip).length, skipped: rows.filter((r) => r.skip).length };
+    return previewOpenInvoiceRows(sql, { companyId, rows: parsed });
   });
 
 /**
@@ -173,41 +114,14 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         );
       }
       const parsed = parseOpenInvoices(data.csv);
-      let inserted = 0;
-      let skipped = 0;
-      for (const r of parsed) {
-        const key = `${r.kind}:${r.partnerCode}:${r.folio}`;
-        const exists = await sql<{ id: number }>`
-          select id from invoices where company_id = ${companyId} and cutover_key = ${key} limit 1
-        `;
-        if (exists[0]) {
-          skipped += 1;
-          continue;
-        }
-        let partner = await sql<{ id: number }>`
-          select id from partners where company_id = ${companyId} and upper(code) = ${r.partnerCode} limit 1
-        `;
-        if (!partner[0]) {
-          const folded = foldName(r.partnerCode);
-          partner = await sql<{ id: number }>`
-            select id from partners where company_id = ${companyId} and upper(name) = ${folded} limit 1
-          `;
-        }
-        if (!partner[0]) throw new Error(`No está en catálogo el código ${r.partnerCode} (folio ${r.folio}). Carga catálogos Compaq primero.`);
-        const cargo = r.cargo || r.saldo + r.abono;
-        // El abono que ya traía en Compaq queda registrado: el saldo de aquí
-        // en adelante es cargo − abono de corte − pagos capturados en el sistema.
-        const openingPaid = Math.max(0, cargo - r.saldo);
-        await sql`
-          insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, cutover_key, opening_paid, policy_code, created_by, circuit_code)
-          values (
-            ${companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}, ${r.date}, ${r.due}, 'open',
-            ${cargo}, ${r.saldo}, ${"Corte Compaq"}, ${r.currency}, ${key}, ${openingPaid}, ${data.policyCode}, ${context.userId},
-            ${r.kind === "customer" ? CUTOVER_CIRCUIT : null}
-          )
-        `;
-        inserted += 1;
-      }
+      const { inserted, skipped } = await applyOpenInvoiceRows(sql, {
+        companyId,
+        userId: context.userId,
+        policyCode: data.policyCode,
+        circuitCode: CUTOVER_CIRCUIT,
+        rows: parsed,
+        foldName,
+      });
       await writeAudit(sql, {
         companyId,
         userId: context.userId,
@@ -245,30 +159,6 @@ async function logImportFailure(boot: Sql, userId: string, what: string, err: un
   }
 }
 
-const stockRow = z.object({
-  productCode: z.string(),
-  locationCode: z.string(),
-  qty: z.number(),
-  cost: z.number(),
-});
-
-export function parseStockSnap(raw: string): z.infer<typeof stockRow>[] {
-  const out: z.infer<typeof stockRow>[] = [];
-  for (const line of splitCsv(raw)) {
-    const c = cells(line);
-    if (!c[0] || /producto|codigo|código|code/i.test(c[0]!) && out.length === 0) continue;
-    const qty = num(c[2] || c[1] || "0");
-    if (qty <= 0.0001) continue;
-    out.push({
-      productCode: (c[0] || "").toUpperCase(),
-      locationCode: (c[1] || "001").toUpperCase(),
-      qty,
-      cost: num(c[3] || c[2] || "0"),
-    });
-  }
-  return out;
-}
-
 export const applyStockSnap = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({ csv: z.string().min(3) }))
@@ -284,42 +174,12 @@ export const applyStockSnap = createServerFn({ method: "POST" })
       await assertCan(sql, context.userId, "inventory", "edit");
       const companyId = await cid(sql, context.userId);
       const parsed = parseStockSnap(data.csv);
-      let inserted = 0;
-      let skipped = 0;
-      for (const r of parsed) {
-        const product = await sql<{ id: number }>`
-          select id from products where company_id = ${companyId} and upper(code) = ${r.productCode} limit 1
-        `;
-        if (!product[0]) throw new Error(`Producto ${r.productCode} no está en catálogo`);
-        const loc = await sql<{ id: number }>`
-          select id from locations
-          where company_id = ${companyId} and (upper(code) = ${r.locationCode} or upper(name) = ${r.locationCode})
-          limit 1
-        `;
-        if (!loc[0]) throw new Error(`Bodega ${r.locationCode} no está en catálogo`);
-        const already = await sql<{ id: number }>`
-          select id from stock_moves
-          where company_id = ${companyId} and product_id = ${product[0].id} and location_to = ${loc[0].id}
-            and move_type = 'opening' and origin = 'Corte Compaq'
-          limit 1
-          for update
-        `;
-        if (already[0]) {
-          skipped += 1;
-          continue;
-        }
-        await postStock(sql, {
-          companyId,
-          userId: context.userId,
-          moveType: "opening",
-          origin: "Corte Compaq",
-          productId: product[0].id,
-          quantity: r.qty,
-          locationTo: loc[0].id,
-          unitCost: r.cost,
-        });
-        inserted += 1;
-      }
+      const { inserted, skipped } = await applyStockRows(sql, {
+        companyId,
+        userId: context.userId,
+        rows: parsed,
+        postStock,
+      });
       await writeAudit(sql, {
         companyId,
         userId: context.userId,

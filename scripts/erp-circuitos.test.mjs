@@ -182,7 +182,9 @@ test("paso 1: el circuito se guarda y se hereda en cada alta de la cadena (SOL �
   assert.equal(ops.match(/\$\{inv\[0\]\.circuit_code\}/g)?.length, 2, "FI y ATC heredan de su factura de origen");
   // Corte de Compaq: todo al circuito ASR (solo facturas de cliente).
   const cut = src("src/lib/erp/cutover.ts");
-  assert.ok(cut.includes('${r.kind === "customer" ? CUTOVER_CIRCUIT : null}'), "el importador pone Circuito ASR a las facturas de cliente");
+  const core = src("src/lib/erp/cutover-core.ts");
+  assert.ok(core.includes('${r.kind === "customer" ? o.circuitCode : null}'), "el importador pone circuito solo a las facturas de cliente");
+  assert.ok(cut.includes("circuitCode: CUTOVER_CIRCUIT"), "y el circuito del corte es el del catálogo (ASR)");
   assert.ok(cut.includes("· circuito ${CIRCUIT_LABEL[CUTOVER_CIRCUIT]}"), "y lo deja en la bitácora del corte");
   // Facturas de proveedor: sin circuito (no es su concepto).
   for (const m of az.matchAll(/insert into invoices \(([^)]*)\)\s*values \(\s*\$\{[^,]+\}, 'supplier'/g)) {

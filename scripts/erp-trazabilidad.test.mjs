@@ -187,7 +187,7 @@ test("FV, FP, NC, FI, ATC y facturas de corte guardan quién las generó", () =>
   assert.ok(fnBody(az, "returnSale").includes("created_by"), "NC con autor");
   assert.ok(ops.slice(ops.indexOf("export async function issueMoraInvoice")).includes("created_by"), "FI con autor");
   assert.ok(ops.slice(ops.indexOf("export async function applyInvoicePayment"), ops.indexOf("export const addBankMove")).includes("created_by"), "ATC con autor");
-  assert.ok(cut.includes("opening_paid, policy_code, created_by"), "facturas importadas con autor y con su política de cobro");
+  assert.ok(src("src/lib/erp/cutover-core.ts").includes("opening_paid, policy_code, created_by"), "facturas importadas con autor y con su política de cobro (el insert vive en cutover-core.ts)");
 });
 
 // ---------------------------------------------------------------------------

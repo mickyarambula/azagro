@@ -219,8 +219,12 @@ test("cableado: el importador pide la política y no acepta una que no existe", 
     "el servidor exige la política, no la supone",
   );
   assert.ok(apply.includes("select code, name from credit_policies where company_id = ${companyId} and code = ${data.policyCode}"), "y valida que exista");
-  assert.ok(apply.includes("opening_paid, policy_code, created_by"), "la factura importada guarda su política");
-  assert.ok(apply.includes("${data.policyCode}, ${context.userId}"), "la elegida, no la de la columna");
+  // El insert vive en cutover-core.ts (paso 0 del corte, 16-sep-2026);
+  // erp-corte.test.mjs verifica contra PGlite que policy_code sea la elegida.
+  const core = src("src/lib/erp/cutover-core.ts");
+  assert.ok(core.includes("opening_paid, policy_code, created_by"), "la factura importada guarda su política");
+  assert.ok(core.includes("${o.policyCode}, ${o.userId}"), "la elegida, no la de la columna");
+  assert.ok(apply.includes("policyCode: data.policyCode"), "y cutover.ts le pasa la elegida al core");
   assert.ok(apply.includes("política de cobro ${pol[0].name}"), "queda en bitácora con qué política entró");
   const page = src("src/routes/importar.tsx");
   assert.ok(page.includes("Política de cobro de estos saldos"), "la pantalla la pide");

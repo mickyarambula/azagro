@@ -99,7 +99,9 @@ test("factura importada: cargo 150,000, abono Compaq 20,000, pago nuevo 10,000 â
   const stock = src("src/lib/erp/stock.ts");
   assert.ok(stock.includes("opening_paid"), "refreshInvoiceResidual debe restar opening_paid");
   assert.ok(/amount\) - Number\(row\[0\]\.opening_paid\) - Number\(row\[0\]\.paid\)/.test(stock), "la resta debe incluir el abono de corte");
-  const cutover = src("src/lib/erp/cutover.ts");
+  // El loop del importador vive en cutover-core.ts desde el paso 0 del corte
+  // (16-sep-2026); erp-corte.test.mjs lo ejecuta de verdad contra PGlite.
+  const cutover = src("src/lib/erp/cutover-core.ts");
   assert.ok(cutover.includes("const openingPaid = Math.max(0, cargo - r.saldo)"), "el importador debe guardar el abono previo");
   assert.ok(cutover.includes("opening_paid"), "el insert del corte debe llevar opening_paid");
 });
