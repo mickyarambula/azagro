@@ -322,6 +322,9 @@ function Page() {
                               partyLabel: r.kind === "customer" ? "Cliente" : "Proveedor",
                               party: r.partner,
                               meta: [`Emisión ${r.date}`, `Vence ${r.due_date}`, cur, expediente].filter(Boolean),
+                              // Decisión 75 (Altos #37): revertida = comprobante
+                              // interno marcado, nunca idéntica a una viva.
+                              voided: r.state === "reversed" ? (r.cancelled_at || "sí") : undefined,
                               rows: [
                                 {
                                   left: invoiceLineLabel({ name: r.name, origin: r.origin, invClass: r.inv_class }),
@@ -357,6 +360,7 @@ function Page() {
                       >
                         Documento
                       </button>
+                      {r.state !== "reversed" && (
                       <SendButton
                         module="credit"
                         title={r.kind === "customer" ? invoicePaperTitle(r.kind, r.inv_class) : "Cuenta por pagar"}
@@ -369,6 +373,7 @@ function Page() {
                         total={num(r.residual)}
                         currency={cur}
                       />
+                      )}
                     </div>
                   </td>
                 </tr>

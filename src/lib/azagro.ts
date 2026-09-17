@@ -1761,13 +1761,21 @@ export const deliverSale = createServerFn({ method: "POST" })
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "sales", "deliver");
-    const so = await sql<{ id: number; name: string; state: string }>`
-      select id, name, state from sales_orders
+    const so = await sql<{ id: number; name: string; state: string; route_kind: string }>`
+      select id, name, state, coalesce(route_kind,'own') as route_kind from sales_orders
       where id = ${data.soId} and company_id = ${m.company_id}
       for update
     `;
     if (!so[0] || so[0].state === "done" || so[0].state === "cancelled") throw new Error("Pedido no disponible");
     if (so[0].state !== "confirmed") throw new Error("Confirma el pedido antes de entregar");
+    // Decisión 74 (Altos #26, 17-sep-2026): en directo/brokeraje entregar
+    // FACTURA al cliente y hace nacer la deuda con el proveedor en el mismo
+    // acto (Decisión 29) — eso es facturar, y "deliver" (Decisión 48) no
+    // factura ni edita. En bodega propia nada cambia: la FV se emite después,
+    // con invoiceDelivery, que ya exige edit.
+    if (so[0].route_kind === "supplier" || so[0].route_kind === "asr") {
+      await assertCan(sql, context.userId, "sales", "edit");
+    }
     let lines = data.lines ?? [];
     if (!lines.length) {
       const pend = await sql<{ id: number; qty: string; qty_delivered: string; qty_closed_short: string }>`
@@ -2669,6 +2677,7 @@ export const listInvoices = createServerFn({ method: "POST" })
       reverses_name: string | null;
       pendiente_sat: boolean;
       sat_cancelled_at: string | null;
+      cancelled_at: string | null;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
@@ -2717,7 +2726,10 @@ export const listInvoices = createServerFn({ method: "POST" })
         -- todavía no se cancela ante el SAT. Se limpia al capturar la fecha.
         (i.kind = 'customer' and i.name like 'NC-%' and i.state = 'reversed' and i.reverses_id is null
           and (coalesce(i.folio_fiscal,'') <> '' or coalesce(i.uuid_fiscal,'') <> '') and i.sat_cancelled_at is null) as pendiente_sat,
-        i.sat_cancelled_at::text
+        i.sat_cancelled_at::text,
+        -- Decisión 75 (Altos #37): una factura revertida se imprime solo como
+        -- comprobante interno, marcada, con la fecha en que se revirtió.
+        i.cancelled_at::date::text as cancelled_at
       from invoices i
       join partners p on p.id = i.partner_id
       where i.company_id = ${m.company_id}

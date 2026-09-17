@@ -49,7 +49,7 @@ test("plantilla de almacén: sales y purchases en deliver, no en edit", () => {
 
 test("los tres movimientos de mercancía exigen deliver (edit lo incluye); facturar y editar el pedido siguen en edit", () => {
   const az = src("src/lib/azagro.ts");
-  for (const fn of ["deliverSale", "receivePurchase", "returnSale"]) {
+  for (const fn of ["receivePurchase", "returnSale"]) {
     const body = fnBody(az, fn);
     assert.ok(body.includes(`"deliver")`), `${fn} pide deliver`);
     assert.ok(!body.includes('"sales", "edit")') && !body.includes('"purchases", "edit")'), `${fn} ya no pide edit`);
@@ -58,6 +58,16 @@ test("los tres movimientos de mercancía exigen deliver (edit lo incluye); factu
   assert.ok(fnBody(az, "createPurchase").includes('"purchases", "edit")'), "crear OC: edit");
   const orders = src("src/lib/erp/orders.ts");
   assert.ok(fnBody(orders, "changeOrderTerm").includes('"sales", "edit")'), "cambiar plazo (dinero): edit");
+});
+
+// Decisión 74 (17-sep-2026, con OK del dueño — hallazgo #26): en directo/
+// brokeraje entregar FACTURA en el mismo acto (Decisión 29); eso ya no es
+// "solo mover mercancía" y deliverSale pide edit para esa rama. En bodega
+// propia sigue exigiendo solo deliver: la FV se emite después (invoiceDelivery).
+test("deliverSale: bodega propia solo exige deliver; directo/brokeraje exige también edit (Decisión 74)", () => {
+  const body = fnBody(src("src/lib/azagro.ts"), "deliverSale");
+  assert.ok(body.includes('await assertCan(sql, context.userId, "sales", "deliver");'), "siempre pide deliver, primero");
+  assert.ok(body.includes('if (so[0].route_kind === "supplier" || so[0].route_kind === "asr") {\n      await assertCan(sql, context.userId, "sales", "edit");\n    }'), "solo directo/brokeraje exige edit, después de conocer la ruta");
 });
 
 test("users.ts acepta guardar el nivel deliver; users.tsx lo ofrece solo en Ventas y Compras y lo pinta", () => {

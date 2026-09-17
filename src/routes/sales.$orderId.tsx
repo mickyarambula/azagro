@@ -318,13 +318,15 @@ function Ficha() {
               title={`Entregar ${form.name}`}
               hint={
                 form.routeKind !== "own"
-                  ? "Directo / brokeraje: no pasa por bodega Azagro. Cada entrega nace con su factura y con la deuda al proveedor, en el mismo acto."
+                  ? canEdit
+                    ? "Directo / brokeraje: no pasa por bodega Azagro. Cada entrega nace con su factura y con la deuda al proveedor, en el mismo acto."
+                    : "Directo / brokeraje: entregar factura al cliente en el mismo acto (Decisión 29), así que hace falta permiso para facturar (editar en Ventas). Pide que alguien con ese permiso confirme la entrega."
                   : "Cantidad por partida. Deja en 0 la que todavía no sale. La factura de esta entrega se emite después, desde el panel de entregas."
               }
               allLabel="Entregar todo lo pendiente"
               confirmLabel="Entregar lo capturado"
               busyLabel="Entregando…"
-              disabled={busy}
+              disabled={busy || (form.routeKind !== "own" && !canEdit)}
               pending={sold
                 .filter((l) => num(l.qty) - num(l.qty_delivered) > 0.0001 + num(l.qty_closed_short ?? 0))
                 .map((l) => ({ lineId: l.id, product: `${l.code} ${l.name}`, uom: l.uom, pending: num(l.qty) - num(l.qty_delivered) - num(l.qty_closed_short ?? 0) }))}

@@ -44,6 +44,7 @@ export function printHtml(title: string, body: string, send?: DocSend, opts?: { 
   .r { text-align: right; font-variant-numeric: tabular-nums; }
   .tot { margin-top: 12px; text-align: right; font-size: 16px; font-weight: 700; }
   .note { margin-top: 22px; font-size: 11px; color: #4b5c56; line-height: 1.5; white-space: pre-line; }
+  .voided { margin: 4px 0 0; padding: 6px 10px; display: inline-block; border: 2px solid #b3271e; color: #b3271e; font-weight: 700; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
   .sign { margin-top: 36px; font-size: 12px; }
   table.wide { font-size: 10.5px; }
   table.wide th, table.wide td { padding: 5px 3px; white-space: nowrap; }
@@ -141,6 +142,9 @@ export function letterhead(opts: {
   compact?: boolean;
   notes?: string;
   sign?: string;
+  /** Decisión 75 (Altos #37): una factura/NC/FI revertida se imprime solo como
+   *  comprobante interno, con esta marca visible — nunca idéntica a una viva. */
+  voided?: string;
 }) {
   const meta = opts.meta.filter(Boolean).map(escapeHtml).join(" · ");
   const headers = opts.headers ?? ["Descripción", "Cantidad", "P. unitario", "Importe"];
@@ -167,6 +171,7 @@ export function letterhead(opts: {
         ${opts.phone ? escapeHtml(opts.phone) : ""}
       </div>
     </div>
+    ${opts.voided ? `<p class="voided">REVERTIDA — SIN VALIDEZ${opts.voided !== "sí" ? ` · revertida el ${escapeHtml(opts.voided)}` : ""} · solo como comprobante interno</p>` : ""}
     <h1>${escapeHtml(opts.title)} ${escapeHtml(opts.number)}</h1>
     <p class="meta">${escapeHtml(opts.partyLabel)}: <strong>${escapeHtml(opts.party)}</strong><br/>${meta}</p>
     <table class="${opts.compact ? "wide" : ""}">
