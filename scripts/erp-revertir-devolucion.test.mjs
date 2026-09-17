@@ -167,8 +167,10 @@ test("marca por renglón y conteo en el tablero, derivados: se limpian solos al 
   assert.ok(az.includes("and (coalesce(i.folio_fiscal,'') <> '' or coalesce(i.uuid_fiscal,'') <> '') and i.sat_cancelled_at is null) as pendiente_sat"), "la marca: revertida, timbrada, sin fecha");
   assert.ok(az.includes("and (coalesce(folio_fiscal,'') <> '' or coalesce(uuid_fiscal,'') <> '') and sat_cancelled_at is null\n    `;"), "el conteo, misma regla");
   assert.ok(az.includes("ncPendientesSat: seeCredit ?"));
+  // 16-sep-2026: el rediseño del inicio partió el aviso en label + hint.
   const home = src("src/routes/index.tsx");
-  assert.ok(home.includes("Para el SAT esa devolución\n            sigue viva: hay que cancelar el CFDI en Compaq y capturar aquí la fecha."), "el aviso con el conteo");
+  assert.ok(home.includes("de crédito revertida"), "el aviso con el conteo");
+  assert.ok(home.includes("Para el SAT esa devolución sigue viva: hay que cancelar el CFDI en Compaq y capturar aquí la fecha."), "con la explicación completa, como hint");
   const cred = src("src/routes/credit.tsx");
   assert.ok(cred.includes("Revertida y timbrada: cancelar ante el SAT en Compaq y capturar aquí la fecha"), "la marca por renglón");
   assert.ok(cred.includes("Cancelada ante el SAT el {r.sat_cancelled_at}"), "y cuando ya se capturó, el hecho");

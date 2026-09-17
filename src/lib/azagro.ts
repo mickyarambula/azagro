@@ -1,4 +1,4 @@
-import { creditDetail, creditExceededMessage, creditExposure, creditRoom } from "@/lib/erp/credit-limit";
+import { creditDetail, creditExceededMessage, creditExceededSummary, creditExposure, creditRoom } from "@/lib/erp/credit-limit";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getSql, withTx } from "@/lib/db";
@@ -343,6 +343,18 @@ export const getDashboard = createServerFn({ method: "GET" })
         having coalesce(sum(q.quantity),0) < p.min_stock
       ) t
     `;
+    // Para el inicio (bandeja de atención): la lista con nombres, no solo el
+    // conteo — antes había que ir a Inventario a ver de qué producto se trata.
+    const lowList = await sql<{ code: string; name: string; qty: string; min: string }>`
+      select p.code, p.name, coalesce(sum(q.quantity),0)::text as qty, p.min_stock::text as min
+      from products p
+      left join stock_quants q on q.product_id = p.id and q.company_id = p.company_id
+      where p.company_id = ${cid}
+      group by p.id, p.code, p.name, p.min_stock
+      having coalesce(sum(q.quantity),0) < p.min_stock
+      order by (p.min_stock - coalesce(sum(q.quantity),0)) desc
+      limit 8
+    `;
     const aging = await sql<{ bucket: string; amount: string }>`
       select bucket, coalesce(sum(residual),0)::text as amount from (
         select residual,
@@ -373,6 +385,8 @@ export const getDashboard = createServerFn({ method: "GET" })
       order by i.date desc, i.id desc
       limit 8
     `;
+    // Solo ubicaciones CON existencia: antes listaba todas, con o sin
+    // producto, y salían "bodegas en cero" por construcción de la consulta.
     const locStock = await sql<{ name: string; loc_type: string; value: string; qty: string }>`
       select l.name, l.loc_type,
         coalesce(sum(q.quantity * coalesce(nullif(q.avg_cost,0), p.cost)),0)::text as value,
@@ -382,6 +396,7 @@ export const getDashboard = createServerFn({ method: "GET" })
       left join products p on p.id = q.product_id
       where l.company_id = ${cid}
       group by l.id, l.name, l.loc_type
+      having coalesce(sum(q.quantity),0) > 0.0001
       order by l.loc_type, l.name
     `;
     const pending = await sql<{ po: number; so: number; overdue_n: number }>`
@@ -437,12 +452,40 @@ export const getDashboard = createServerFn({ method: "GET" })
             and po.state not in ('done','cancelled')
         )
     `;
+    // Lo que vence en los próximos 7 días — el susto de la semana, no del mes.
+    const payableWeek = await sql<{ total: string }>`
+      select coalesce(sum(residual),0)::text as total
+      from invoices
+      where company_id = ${cid} and kind = 'supplier' and state = 'open'
+        and due_date >= ${today}::date and due_date <= ${today}::date + 7
+    `;
+    // Pedidos confirmados con algo pendiente de entregar (cuenta lo cerrado
+    // corto como ya resuelto, paso 7 de PARCIALES.md): cuántos y el más viejo.
+    const confirmedNotDelivered = await sql<{ n: number; oldest: number | null }>`
+      select count(*)::int as n, max(${today}::date - so.date) as oldest
+      from sales_orders so
+      where so.company_id = ${cid} and so.state = 'confirmed'
+        and exists (
+          select 1 from sales_lines sl
+          where sl.so_id = so.id and sl.qty_delivered + coalesce(sl.qty_closed_short,0) < sl.qty - 0.0001
+        )
+    `;
     // Cada quien ve solo las cifras de sus módulos: sin cartera no hay saldos,
     // sin bancos no hay caja, sin permiso de costos el valor de inventario va en cero.
     const seeCredit = me.acl.credit !== "none";
     const seeBanks = me.acl.banks !== "none";
     const seeCosts = canSeeCosts(me.role);
     const seePartners = me.acl.partners !== "none";
+    // Paso 6 de PARCIALES.md (Decisión 51): la misma cuenta con la que
+    // saveOrder decide si un pedido cabe, resumida para el inicio.
+    const creditExceeded = seeCredit ? await creditExceededSummary(sql, cid) : { n: 0, amount: 0 };
+    // Decisión 47: en bodega propia entregar no factura — la mercancía que
+    // ya salió y todavía no se facturó es normal, pero es dinero parado.
+    const porFacturarRows = seeCredit ? (await salesLineGaps(sql, cid)).porFacturar : [];
+    const deliveredNotInvoiced = {
+      n: porFacturarRows.length,
+      amount: porFacturarRows.reduce((s, r) => s + r.porFacturar * r.unitPrice, 0),
+    };
     return {
       ar: seeCredit ? Number(ar[0]?.total ?? 0) : 0,
       arOverdue: seeCredit ? Number(ar[0]?.overdue ?? 0) : 0,
@@ -452,7 +495,9 @@ export const getDashboard = createServerFn({ method: "GET" })
       stockSupplier: seeCosts ? Number(stock[0]?.supplier ?? 0) : 0,
       stockTransit: seeCosts ? Number(stock[0]?.transit ?? 0) : 0,
       cash: seeBanks ? Number(cash[0]?.total ?? 0) : 0,
+      payableWeek: seeCredit ? Number(payableWeek[0]?.total ?? 0) : 0,
       lowStock: low[0]?.n ?? 0,
+      lowStockList: lowList.map((l) => ({ code: l.code, name: l.name, qty: Number(l.qty), min: Number(l.min) })),
       pendingPo: pending[0]?.po ?? 0,
       pendingSo: pending[0]?.so ?? 0,
       overdueN: seeCredit ? pending[0]?.overdue_n ?? 0 : 0,
@@ -460,6 +505,12 @@ export const getDashboard = createServerFn({ method: "GET" })
       fpSinRecibir: seeCredit ? fpSinRecibir[0]?.n ?? 0 : 0,
       ncSinTimbrar: seeCredit ? ncSinTimbrar[0]?.n ?? 0 : 0,
       ncPendientesSat: seeCredit ? ncPendientesSat[0]?.n ?? 0 : 0,
+      creditExceededN: creditExceeded.n,
+      creditExceededAmount: creditExceeded.amount,
+      deliveredNotInvoicedN: deliveredNotInvoiced.n,
+      deliveredNotInvoicedAmount: deliveredNotInvoiced.amount,
+      confirmedNotDeliveredN: confirmedNotDelivered[0]?.n ?? 0,
+      confirmedNotDeliveredOldestDays: confirmedNotDelivered[0]?.oldest ?? 0,
       aging: seeCredit ? aging.map((a) => ({ bucket: a.bucket, amount: Number(a.amount) })) : [],
       recentInv: seeCredit ? recentInv : [],
       locStock: locStock.map((l) => ({

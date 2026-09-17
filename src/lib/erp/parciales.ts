@@ -108,7 +108,7 @@ export async function purchaseLineGaps(sql: SqlTag, companyId: number): Promise<
   return out;
 }
 
-export type SalesLineGapRow = SalesLineGap & { soId: number; soName: string; productCode: string; productName: string };
+export type SalesLineGapRow = SalesLineGap & { soId: number; soName: string; productCode: string; productName: string; unitPrice: number };
 
 /**
  * Panel del cuadre (§ 5). `gaps` = violaciones: cantidad sin clasificar
@@ -130,10 +130,11 @@ export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<{ g
     qty_returned: string;
     qty_closed_short: string;
     invoiced_qty: string;
+    unit_price: string;
   }>`
     select sl.id, sl.so_id, so.name as so_name, p.code as product_code, p.name as product_name,
       sl.qty::text, sl.qty_delivered::text, coalesce(sl.qty_returned, 0)::text as qty_returned,
-      coalesce(sl.qty_closed_short, 0)::text as qty_closed_short,
+      coalesce(sl.qty_closed_short, 0)::text as qty_closed_short, sl.unit_price::text as unit_price,
       coalesce((
         select sum(il.qty) from invoice_lines il
         join invoices i on i.id = il.invoice_id
@@ -155,7 +156,7 @@ export async function salesLineGaps(sql: SqlTag, companyId: number): Promise<{ g
       invoicedQty: Number(r.invoiced_qty),
       cerradaCorta: Number(r.qty_closed_short),
     });
-    const row = { ...g, soId: r.so_id, soName: r.so_name, productCode: r.product_code, productName: r.product_name };
+    const row = { ...g, soId: r.so_id, soName: r.so_name, productCode: r.product_code, productName: r.product_name, unitPrice: Number(r.unit_price) };
     if (Math.abs(g.gap) > 0.0001 || g.overInvoiced) gaps.push(row);
     else if (g.porFacturar > 0.0001) porFacturar.push(row);
   }

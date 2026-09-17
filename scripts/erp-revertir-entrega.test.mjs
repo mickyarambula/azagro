@@ -145,8 +145,11 @@ test("NC sin timbrar: marca por renglón en cartera Y conteo en el tablero — d
   assert.ok(az.includes("name like 'NC-%' and reverses_id is not null\n        and coalesce(folio_fiscal,'') = '' and coalesce(uuid_fiscal,'') = ''"), "el conteo: NC de reversa sin folio ni UUID");
   assert.ok(az.includes("ncSinTimbrar: seeCredit ?"), "en el tablero, a quien ve cartera");
   assert.ok(az.includes(") as sin_timbrar,"), "la marca por renglón, derivada");
+  // 16-sep-2026: el rediseño del inicio partió el aviso en label + hint
+  // (antes era una sola oración); misma información, en la bandeja nueva.
   const home = src("src/routes/index.tsx");
-  assert.ok(home.includes("de crédito de una reversa sin timbrar. Para el SAT esa venta sigue"), "el aviso con el conteo, mismo patrón que FP viejas");
+  assert.ok(home.includes("de crédito de una reversa sin timbrar"), "el aviso con el conteo, mismo patrón que FP viejas");
+  assert.ok(home.includes("Para el SAT esa venta sigue viva: hay que timbrarla en Compaq y capturar aquí su folio fiscal."), "con la explicación completa, como hint");
   const cred = src("src/routes/credit.tsx");
   assert.ok(cred.includes("SIN TIMBRAR: para el SAT la venta sigue viva"), "y en el renglón");
 });

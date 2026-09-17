@@ -75,3 +75,40 @@ export function creditDetail(x: CreditExposure, order: number) {
 export function creditExceededMessage(x: CreditExposure) {
   return `Supera el límite de crédito (${x.limit.toFixed(0)}). Saldo facturado ${x.invoiced.toFixed(0)} + apartado en pedidos confirmados sin facturar ${x.reserved.toFixed(0)} = ${x.used.toFixed(0)}. Un administrador puede autorizar el exceso.`;
 }
+
+/**
+ * Para el inicio (bandeja de atención): cuántos clientes están hoy por
+ * ENCIMA de su línea de crédito, y por cuánto en total. Misma cuenta que
+ * `creditExposure` (facturado + apartado, cerrado corto ya no aparta —
+ * Decisión 62), pero en un solo viaje a la base para todos los clientes con
+ * límite capturado, en vez de uno por cliente.
+ */
+export async function creditExceededSummary(sql: Sql, companyId: number): Promise<{ n: number; amount: number }> {
+  const rows = await sql<{ n: number; amount: string }>`
+    select count(*)::int as n, coalesce(sum(used - credit_limit), 0)::text as amount
+    from (
+      select p.credit_limit,
+        coalesce(ar.ar, 0) + coalesce(res.reserved, 0) as used
+      from partners p
+      left join lateral (
+        select sum(residual) as ar from invoices
+        where company_id = p.company_id and partner_id = p.id and kind = 'customer' and state = 'open'
+      ) ar on true
+      left join lateral (
+        select sum(greatest(0, so.total - coalesce((
+          select sum(i.amount) from invoices i
+          where i.company_id = so.company_id and i.order_id = so.id and i.kind = 'customer' and i.name like 'FV-%'
+            and i.reverses_id is null and i.state <> 'reversed'
+        ), 0) - coalesce((
+          select sum(coalesce(sl.qty_closed_short, 0) * sl.unit_price) from sales_lines sl where sl.so_id = so.id
+        ), 0))) as reserved
+        from sales_orders so
+        where so.company_id = p.company_id and so.partner_id = p.id and so.state in ('confirmed', 'done')
+          and coalesce(so.term_kind,'credit_days') <> 'contado'
+      ) res on true
+      where p.company_id = ${companyId} and p.is_customer = true and p.credit_limit > 0
+    ) x
+    where used > credit_limit
+  `;
+  return { n: rows[0]?.n ?? 0, amount: Number(rows[0]?.amount ?? 0) };
+}

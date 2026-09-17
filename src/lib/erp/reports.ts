@@ -935,3 +935,38 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
     const meses = [...buckets.values()].sort((a, b) => a.month.localeCompare(b.month));
     return { vencido, meses, spread: pol.collectionSpread, sinTiie };
   });
+
+/**
+ * El mismo bucketing por mes de `getUpcomingDue`, para lo que Azagro le debe
+ * al proveedor. Sin interés (Azagro no paga mora a proveedor en este
+ * sistema): solo capital por vencer, agrupado por el mes de `due_date`. Para
+ * el inicio (bloque "próximos meses"), no para cartera detallada.
+ */
+export const getUpcomingPayable = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const sql = await getSql();
+    await assertCan(sql, context.userId, "credit", "view");
+    const companyId = await cid(sql, context.userId);
+    const open = await sql<{ residual: string; due_date: string }>`
+      select residual::text, due_date::text from invoices
+      where company_id = ${companyId} and kind = 'supplier' and state = 'open' and residual > 0.009
+    `;
+    const today = todayMx();
+    type Bucket = { month: string; n: number; saldo: number };
+    const buckets = new Map<string, Bucket>();
+    const vencido: Bucket = { month: "vencido", n: 0, saldo: 0 };
+    for (const inv of open) {
+      const saldo = Number(inv.residual);
+      const target = inv.due_date < today ? vencido : (() => {
+        const key = inv.due_date.slice(0, 7);
+        const b = buckets.get(key) ?? { month: key, n: 0, saldo: 0 };
+        buckets.set(key, b);
+        return b;
+      })();
+      target.n += 1;
+      target.saldo += saldo;
+    }
+    const meses = [...buckets.values()].sort((a, b) => a.month.localeCompare(b.month));
+    return { vencido, meses };
+  });

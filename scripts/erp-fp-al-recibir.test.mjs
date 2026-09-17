@@ -123,11 +123,15 @@ test("la marca de FP vieja se deriva de la OC sin recibir — sin columna, se li
 });
 
 test("el aviso está en el tablero y la marca en cartera, donde alguien está por pagar", () => {
+  // 16-sep-2026: el rediseño del inicio (DISENO-INVESTIGACION.md) fundió los
+  // cuatro avisos sueltos en una sola bandeja "Requiere tu atención",
+  // ordenada por dinero; el texto se movió de un banner de pantalla completa
+  // a un renglón + hint, misma información.
   const tablero = src("src/routes/index.tsx");
-  assert.ok(tablero.includes("data!.fpSinRecibir} factura"), "aviso con el número");
-  assert.ok(tablero.includes("mercancía que todavía no\n            llega"), "dice qué son");
+  assert.ok(tablero.includes("${data.fpSinRecibir} factura"), "aviso con el número");
+  assert.ok(tablero.includes("de proveedor de mercancía que todavía no llega"), "dice qué son");
   assert.ok(tablero.includes("Se limpian solas al recibir la orden o al cancelarla."), "y que no hay que hacer nada a mano");
-  assert.ok(tablero.includes('search={{ lado: "pagar" }}'), "liga a cartera por pagar");
+  assert.ok(tablero.includes('search: { lado: "pagar" }'), "liga a cartera por pagar");
   const cartera = src("src/routes/credit.tsx");
   assert.ok(cartera.includes("{r.unreceived ?"), "y la marca sale por renglón");
   assert.ok(cartera.includes("Mercancía no recibida"), "con texto de negocio, no técnico");

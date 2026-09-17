@@ -82,7 +82,8 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 |---|---|
 | **Sin contestar** (9) | 4.1 (flete a Santa Rosa) · 4.2 (comisión + FEGA de la mora) · 4.3 (dólares) · 4.4 (límite de crédito) · 4.5 (quién absorbe el pronto pago) · 4.7 (estado de cuenta y Santa Rosa) · 4.8 (quién emite la FI) · 4.10 (instrucción de facturación) · 4.13 (permiso de Reportes) |
 | Cerrados | 4.6 (Decisión 3.d) · 4.9 (Decisión 4) · 4.15 (bloque C4, 15-sep-2026) · 4.16 (Decisión 61, 16-sep-2026) |
-| Decidido, falta construir (no cuenta como abierto) | 4.14 (pestañas) · 4.17 (el inicio) |
+| Decidido, falta construir (no cuenta como abierto) | 4.14 (pestañas) |
+| Construido | 4.17 (el inicio, 16-sep-2026) |
 
 **Corrección de conteo (16-sep-2026):** § 5 y `DECISIONES.md` "Pendientes" dicen **9** abiertas en § 2; son **8**. El 9 era del 5-sep-2026 (H4d y H4e abiertas, H4f sin existir); el 9-sep se cerraron las dos y después nació H4f. La nota del 15-sep que dice "el 9 sigue exacto" no volvió a contar.
 
@@ -1155,7 +1156,7 @@ primera entrega, o desembolsa por partes, conforme sale cada entrega?* Sin
 esta respuesta no se puede fijar con qué tasa y desde qué día corre el
 financiamiento de la segunda entrega en adelante.
 
-### 4.17 El inicio no es un tablero — parte 2 del bloque de diseño, diagnosticada y sin construir (señalada por el dueño el 9-sep-2026 y otra vez el 15-sep-2026)
+### 4.17 El inicio no es un tablero — parte 2 del bloque de diseño — CONSTRUIDO el 16-sep-2026 (señalada por el dueño el 9-sep-2026 y otra vez el 15-sep-2026)
 **No es pregunta abierta: está decidido y diagnosticado, falta construirlo** — por
 eso no mueve el conteo de § 5, igual que 4.14. El dueño abrió el bloque de diseño
 el 9-sep con dos frases: *"el inicio no es un tablero"* y *"el menú no convence"*.

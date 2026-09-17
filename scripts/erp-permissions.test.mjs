@@ -505,8 +505,11 @@ test("clientes sin vendedor: aviso visible en el tablero, no solo el escape del 
   const dash = fnBody(az, "getDashboard");
   assert.ok(dash.includes("is_customer = true and seller_id is null"), "getDashboard debe contar clientes sin vendedor");
   assert.ok(dash.includes("orphanCustomers"), "getDashboard debe devolver el conteo");
+  // 16-sep-2026: el aviso vive ahora en la bandeja "Requiere tu atención"
+  // (rediseño del inicio), narrowed dentro de `data ? [...] : []` — ya no
+  // necesita `?.` porque `data` no puede ser null en ese bloque.
   const idx = src("src/routes/index.tsx");
-  assert.ok(idx.includes("data?.orphanCustomers"), "el tablero debe mostrar el aviso sin que nadie lo busque");
+  assert.ok(idx.includes("data.orphanCustomers"), "el tablero debe mostrar el aviso sin que nadie lo busque");
   assert.ok(idx.includes("sin vendedor asignado"), "el aviso debe decir qué significa el número");
 });
 

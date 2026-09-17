@@ -84,7 +84,8 @@ Producción: `DATABASE_URL` (Neon). Sin eso es PGLite y se pierde al reiniciar.
 
 0. **Bloque de parciales** (`PARCIALES.md` § 8): pasos 0-3 construidos y verificados (15-sep-2026); pasos **4** (reversa por entrega) y **5** (devolución y P&L con N facturas, Decisiones 52 y 61) construidos y verificados en navegador el 16-sep; pasos **6** (límite de crédito por partes, Decisión 51) y **7** (cierre corto, Decisiones 49-50) construidos el 16-sep. **El bloque está completo** (pasos 0-7). Lo que quedó anotado fuera de alcance vive en `PARCIALES.md` § 10.
 1. Pegar CSV de saldos abiertos Compaq + existencias + bancos. **El importador está listo para los tres** (16-sep-2026, Decisiones 63-66, `cutover-core.ts`, migración 0038): falta el archivo real de Compaq (`ESTADO.md` H8a) y cotejar su formato contra el de la pantalla.
-2. Semana en paralelo: operación nueva aquí, Compaq timbra.
-3. Después: lotes/caducidad, UOM L↔tambo, CFDI.
+2. **El inicio, reconstruido** (16-sep-2026, `ESTADO.md` § 4.17): contesta "¿qué me va a doler hoy?" — cuánto hay, cuánto deben y qué tan vencido, qué se está atorando (bandeja "Requiere tu atención", ordenada por dinero), si alcanza para lo que viene. Las 13 tarjetas de atajo y el diagrama de flujo se fueron de la portada (el menú ya las tiene; el diagrama vive en `/ayuda`). Pendiente, sin construir: el inicio por rol (cobranza, ventas, almacén) — hoy todos ven el mismo.
+3. Semana en paralelo: operación nueva aquí, Compaq timbra.
+4. Después: lotes/caducidad, UOM L↔tambo, CFDI. Pestañas internas de Cartera y Reportes con el orden viejo (`ESTADO.md` § 4.14).
 
 No reescribir en ERPNext/Odoo. No microservicios. Extender este modelo.
