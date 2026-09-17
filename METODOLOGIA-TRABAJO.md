@@ -89,6 +89,8 @@ Claude Code sube directo a `main` sin pull request. No hay revisión en GitHub; 
 
 Estos salieron de errores reales, no de teoría.
 
+**El sistema está EN DESARROLLO. Todos los datos son de prueba. Nada de lo construido es intocable por el hecho de estar construido.** Si al investigar encuentras que algo está mal diseñado, mal modelado, o simplemente hay una forma mejor, PROPONLO — aunque implique rehacer un bloque entero, cambiar el esquema o tirar trabajo ya hecho. El dueño prefiere rehacer bien ahora que arrastrar una decisión mala hasta producción. Esto **no** autoriza a construir sin aprobación: se propone, el dueño decide. Lo que autoriza es a no dar por bueno lo existente solo porque ya existe, y a no limitarse a parchar cuando el problema es de diseño. Lo único que no se toca sin decisión explícita del dueño son los invariantes de `CLAUDE.md` § No romper.
+
 **Un candado sin salida es peor que el bug que tapa.** Para cada acción que bloquees, tiene que existir un camino legítimo alternativo, y el mensaje tiene que nombrarlo. Si encuentras algo que hay que bloquear y no tiene salida, no lo bloquees: repórtalo y resuélvelo primero.
 
 **Verificar, no afirmar.** No aceptes "esto es seguro". Pide la demostración con números. Cuando Claude Code propuso reemplazar un índice único, le pedimos que forzara el caso de falla: demostró que la migración aborta sola y deja la base intacta. Eso es lo que dio luz verde, no el argumento.
