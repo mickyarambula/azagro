@@ -15,7 +15,8 @@ export type PartnerDraft = {
   phone: string;
   notes: string;
   credit_limit: number;
-  payment_days: number;
+  /** null = sin plazo capturado (Decisión 67); recibir a ese proveedor se detiene hasta capturarlo. */
+  payment_days: number | null;
   late_rate: number;
   is_customer: boolean;
   is_supplier: boolean;
@@ -114,13 +115,14 @@ export function PartnerFields({
       </div>
 
       <div className="grid gap-3 md:grid-cols-3">
-        <Field label="Plazo sugerido (días)">
+        <Field label={form.payment_days == null ? "Plazo de pago (días) — sin plazo: captúralo" : "Plazo de pago (días)"}>
           <input
-            className="erp-input"
+            className={form.payment_days == null ? "erp-input border-warn" : "erp-input"}
             type="number"
             min={0}
-            value={form.payment_days}
-            onChange={(e) => setForm({ ...form, payment_days: Number(e.target.value) })}
+            placeholder="Sin plazo"
+            value={form.payment_days ?? ""}
+            onChange={(e) => setForm({ ...form, payment_days: e.target.value === "" ? null : Number(e.target.value) })}
           />
         </Field>
         <AutoCodeField

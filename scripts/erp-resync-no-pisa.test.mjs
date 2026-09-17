@@ -103,3 +103,51 @@ test("resync: el catálogo SÍ puede sumar una bandera (un proveedor que el cat�
   assert.equal(r.is_supplier, true);
   await db.close();
 });
+
+// ---------- Decisión 67: el socio nuevo nace SIN plazo (migración 0039) ----------
+// El catálogo sembraba 0 = contado a todo proveedor nuevo y la columna no
+// admitía vacío: un valor por omisión que decidía cuándo vence la deuda.
+// Ahora nace null; recibirle se detiene (bornSupplierDebt ya lo hace) hasta
+// que alguien capture el plazo en la ficha. Los existentes no se tocan.
+
+test("migración 0039: payment_days deja de ser not null (quita restricción, no toca datos)", () => {
+  const m = src("migrations/0039_plazo_vacio.sql");
+  assert.ok(m.includes("alter table partners alter column payment_days drop not null"));
+  assert.ok(!/update partners|set payment_days/.test(m), "no reescribe ningún renglón existente");
+});
+
+test("Decisión 67: el catálogo siembra al socio nuevo sin plazo (null), y en la base entra así", async () => {
+  const cat = src("src/lib/erp/catalog.ts");
+  assert.ok(cat.includes("payment_days: number | null = null,"), "cli(): sin plazo por omisión");
+  assert.ok(cat.includes("    payment_days: null,\n    partner_kind,"), "prv(): sin plazo");
+  assert.ok(!/payment_days = 0,/.test(cat), "ya no hay 0 por omisión en el catálogo");
+  const db = await freshDb();
+  await db.query(upsertSql(), seed({ payment_days: null }));
+  const r = (await db.query(`select payment_days from partners where code = 'PV009'`)).rows[0];
+  assert.equal(r.payment_days, null, "nace sin plazo, no en contado");
+  // Y la ficha lo captura después sin que el resync lo pise.
+  await db.exec(`update partners set payment_days = 45 where code = 'PV009'`);
+  await db.query(upsertSql(), seed({ payment_days: null }));
+  assert.equal((await db.query(`select payment_days from partners where code = 'PV009'`)).rows[0].payment_days, 45);
+  await db.close();
+});
+
+test("Decisión 67: la ficha acepta vacío y NO lo vuelve 0 al guardar; el socio nuevo a mano también nace sin plazo", () => {
+  const az = src("src/lib/azagro.ts");
+  const body = az.slice(az.indexOf("export const savePartner"), az.indexOf("export const savePartner") + 4000);
+  assert.ok(body.includes("payment_days: z.number().nullable()"), "savePartner acepta null");
+  assert.ok(body.includes('"sin plazo"'), "la bitácora dice 'sin plazo', no 0");
+  const form = src("src/components/partner-form.tsx");
+  assert.ok(form.includes('payment_days: e.target.value === "" ? null : Number(e.target.value)'), "campo vacío → null, no Number('') = 0");
+  assert.ok(form.includes('value={form.payment_days ?? ""}'));
+  assert.ok(form.includes("sin plazo: captúralo"), "la ficha avisa que falta");
+  const nuevo = src("src/routes/partners.nuevo.tsx");
+  assert.ok(!/payment_days: 0/.test(nuevo), "el socio nuevo ya no nace en 0");
+  assert.equal((nuevo.match(/payment_days: null/g) ?? []).length, 2);
+});
+
+test("Decisión 67: el candado con salida ya existe — recibir a un proveedor sin plazo se detiene y dice dónde capturarlo", () => {
+  const az = src("src/lib/azagro.ts");
+  assert.ok(az.includes("days[0].payment_days == null"), "bornSupplierDebt distingue vacío (se detiene) de 0 (contado)");
+  assert.ok(az.includes("Falta el plazo de pago de ${po[0].partner}"), "con mensaje que nombra al proveedor");
+});

@@ -90,7 +90,8 @@ export type PartnerSeed = {
   is_supplier: boolean;
   group_name: string;
   city: string;
-  payment_days: number;
+  /** Decisión 67: el catálogo no decide el plazo — nace vacío y se captura en la ficha. */
+  payment_days: number | null;
   partner_kind: string;
   credit_limit: number;
 };
@@ -101,7 +102,7 @@ function cli(
   rfc: string,
   credit_limit: number,
   group_name = "Varios",
-  payment_days = 0,
+  payment_days: number | null = null,
 ): PartnerSeed {
   return {
     code,
@@ -128,7 +129,7 @@ function prv(code: string, name: string, rfc: string, group_name = "Varios", par
     is_supplier: true,
     group_name,
     city: "",
-    payment_days: 0,
+    payment_days: null,
     partner_kind,
     credit_limit: 0,
   };

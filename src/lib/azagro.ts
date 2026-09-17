@@ -523,7 +523,8 @@ export const savePartner = createServerFn({ method: "POST" })
       is_customer: z.boolean(),
       is_supplier: z.boolean(),
       credit_limit: z.number(),
-      payment_days: z.number(),
+      // Decisión 67: vacío es vacío (sin plazo), nunca 0 = contado por omisión.
+      payment_days: z.number().nullable(),
       late_rate: z.number(),
       email: z.string().optional().default(""),
       phone: z.string().optional().default(""),
@@ -545,7 +546,7 @@ export const savePartner = createServerFn({ method: "POST" })
     }
     if (data.id) {
       // Los campos que mueven crédito quedan en bitácora con anterior → nuevo.
-      const before = await sql<{ credit_limit: string; payment_days: number; late_rate: string; name: string }>`
+      const before = await sql<{ credit_limit: string; payment_days: number | null; late_rate: string; name: string }>`
         select credit_limit::text, payment_days, late_rate::text, name
         from partners where id = ${data.id} and company_id = ${m.company_id}
       `;
@@ -565,7 +566,7 @@ export const savePartner = createServerFn({ method: "POST" })
         if (Number(before[0].credit_limit) !== data.credit_limit)
           cambios.push(`límite ${Number(before[0].credit_limit)} → ${data.credit_limit}`);
         if (before[0].payment_days !== data.payment_days)
-          cambios.push(`plazo ${before[0].payment_days} → ${data.payment_days} d`);
+          cambios.push(`plazo ${before[0].payment_days ?? "sin plazo"} → ${data.payment_days ?? "sin plazo"}${data.payment_days == null ? "" : " d"}`);
         if (Number(before[0].late_rate) !== data.late_rate)
           cambios.push(`tasa mora ${Number(before[0].late_rate)} → ${data.late_rate}`);
         if (cambios.length) {

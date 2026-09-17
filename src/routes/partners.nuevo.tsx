@@ -28,7 +28,8 @@ function Nuevo() {
     phone: "",
     notes: "",
     credit_limit: 0,
-    payment_days: 0,
+    // Decisión 67: sin plazo hasta que alguien lo capture (0 sería contado).
+    payment_days: null,
     // Informativa. La mora real usa TIIE del vencimiento (tabla) + spread de
     // Ajustes; aquí no se propone ningún número.
     late_rate: 0,
@@ -51,7 +52,7 @@ function Nuevo() {
         code: code.code,
         is_customer: tipo !== "proveedor",
         is_supplier: tipo === "proveedor",
-        payment_days: 0,
+        payment_days: null,
         late_rate: 0,
       }));
     })();

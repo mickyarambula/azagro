@@ -54,7 +54,12 @@ test("todas las migraciones aplican en orden sobre una base vacía", async () =>
   }
   const pd = (await db.query(`select column_default, is_nullable from information_schema.columns where table_name = 'partners' and column_name = 'payment_days'`)).rows[0];
   assert.equal(pd.column_default, null, "partners.payment_days sin default 30");
-  assert.equal(pd.is_nullable, "NO", "pero sigue siendo obligatorio: quien da de alta captura el plazo");
+  // Hasta la 0038 esto afirmaba "NO" (obligatorio: quien da de alta captura
+  // el plazo). Pero como el catálogo sembraba 0 y 0 = contado, "obligatorio"
+  // en la práctica era "contado por omisión". La 0039 (Decisión 67) lo vuelve
+  // vacío: el socio nuevo nace SIN plazo y recibirle se detiene hasta que
+  // alguien lo capture — que es lo que la frase de arriba siempre quiso decir.
+  assert.equal(pd.is_nullable, "YES", "vacío hasta que la ficha lo capture (0039, Decisión 67): vacío no es cero");
   // 0020 — escalera de plazos de la cotización interna (lista de columnas, editable en Ajustes).
   assert.ok(cs.includes("quote_terms"), "company_settings.quote_terms");
   const qt = (await db.query(`select column_default from information_schema.columns where table_name = 'company_settings' and column_name = 'quote_terms'`)).rows[0];
