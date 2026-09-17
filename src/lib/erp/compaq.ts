@@ -111,13 +111,20 @@ export async function syncCompaqCatalogs(sql: Sql, companyId: number, force = fa
         name = excluded.name,
         legal_name = excluded.legal_name,
         rfc = excluded.rfc,
-        is_customer = excluded.is_customer,
-        is_supplier = excluded.is_supplier,
+        is_customer = partners.is_customer or excluded.is_customer,
+        is_supplier = partners.is_supplier or excluded.is_supplier,
         group_name = excluded.group_name,
-        payment_days = excluded.payment_days,
-        partner_kind = excluded.partner_kind,
-        credit_limit = excluded.credit_limit
+        partner_kind = excluded.partner_kind
     `;
+    // Lo capturado a mano MANDA y no se pisa (mismo principio que la
+    // migración 0022): `credit_limit` y `payment_days` los siembra el
+    // catálogo solo al CREAR el socio; después viven en la ficha
+    // (savePartner) y el resync no los toca. Hasta el 16-sep-2026 cada
+    // "Cargar / actualizar catálogos" los regresaba al valor del código —
+    // y como el catálogo trae plazo 0 y bornSupplierDebt lee 0 = contado,
+    // un proveedor con 30 días capturados volvía a deber el mismo día.
+    // `is_customer` / `is_supplier` se marcan también a mano (links.ts):
+    // el catálogo puede SUMAR una bandera, nunca quitarla.
   }
 
   const prodCodes = new Set(PRODUCT_CATALOG.map((p) => p.code));

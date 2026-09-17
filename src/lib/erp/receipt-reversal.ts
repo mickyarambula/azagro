@@ -5,6 +5,7 @@ import { getSql, withTx, type Sql } from "@/lib/db";
 import { activeMember, canRevert } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { postStock } from "@/lib/erp/stock";
+import { repartirReversa } from "@/lib/erp/parciales";
 
 /**
  * BLOQUE DE DESHACER, paso 6: revertir una recepción.
@@ -519,6 +520,7 @@ export const reverseReceiptEvent = createServerFn({ method: "POST" })
       const fresh = await chainForReceiptEvent(tx, companyId, data.poId, data.eventRef, me.role);
       if (fresh.preview.blockers.length) throw new Error(fresh.preview.blockers[0]);
       const refs: string[] = [];
+      const qtyByProduct = new Map<number, number>();
       for (const m of fresh.moves) {
         const mv = await postStock(tx, {
           companyId,
@@ -532,10 +534,23 @@ export const reverseReceiptEvent = createServerFn({ method: "POST" })
           reversesId: m.id,
         });
         refs.push(mv.ref);
-        await tx`
-          update purchase_lines set qty_received = greatest(0, qty_received - ${m.quantity})
-          where po_id = ${data.poId} and product_id = ${m.product_id}
+        qtyByProduct.set(m.product_id, r2((qtyByProduct.get(m.product_id) ?? 0) + m.quantity));
+      }
+      // Lo recibido en este evento se RESTA (otras recepciones siguen vivas),
+      // partida por partida del producto — el kardex no guarda la partida, y
+      // una OC puede repetir producto en dos renglones (recibir postea un
+      // movimiento por partida). Hasta el 16-sep-2026 se restaba cada
+      // movimiento a TODAS las partidas del producto y `greatest(0, …)` lo
+      // tapaba (PARCIALES.md § 10). Mismo reparto que la reversa de entrega.
+      const avisos: string[] = [];
+      for (const [productId, qty] of qtyByProduct) {
+        const ls = await tx<{ id: number; received: string }>`
+          select id, coalesce(qty_received,0)::text as received from purchase_lines
+          where po_id = ${data.poId} and product_id = ${productId} order by id for update
         `;
+        const { restas, sobrante } = repartirReversa(ls.map((l) => ({ id: l.id, delivered: Number(l.received) })), qty);
+        for (const r of restas) await tx`update purchase_lines set qty_received = qty_received - ${r.qty} where id = ${r.id}`;
+        if (sobrante > 0.0001) avisos.push(`producto ${productId}: quedaban ${sobrante} sin restar (recibido en partidas menor que lo que entró en ${data.eventRef})`);
       }
       const pendiente = await tx<{ n: number }>`
         select count(*)::int as n from purchase_lines where po_id = ${data.poId} and qty_received < qty - 0.0001 - coalesce(qty_closed_short,0)
@@ -568,7 +583,7 @@ export const reverseReceiptEvent = createServerFn({ method: "POST" })
         entity: "purchase",
         entityId: data.poId,
         name: `${fresh.preview.po.name} · ${data.eventRef}`,
-        detail: `${refs.join(", ")} · ${promedios}${fresh.preview.invoice ? ` · ${fresh.preview.invoice.name} revertida` : ""} · ${data.reason}`,
+        detail: `${refs.join(", ")} · ${promedios}${fresh.preview.invoice ? ` · ${fresh.preview.invoice.name} revertida` : ""}${avisos.length ? ` · AVISO: ${avisos.join("; ")}` : ""} · ${data.reason}`,
       });
       return { ok: true as const, refs, invoice: fresh.preview.invoice?.name ?? null };
     });

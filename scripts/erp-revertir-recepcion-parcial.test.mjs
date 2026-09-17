@@ -45,9 +45,16 @@ test("chainForReceiptEvent: Decisión 35 (salida posterior) se evalúa igual, po
   assert.match(body, /location_from = \$\{m\.location_to\} and id > \$\{m\.id\}/);
 });
 
-test("reverseReceiptEvent: resta SOLO la cantidad de este evento (no zeroea qty_received — puede haber otras recepciones)", () => {
+test("reverseReceiptEvent: resta SOLO la cantidad de este evento, partida por partida (no zeroea qty_received — puede haber otras recepciones)", () => {
   const body = fnBody(src("src/lib/erp/receipt-reversal.ts"), "reverseReceiptEvent");
-  assert.ok(body.includes("qty_received = greatest(0, qty_received - ${m.quantity})"), "resta, no pone en 0 — a diferencia de reverseReceipt (una sola recepción)");
+  // Hasta el 16-sep-2026 restaba cada movimiento a TODAS las partidas del
+  // producto (`where po_id and product_id`) y greatest(0, …) lo tapaba
+  // (PARCIALES.md § 10). Ahora reparte con repartirReversa, como la entrega.
+  assert.ok(!body.includes("greatest(0, qty_received - ${m.quantity})"), "ya no resta por producto con greatest");
+  assert.ok(body.includes("const { restas, sobrante } = repartirReversa("), "reparte partida por partida");
+  assert.ok(body.includes("update purchase_lines set qty_received = qty_received - ${r.qty} where id = ${r.id}"), "resta a la partida exacta, no pone en 0");
+  assert.ok(body.includes("order by id for update"), "las partidas del producto, en orden y con candado");
+  assert.ok(body.includes("AVISO: ${avisos.join"), "el sobrante (inconsistencia previa) va a bitácora, como en la entrega");
 });
 
 test("reverseReceiptEvent: la OC vuelve a 'confirmed' solo si queda pendiente en alguna partida (no siempre, a diferencia de reverseReceipt)", () => {

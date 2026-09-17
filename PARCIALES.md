@@ -298,7 +298,7 @@ El dueño recuerda seis, una de dinero. Contra el código son **ocho**: las seis
 
 ## 10. Lo que no se pudo verificar, y hallazgos fuera de alcance
 
-> **Hallazgo del 16-sep-2026 (paso 4, mitad A), fuera de alcance:** `reverseReceiptEvent` (`receipt-reversal.ts`, paso 2) resta `qty_received` por **producto** (`where po_id and product_id`), no por partida — el mismo defecto que el revisor de dinero encontró en la reversa de entrega y que ahí se corrigió con `repartirReversa`. Con una OC que repita producto en dos partidas, revertir una recepción le pega a las dos y `greatest(0, …)` lo tapa. Se reporta; se corrige con el mismo helper cuando se toque el paso 2 o en el paso 6.
+> ~~**Hallazgo del 16-sep-2026 (paso 4, mitad A), fuera de alcance:** `reverseReceiptEvent` (`receipt-reversal.ts`, paso 2) resta `qty_received` por **producto** (`where po_id and product_id`), no por partida…~~ **Corregido el 16-sep-2026 (misma tarde):** `reverseReceiptEvent` agrupa lo del evento por producto y reparte con `repartirReversa`, partida por partida en orden y con candado, sobrante a bitácora — idéntico a la reversa de entrega. `reverseReceipt` (OC completa) no cambia: revierte todas las recepciones vivas, así que dejar en 0 las partidas del producto es correcto. `scripts/erp-revertir-recepcion-parcial.test.mjs` afirmaba la línea defectuosa y se cambió a propósito.
 
 **No verificado (no se abrió la base, no se abrió el navegador):**
 - Si en la base hay algún pedido u OC en estado intermedio. Por construcción no puede haberlo (§ 1.5); no se comprobó con datos.
