@@ -84,7 +84,10 @@ export function parseStockSnap(raw: string): StockRow[] {
       productCode: (c[0] || "").toUpperCase(),
       locationCode: (c[1] || "001").toUpperCase(),
       qty,
-      cost: num(c[3] || c[2] || "0"),
+      // Decisión 64: el costo viene SOLO de la columna 4. El respaldo viejo
+      // (c[3] || c[2]) copiaba la CANTIDAD como costo cuando la columna venía
+      // vacía — un número inventado que decidía dinero.
+      cost: num(c[3] || "0"),
     });
   }
   return out;
@@ -128,6 +131,10 @@ export async function applyOpenInvoiceRows(
 ) {
   let inserted = 0;
   let skipped = 0;
+  // Decisión 66: una fila mala no aborta el lote — se reporta con su razón y
+  // las válidas entran. El reintento es seguro: lo ya cargado se salta por
+  // cutover_key.
+  const rejected: { reason: string }[] = [];
   for (const r of o.rows) {
     const key = cutoverKeyOf(r);
     const exists = await sql<{ id: number }>`
@@ -146,7 +153,10 @@ export async function applyOpenInvoiceRows(
         select id from partners where company_id = ${o.companyId} and upper(name) = ${folded} limit 1
       `;
     }
-    if (!partner[0]) throw new Error(`No está en catálogo el código ${r.partnerCode} (folio ${r.folio}). Carga catálogos Compaq primero.`);
+    if (!partner[0]) {
+      rejected.push({ reason: `No está en catálogo el código ${r.partnerCode} (folio ${r.folio}). Carga catálogos Compaq primero.` });
+      continue;
+    }
     const cargo = r.cargo || r.saldo + r.abono;
     // El abono que ya traía en Compaq queda registrado: el saldo de aquí
     // en adelante es cargo − abono de corte − pagos capturados en el sistema.
@@ -161,7 +171,7 @@ export async function applyOpenInvoiceRows(
     `;
     inserted += 1;
   }
-  return { inserted, skipped };
+  return { inserted, skipped, rejected };
 }
 
 export type PostStockFn = (
@@ -184,17 +194,31 @@ export async function applyStockRows(
 ) {
   let inserted = 0;
   let skipped = 0;
+  const rejected: { reason: string }[] = [];
   for (const r of o.rows) {
+    // Decisión 64: sin costo no hay saldo inicial — vacío no es cero (regla 9).
+    // A costo $0, toda venta posterior calcularía margen y financiamiento
+    // sobre un costo inventado.
+    if (!(r.cost > 0)) {
+      rejected.push({ reason: `Producto ${r.productCode} sin costo en el CSV: captura el costo real (vacío no es cero).` });
+      continue;
+    }
     const product = await sql<{ id: number }>`
       select id from products where company_id = ${o.companyId} and upper(code) = ${r.productCode} limit 1
     `;
-    if (!product[0]) throw new Error(`Producto ${r.productCode} no está en catálogo`);
+    if (!product[0]) {
+      rejected.push({ reason: `Producto ${r.productCode} no está en catálogo` });
+      continue;
+    }
     const loc = await sql<{ id: number }>`
       select id from locations
       where company_id = ${o.companyId} and (upper(code) = ${r.locationCode} or upper(name) = ${r.locationCode})
       limit 1
     `;
-    if (!loc[0]) throw new Error(`Bodega ${r.locationCode} no está en catálogo`);
+    if (!loc[0]) {
+      rejected.push({ reason: `Bodega ${r.locationCode} no está en catálogo` });
+      continue;
+    }
     const already = await sql<{ id: number }>`
       select id from stock_moves
       where company_id = ${o.companyId} and product_id = ${product[0].id} and location_to = ${loc[0].id}
@@ -218,5 +242,5 @@ export async function applyStockRows(
     });
     inserted += 1;
   }
-  return { inserted, skipped };
+  return { inserted, skipped, rejected };
 }

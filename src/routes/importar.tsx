@@ -33,6 +33,9 @@ const TABLE_LABEL: Record<string, string> = {
 
 function Page() {
   const [msg, setMsg] = useState<string | null>(null);
+  // Decisión 66: las filas que no entraron, con su razón, para corregir el
+  // CSV o el catálogo y volver a pegar (lo cargado no se duplica).
+  const [rejects, setRejects] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [db, setDb] = useState("");
@@ -63,6 +66,16 @@ function Page() {
       {db && <p className="mt-1 text-[12px] text-muted">Base: {db}</p>}
       {error && <p className="mt-3 text-sm text-danger">{error}</p>}
       {msg && <p className="mt-3 text-sm text-ok">{msg}</p>}
+      {rejects.length > 0 && (
+        <div className="mt-2 max-w-2xl rounded border border-warn/40 bg-warn/5 p-3 text-[12px]">
+          <p className="font-medium">No entraron {rejects.length} filas — corrige y vuelve a pegar (lo ya cargado no se duplica):</p>
+          <ul className="mt-1 list-disc pl-4">
+            {rejects.map((r, i) => (
+              <li key={i}>{r}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <ol className="mt-5 max-w-2xl space-y-3 text-sm">
         <li className="erp-card p-4">
@@ -150,8 +163,9 @@ function Page() {
                   const r = await applyOpenInvoices({ data: { csv: csvInv, policyCode } });
                   const pol = policies.find((p) => p.code === policyCode);
                   setMsg(
-                    `Cartera de corte: ${r.inserted} nuevas, ${r.skipped} ya estaban (no se duplicaron). Política ${pol?.name ?? policyCode}.`,
+                    `Cartera de corte: ${r.inserted} nuevas, ${r.skipped} ya estaban (no se duplicaron)${r.rejected.length ? `, ${r.rejected.length} rechazadas` : ""}. Política ${pol?.name ?? policyCode}.`,
                   );
+                  setRejects(r.rejected.map((x) => x.reason));
                   setPreview(null);
                 } catch (e) {
                   setError(humanError(e));
@@ -190,7 +204,10 @@ function Page() {
               setError(null);
               try {
                 const r = await applyStockSnap({ data: { csv: csvStock } });
-                setMsg(`Inventario de corte: ${r.inserted} partidas, ${r.skipped} ya estaban.`);
+                setMsg(
+                  `Inventario de corte: ${r.inserted} partidas, ${r.skipped} ya estaban${r.rejected.length ? `, ${r.rejected.length} rechazadas` : ""}.`,
+                );
+                setRejects(r.rejected.map((x) => x.reason));
               } catch (e) {
                 setError(humanError(e));
               } finally {

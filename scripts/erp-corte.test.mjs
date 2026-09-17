@@ -159,7 +159,7 @@ test("saldos: inserta con cutover_key, opening_paid = cargo − saldo, circuito 
     rows,
     foldName,
   });
-  assert.deepEqual(r, { inserted: 2, skipped: 0 });
+  assert.deepEqual(r, { inserted: 2, skipped: 0, rejected: [] });
   const inv = (await db.query(
     `select kind, name, amount::float8 as amount, residual::float8 as residual, opening_paid::float8 as op,
             currency, cutover_key, policy_code, circuit_code, origin, state
@@ -186,7 +186,7 @@ test("saldos: segunda pegada idéntica no duplica nada (idempotencia por cutover
   const args = { companyId: 1, userId: "u1", policyCode: "ESTANDAR", circuitCode: "ASR", rows, foldName };
   await applyOpenInvoiceRows(sql, args);
   const r2 = await applyOpenInvoiceRows(sql, args);
-  assert.deepEqual(r2, { inserted: 0, skipped: 2 });
+  assert.deepEqual(r2, { inserted: 0, skipped: 2, rejected: [] });
   const n = (await db.query(`select count(*)::int as n from invoices`)).rows[0].n;
   assert.equal(n, 2);
   await db.close();
@@ -200,7 +200,7 @@ test("saldos: el partner también se encuentra por nombre plegado cuando el cód
   const r = await applyOpenInvoiceRows(sql, {
     companyId: 1, userId: "u1", policyCode: "ESTANDAR", circuitCode: "ASR", rows, foldName,
   });
-  assert.deepEqual(r, { inserted: 1, skipped: 0 });
+  assert.deepEqual(r, { inserted: 1, skipped: 0, rejected: [] });
   await db.close();
 });
 
@@ -231,14 +231,14 @@ test("existencias: entra una vez por producto+bodega; la segunda pegada se salta
   const rows = parseStockSnap("ALB-10,001,25,18.5");
   const args = { companyId: 1, userId: "u1", rows, postStock: postStockStub(calls) };
   const r1 = await applyStockRows(sql, args);
-  assert.deepEqual(r1, { inserted: 1, skipped: 0 });
+  assert.deepEqual(r1, { inserted: 1, skipped: 0, rejected: [] });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].moveType, "opening");
   assert.equal(calls[0].origin, "Corte Compaq");
   assert.equal(calls[0].quantity, 25);
   assert.equal(calls[0].unitCost, 18.5);
   const r2 = await applyStockRows(sql, args);
-  assert.deepEqual(r2, { inserted: 0, skipped: 1 }, "idempotente: ya hay INI de corte para ese producto+bodega");
+  assert.deepEqual(r2, { inserted: 0, skipped: 1, rejected: [] }, "idempotente: ya hay INI de corte para ese producto+bodega");
   assert.equal(calls.length, 1, "no volvió a tocar el kardex");
   await db.close();
 });
@@ -249,6 +249,77 @@ test("existencias: la bodega se encuentra por código o por nombre", async () =>
   const calls = [];
   const rows = parseStockSnap("ALB-10,BODEGA MOCHIS,10,20");
   const r = await applyStockRows(sql, { companyId: 1, userId: "u1", rows, postStock: postStockStub(calls) });
-  assert.deepEqual(r, { inserted: 1, skipped: 0 });
+  assert.deepEqual(r, { inserted: 1, skipped: 0, rejected: [] });
+  await db.close();
+});
+
+// ---------- paso 1: Decisiones 66 y 64 ----------
+// 66: una fila con código desconocido NO aborta el lote — entran las válidas
+//     y las malas se reportan con su razón (reintento seguro por cutover_key).
+// 64: una existencia sin costo (vacío o ≤ 0) se rechaza y se avisa — vacío no
+//     es cero (regla 9); no entra al kardex a $0.
+
+test("Decisión 66 (saldos): la fila con código desconocido se reporta y las demás SÍ entran", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const rows = parseOpenInvoices(
+    CSV_INV + "\nXX9999,C-1,2025-11-01,2026-04-01,500,0,500,MXN,cliente",
+    "2026-09-16",
+  );
+  const r = await applyOpenInvoiceRows(sql, {
+    companyId: 1, userId: "u1", policyCode: "ESTANDAR", circuitCode: "ASR", rows, foldName,
+  });
+  assert.equal(r.inserted, 2, "las dos buenas entran aunque la tercera esté mal");
+  assert.equal(r.skipped, 0);
+  assert.equal(r.rejected.length, 1);
+  assert.match(r.rejected[0].reason, /XX9999/, "la razón nombra el código que falta");
+  assert.match(r.rejected[0].reason, /C-1/, "y el folio, para encontrarlo en el CSV");
+  const n = (await db.query(`select count(*)::int as n from invoices`)).rows[0].n;
+  assert.equal(n, 2, "en la base quedaron exactamente las buenas");
+  await db.close();
+});
+
+test("Decisión 66 (saldos): reintento tras corregir el catálogo — lo cargado se salta, la corregida entra", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const csv = CSV_INV + "\nXX9999,C-1,2025-11-01,2026-04-01,500,0,500,MXN,cliente";
+  const rows = parseOpenInvoices(csv, "2026-09-16");
+  const args = { companyId: 1, userId: "u1", policyCode: "ESTANDAR", circuitCode: "ASR", rows, foldName };
+  await applyOpenInvoiceRows(sql, args);
+  await db.exec(`insert into partners (company_id, code, name, is_customer, payment_days) values (1, 'XX9999', 'Cliente Nuevo', true, 30)`);
+  const r2 = await applyOpenInvoiceRows(sql, args);
+  assert.equal(r2.inserted, 1, "solo la que faltaba");
+  assert.equal(r2.skipped, 2, "las de la primera pegada no se duplican");
+  assert.equal(r2.rejected.length, 0);
+  await db.close();
+});
+
+test("Decisión 66 (existencias): producto o bodega desconocidos se reportan, el resto entra", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const calls = [];
+  const rows = parseStockSnap(["ALB-10,001,25,18.5", "NOEXISTE,001,5,10", "ALB-10,BODEGA-X,5,10"].join("\n"));
+  const r = await applyStockRows(sql, { companyId: 1, userId: "u1", rows, postStock: postStockStub(calls) });
+  assert.equal(r.inserted, 1);
+  assert.equal(r.rejected.length, 2);
+  assert.match(r.rejected[0].reason, /NOEXISTE/);
+  assert.match(r.rejected[1].reason, /BODEGA-X/);
+  assert.equal(calls.length, 1, "el kardex solo vio la buena");
+  await db.close();
+});
+
+test("Decisión 64 (existencias): sin costo (vacío o ≤ 0) la fila se rechaza — no entra a $0", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const calls = [];
+  const rows = parseStockSnap(["ALB-10,001,25,", "ALB-10,001,25,-3"].join("\n"));
+  const r = await applyStockRows(sql, { companyId: 1, userId: "u1", rows, postStock: postStockStub(calls) });
+  assert.equal(r.inserted, 0);
+  assert.equal(r.rejected.length, 2);
+  assert.match(r.rejected[0].reason, /sin costo/i, "dice qué falta");
+  assert.match(r.rejected[0].reason, /ALB-10/, "y de qué producto");
+  assert.equal(calls.length, 0, "el kardex no se tocó");
+  const n = (await db.query(`select count(*)::int as n from stock_moves`)).rows[0].n;
+  assert.equal(n, 0);
   await db.close();
 });

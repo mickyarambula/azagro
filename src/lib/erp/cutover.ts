@@ -114,7 +114,7 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         );
       }
       const parsed = parseOpenInvoices(data.csv);
-      const { inserted, skipped } = await applyOpenInvoiceRows(sql, {
+      const { inserted, skipped, rejected } = await applyOpenInvoiceRows(sql, {
         companyId,
         userId: context.userId,
         policyCode: data.policyCode,
@@ -128,9 +128,9 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
         action: "corte",
         entity: "invoice",
         name: "Saldos abiertos Compaq",
-        detail: `entraron ${inserted}, ya estaban ${skipped} · política de cobro ${pol[0].name} (${pol[0].code}) · circuito ${CIRCUIT_LABEL[CUTOVER_CIRCUIT]}`,
+        detail: `entraron ${inserted}, ya estaban ${skipped}, rechazadas ${rejected.length} · política de cobro ${pol[0].name} (${pol[0].code}) · circuito ${CIRCUIT_LABEL[CUTOVER_CIRCUIT]}${rejectNote(rejected)}`,
       });
-      return { inserted, skipped };
+      return { inserted, skipped, rejected };
     });
     } catch (err) {
       // La importación fallida (que se revierte completa) también deja rastro.
@@ -138,6 +138,12 @@ export const applyOpenInvoices = createServerFn({ method: "POST" })
       throw err;
     }
   });
+
+/** Las primeras razones de rechazo, acotadas, para que la bitácora diga POR QUÉ (Decisión 66). */
+function rejectNote(rejected: { reason: string }[]) {
+  if (!rejected.length) return "";
+  return ` · ${rejected.slice(0, 3).map((x) => x.reason).join(" | ").slice(0, 300)}${rejected.length > 3 ? " …" : ""}`;
+}
 
 /** Registra en bitácora una importación que tronó (fuera de la transacción que se revirtió). */
 async function logImportFailure(boot: Sql, userId: string, what: string, err: unknown) {
@@ -174,7 +180,7 @@ export const applyStockSnap = createServerFn({ method: "POST" })
       await assertCan(sql, context.userId, "inventory", "edit");
       const companyId = await cid(sql, context.userId);
       const parsed = parseStockSnap(data.csv);
-      const { inserted, skipped } = await applyStockRows(sql, {
+      const { inserted, skipped, rejected } = await applyStockRows(sql, {
         companyId,
         userId: context.userId,
         rows: parsed,
@@ -186,9 +192,9 @@ export const applyStockSnap = createServerFn({ method: "POST" })
         action: "corte",
         entity: "stock",
         name: "Existencias de corte",
-        detail: `entraron ${inserted}, ya estaban ${skipped}`,
+        detail: `entraron ${inserted}, ya estaban ${skipped}, rechazadas ${rejected.length}${rejectNote(rejected)}`,
       });
-      return { inserted, skipped };
+      return { inserted, skipped, rejected };
     });
     } catch (err) {
       await logImportFailure(boot, context.userId, "Existencias de corte", err);
