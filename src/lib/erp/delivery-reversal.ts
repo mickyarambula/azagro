@@ -5,6 +5,7 @@ import { getSql, withTx, type Sql } from "@/lib/db";
 import { activeMember, canRevert } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { postStock } from "@/lib/erp/stock";
+import { nextDocFolio } from "@/lib/erp/folios";
 import { repartirReversa } from "@/lib/erp/parciales";
 import { todayMx } from "@/lib/utils";
 
@@ -264,8 +265,7 @@ export const deliveryReversalPreview = createServerFn({ method: "POST" })
 
 /** NC por el total de un documento de cliente timbrado (FV o FI): espejo de sus renglones, nace saldada, ligada. */
 async function creditNoteFor(sql: Sql, companyId: number, userId: string, doc: Doc, so: { id: number; name: string; partnerId: number; currency: string; circuit: string | null }, reason: string, today: string) {
-  const n = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${companyId} and name like 'NC-%'`;
-  const ncName = `NC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const ncName = await nextDocFolio(sql, companyId, "NC");
   const nc = await sql<{ id: number }>`
     insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, order_id, inv_class, created_by, circuit_code, reverses_id, paid_date)
     values (${companyId}, 'customer', ${ncName}, ${so.partnerId}, ${today}, ${today}, 'paid', ${-doc.amount}, 0, ${doc.name}, ${so.currency}, ${so.id}, ${doc.inv_class}, ${userId}, ${so.circuit}, ${doc.id}, ${today})

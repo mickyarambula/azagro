@@ -12,6 +12,7 @@ import { activeMember, assertCan, canRevert, canSeeCosts, canSeeSalePrices, memb
 import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate, NO_MORA_POLICY, requireRate } from "@/lib/erp/credit";
 import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
+import { nextDocFolio } from "@/lib/erp/folios";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { purchaseLineGaps, salesLineGaps } from "@/lib/erp/parciales";
@@ -1353,8 +1354,7 @@ export async function bornSupplierDebt(
   const day = (opts.date || todayMx()).slice(0, 10);
   const due = addDays(day, days[0].payment_days);
   const total = Number(po[0].total ?? 0);
-  const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${opts.companyId} and kind = 'supplier'`;
-  const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const iname = await nextDocFolio(sql, opts.companyId, "FP");
   await sql`
     insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, fx_agreed, created_by)
     values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${total}, ${total},
@@ -1590,8 +1590,7 @@ export async function bornSupplierDebtByReceipt(
   const day = (opts.date || todayMx()).slice(0, 10);
   const due = addDays(day, days[0].payment_days);
   const total = opts.received.reduce((s, r) => s + r.qty * r.unitPrice, 0);
-  const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${opts.companyId} and kind = 'supplier'`;
-  const iname = `FP-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const iname = await nextDocFolio(sql, opts.companyId, "FP");
   await sql`
     insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, event_ref, currency, fx_agreed, created_by)
     values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${total}, ${total},
@@ -1980,8 +1979,7 @@ export async function issueDeliveryInvoice(
   const policyCode = (so[0].policy_code ?? "").trim();
   if (!policyCode) throw new Error(`${so[0].name} no tiene política de cobro capturada: captúrala en el pedido antes de facturar.`);
 
-  const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${opts.companyId} and kind = 'customer'`;
-  const iname = `FV-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const iname = await nextDocFolio(sql, opts.companyId, "FV");
   const currency = so[0].currency;
   const fx = Number(so[0].fx_rate);
   const mxn = Math.round(delivered.reduce((s, d) => s + d.qty * d.unitPrice, 0) * 100) / 100;
@@ -2397,8 +2395,7 @@ export const returnSale = createServerFn({ method: "POST" })
     // que el movimiento `return` lleve en `origin` la NC que lo causó — como el
     // `receipt` lleva la OC y el `delivery` el pedido. Así, dentro de un año,
     // se sabe de cuál devolución fue cada movimiento sin leer bitácora.
-    const ncN = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${m.company_id} and name like 'NC-%'`;
-    const ncName = `NC-${String((ncN[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+    const ncName = await nextDocFolio(sql, m.company_id, "NC");
     let credit = 0;
     const posted: string[] = [];
     const costs: Array<{
@@ -2478,8 +2475,7 @@ export const returnSale = createServerFn({ method: "POST" })
     let applied = 0;
     if (fv[0] && Number(fv[0].residual) > 0.009) {
       applied = Math.min(credit, Number(fv[0].residual));
-      const n = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${m.company_id}`;
-      const payName = `PAG-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+      const payName = await nextDocFolio(sql, m.company_id, "PAG");
       const pay = await sql<{ id: number }>`
         insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
         values (${m.company_id}, 'inbound', ${payName}, ${so[0].partner_id}, ${applied}, ${`Devolución ${ncName}`}, ${context.userId}, ${today})
@@ -2836,12 +2832,19 @@ export const applyLateInterest = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({ invoiceId: z.number() }))
   .handler(async ({ context, data }) => {
-    const sql = await getSql();
-    const m = await requireCompany(sql, context.userId);
-    await assertCan(sql, context.userId, "credit", "edit");
-    // issueMoraInvoice guarda el cálculo en la FI y escribe la bitácora.
-    const r = await issueMoraInvoice(sql, m.company_id, data.invoiceId, { requireCharge: true, userId: context.userId });
-    return { charge: r.charge, name: r.name };
+    // Grupo C de la auditoría: la FI es dinero y corre en transacción con la
+    // FV bloqueada (for update dentro de issueMoraInvoice). Dos clics toman el
+    // candado uno a la vez: el segundo ya lee el interés facturado y no
+    // duplica. El alter table del ensure va antes, fuera de la transacción.
+    const boot = await getSql();
+    await ensureInvoiceExtras(boot);
+    return withTx(async (sql) => {
+      const m = await requireCompany(sql, context.userId);
+      await assertCan(sql, context.userId, "credit", "edit");
+      // issueMoraInvoice guarda el cálculo en la FI y escribe la bitácora.
+      const r = await issueMoraInvoice(sql, m.company_id, data.invoiceId, { requireCharge: true, userId: context.userId });
+      return { charge: r.charge, name: r.name };
+    });
   });
 
 export const getStatement = createServerFn({ method: "POST" })

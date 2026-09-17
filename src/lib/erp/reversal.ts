@@ -5,6 +5,7 @@ import { getSql, withTx, type Sql } from "@/lib/db";
 import { activeMember, canRevert } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { refreshInvoiceResidual } from "@/lib/erp/stock";
+import { nextDocFolio } from "@/lib/erp/folios";
 import { todayMx } from "@/lib/utils";
 
 /**
@@ -340,10 +341,7 @@ async function applyReversal(sql: Sql, userId: string, chain: Chain, reason: str
   const today = todayMx();
   const written: string[] = [];
 
-  const nextPag = async () => {
-    const n = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${companyId}`;
-    return `PAG-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-  };
+  const nextPag = () => nextDocFolio(sql, companyId, "PAG");
   const partnerId = (await sql<{ partner_id: number }>`select partner_id from payments where id = ${pv.payment.id}`)[0]!.partner_id;
 
   // 1) El pronto pago que dependía de este cobro: contra-abono, sin banco.

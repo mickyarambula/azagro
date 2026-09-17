@@ -406,12 +406,22 @@ where company_id = $1 and cutover_key is not null`,
   },
   {
     name: "folios de kardex",
-    why: "la MISMA consulta de la migración 0033: máximo por serie de los refs que sobreviven (solo INI/ del corte); las demás series nacen en 0001 la primera vez que se pidan",
+    why: "la MISMA consulta de las migraciones 0033 y 0041: máximo por serie de los refs de kardex que sobreviven (solo INI/ del corte) y de los folios de documentos de dinero (FV/FP/NC/FI/ATC/PAG — tras el borrado sobreviven solo los del corte, con folio de Compaq, así que normalmente ninguno); las demás series nacen en 0001 la primera vez que se pidan",
     sql: `insert into folio_counters (company_id, series, last_number)
 select company_id, split_part(ref, '/', 1), max(split_part(ref, '/', 2)::int)
 from stock_moves
 where company_id = $1 and ref ~ '^(REC|ENT|TR|AJ|INI|DEV|REV)/[0-9]{4,}$'
 group by company_id, split_part(ref, '/', 1)
+union all
+select company_id, split_part(name, '-', 1), max(split_part(name, '-', 2)::int)
+from invoices
+where company_id = $1 and name ~ '^(FV|FP|NC|FI|ATC)-[0-9]{4,}$'
+group by company_id, split_part(name, '-', 1)
+union all
+select company_id, 'PAG', max(split_part(name, '-', 2)::int)
+from payments
+where company_id = $1 and name ~ '^PAG-[0-9]{4,}$'
+group by company_id
 on conflict (company_id, series) do update
   set last_number = greatest(folio_counters.last_number, excluded.last_number)`,
   },

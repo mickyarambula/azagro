@@ -56,7 +56,7 @@ test("returnSale: la factura a la que abona es la elegida (fvId) o la última vi
   assert.ok(body.includes("Esa factura no es una factura viva de este pedido."), "fvId ajeno o revertida → error, no silencio");
   // Aviso del revisor de dinero (16-sep): sin factura viva no hay venta que abonar — la NC sin factura no nace; el camino es la reversa.
   assert.ok(body.includes("no tiene factura viva: no hay venta que abonar. Si la mercancía regresó sin haberse facturado, revierte esa entrega"), "candado con salida: nombra la reversa de entrega (Decisión 38)");
-  assert.ok(body.indexOf("no tiene factura viva") < body.indexOf("const ncName = `NC-${String("), "se detiene ANTES de nacer la NC y de mover inventario");
+  assert.ok(body.indexOf("no tiene factura viva") < body.indexOf("const ncName = await nextDocFolio("), "se detiene ANTES de nacer la NC y de mover inventario");
   assert.ok(body.includes("applied = Math.min(credit, Number(fv[0].residual));"), "el abono, igual que siempre (erp-devolucion-costo lo fija)");
 });
 

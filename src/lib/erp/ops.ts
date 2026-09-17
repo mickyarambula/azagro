@@ -15,6 +15,7 @@ import { formatTerms, ladderFor, parseTerms } from "@/lib/erp/ladder";
 import { marginFromPrice, marginOf, marginText, normalizeMargin, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
 import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
+import { nextDocFolio } from "@/lib/erp/folios";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
 import {
@@ -2016,8 +2017,7 @@ export async function applyInvoicePayment(
     });
   }
 
-  const n = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${opts.companyId}`;
-  const name = `PAG-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const name = await nextDocFolio(sql, opts.companyId, "PAG");
   const kind = inv[0].kind === "customer" ? "inbound" : "outbound";
   const pay = await sql<{ id: number }>`
     insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
@@ -2052,10 +2052,8 @@ export async function applyInvoicePayment(
     const calc = `${usdApplied.toFixed(2)} USD × (TC pagado ${opts.fxPaid} − pactado ${Number(inv[0].fx_agreed)}) = ${fxDiff.toFixed(2)}`;
     if (treatment === "ajuste") {
       // Pagó de menos → documento POR COBRAR; de más → POR DEVOLVER (a favor).
-      const n = await sql<{ c: number }>`
-        select count(*)::int as c from invoices where company_id = ${opts.companyId} and inv_class = 'fx'
-      `;
-      fxDoc = `ATC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+      // Documento ATC-NNNN, folio por serie (grupo C: ya no count(*) de inv_class fx).
+      fxDoc = await nextDocFolio(sql, opts.companyId, "ATC");
       await sql`
         insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id, created_by, calc, circuit_code)
         values (
@@ -2127,8 +2125,7 @@ export async function applyInvoicePayment(
     });
     if (bono.applies && newRes <= bono.bonus + 0.009) {
       discount = Math.round(newRes * 100) / 100;
-      const dn = await sql<{ c: number }>`select count(*)::int as c from payments where company_id = ${opts.companyId}`;
-      const dname = `PAG-${String((dn[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+      const dname = await nextDocFolio(sql, opts.companyId, "PAG");
       const dpay = await sql<{ id: number }>`
         insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
         values (${opts.companyId}, 'inbound', ${dname}, ${inv[0].partner_id}, ${discount}, ${`Pronto pago ${inv[0].name}`}, ${opts.userId}, ${payDate})
@@ -2691,7 +2688,11 @@ export async function issueMoraInvoice(
   opts?: { asOf?: string; paidDate?: string | null; requireCharge?: boolean; userId?: string },
 ) {
   const pol = await policy(sql, companyId);
-  await ensureInvoiceExtras(sql);
+  // Sin alter table aquí: esta función corre DENTRO de una transacción (el
+  // cobro, el botón «Mora», applyLateInterest) y un `alter table … if not
+  // exists` dentro de ella toma el candado de toda la tabla invoices hasta el
+  // commit. Las columnas las garantiza cada entrada con `ensureInvoiceExtras(boot)`
+  // antes de abrir la transacción, y las migraciones en cada deploy.
   const asOf = (opts?.asOf || todayMx()).slice(0, 10);
   const inv = await sql<{
     id: number;
@@ -2715,6 +2716,7 @@ export async function issueMoraInvoice(
       fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class, order_id,
       coalesce(policy_code, '') as policy_code, circuit_code, state
     from invoices where id = ${invoiceId} and company_id = ${companyId}
+    for update
   `;
   if (!inv[0]) throw new Error("Factura no encontrada");
   // BLOQUE DE DESHACER: una factura revertida no genera mora — ya no es deuda.
@@ -2825,8 +2827,7 @@ export async function issueMoraInvoice(
     commissionRate: tasas.commissionRate,
     fegaNew: bill.fegaNew,
   });
-  const n = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${companyId}`;
-  const name = `FI-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+  const name = await nextDocFolio(sql, companyId, "FI");
   await sql`
     insert into invoices (
       company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id,
@@ -2864,11 +2865,16 @@ export const invoiceLiveMora = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({ invoiceId: z.number(), asOf: z.string().optional() }))
   .handler(async ({ context, data }) => {
-    const sql = await getSql();
-    const cid = await companyOf(sql, context.userId);
-    await assertCan(sql, context.userId, "credit", "edit");
-    // issueMoraInvoice guarda el cálculo en la FI y escribe la bitácora.
-    return issueMoraInvoice(sql, cid, data.invoiceId, { asOf: data.asOf, requireCharge: true, userId: context.userId });
+    // Grupo C de la auditoría: transacción + for update (dentro de
+    // issueMoraInvoice), como el cobro. El ensure va antes, fuera de ella.
+    const boot = await getSql();
+    await ensureInvoiceExtras(boot);
+    return withTx(async (sql) => {
+      const cid = await companyOf(sql, context.userId);
+      await assertCan(sql, context.userId, "credit", "edit");
+      // issueMoraInvoice guarda el cálculo en la FI y escribe la bitácora.
+      return issueMoraInvoice(sql, cid, data.invoiceId, { asOf: data.asOf, requireCharge: true, userId: context.userId });
+    });
   });
 
 export const saveDocument = createServerFn({ method: "POST" })

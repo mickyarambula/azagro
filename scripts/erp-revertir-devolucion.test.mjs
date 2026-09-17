@@ -70,7 +70,7 @@ test("CENTRAL (cableado): salida `reversal` al costo de regreso ligada al `retur
 // ---------------------------------------------------------------------------
 test("returnSale calcula el folio de la NC ANTES de mover inventario y lo escribe en el origin del return", () => {
   const body = fnBody(src("src/lib/azagro.ts"), "returnSale");
-  const iNc = body.indexOf("const ncName = `NC-${String(");
+  const iNc = body.indexOf("const ncName = await nextDocFolio(");
   const iPost = body.indexOf('moveType: "return"');
   assert.ok(iNc !== -1 && iPost !== -1 && iNc < iPost, "el folio se calcula antes del postStock");
   assert.ok(body.includes('moveType: "return",\n          origin: ncName,'), "origin = la NC, como la OC en el receipt y el pedido en el delivery");

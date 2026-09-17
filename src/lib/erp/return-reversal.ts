@@ -5,6 +5,7 @@ import { getSql, withTx, type Sql } from "@/lib/db";
 import { activeMember, canRevert } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { postStock, refreshInvoiceResidual } from "@/lib/erp/stock";
+import { nextDocFolio } from "@/lib/erp/folios";
 import { todayMx } from "@/lib/utils";
 
 /**
@@ -257,8 +258,7 @@ export const reverseReturn = createServerFn({ method: "POST" })
       }
       // 2) El abono virtual: contra-abono, sin banco, ligado. La FV vuelve a deber.
       if (pv.virtualPayment && pv.fv) {
-        const c = await tx<{ c: number }>`select count(*)::int as c from payments where company_id = ${companyId}`;
-        const cname = `PAG-${String((c[0]?.c ?? 0) + 1).padStart(4, "0")}`;
+        const cname = await nextDocFolio(tx, companyId, "PAG");
         const contra = await tx<{ id: number }>`
           insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date, reverses_id)
           values (${companyId}, 'inbound', ${cname}, ${fresh.partnerId}, ${-pv.virtualPayment.amount}, ${`Reversa de ${pv.virtualPayment.name} · devolución ${pv.nc.name}`}, ${context.userId}, ${today}, ${pv.virtualPayment.id})

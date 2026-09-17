@@ -67,7 +67,7 @@ La tabla completa "Qué → Dónde" vive en `MAPA.md`. Lo más usado:
 | Bitácora | `src/lib/erp/audit.ts`, ruta `/bitacora` |
 | Pruebas | `scripts/erp-*.test.mjs` (`npm test`) |
 
-Movimientos de stock y cobros: **transacción + `FOR UPDATE`**. Alter table **fuera** de `withTx`.
+Movimientos de stock y cobros: **transacción + `FOR UPDATE`**. Alter table **fuera** de `withTx`. **Toda escritura de dinero corre en `withTx` con `for update` sobre su documento ancla, y el folio sale de `folio_counters`** (grupo C de la auditoría, 17-sep-2026): FV/FP/NC/FI/ATC/PAG por `nextDocFolio` (`src/lib/erp/folios.ts`), kardex por `nextRef` (`stock.ts`); nunca `count(*)+1`. La FI (`issueMoraInvoice`) lee la FV `for update` y sus tres entradas (cobro, botón «Mora», `applyLateInterest`) van en transacción.
 
 ## Correr
 
