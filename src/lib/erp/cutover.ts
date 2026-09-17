@@ -14,6 +14,7 @@ import {
   parseOpenInvoices as parseOpenInvoicesCore,
   parseStockSnap,
   previewOpenInvoiceRows,
+  previewStockRows,
 } from "@/lib/erp/cutover-core";
 
 async function cid(sql: Sql, userId: string) {
@@ -164,6 +165,16 @@ async function logImportFailure(boot: Sql, userId: string, what: string, err: un
     /* el registro del fallo nunca debe tapar el error original */
   }
 }
+
+export const previewStockSnap = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ csv: z.string().min(3) }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    await assertCan(sql, context.userId, "inventory", "edit");
+    const companyId = await cid(sql, context.userId);
+    return previewStockRows(sql, { companyId, rows: parseStockSnap(data.csv) });
+  });
 
 export const applyStockSnap = createServerFn({ method: "POST" })
   .middleware([authMiddleware])

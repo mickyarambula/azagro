@@ -4,7 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { DocFiles } from "@/components/doc-files";
 import { useAccess } from "@/lib/access";
 import { resyncCompaq } from "@/lib/erp/catalogs";
-import { applyOpenInvoices, applyStockSnap, dbStatus, exportBackup, previewOpenInvoices } from "@/lib/erp/cutover";
+import { applyOpenInvoices, applyStockSnap, dbStatus, exportBackup, previewOpenInvoices, previewStockSnap } from "@/lib/erp/cutover";
 import { listCreditPolicies } from "@/lib/erp/ops";
 import { BACKUP_NOTE, clearLiveSince, LIVE_CLEAR_PHRASE, purgePreview, purgeTestData, setLiveSince } from "@/lib/erp/purge";
 import { dateTimeMx, humanError } from "@/lib/utils";
@@ -42,6 +42,7 @@ function Page() {
   const [csvInv, setCsvInv] = useState("");
   const [csvStock, setCsvStock] = useState("");
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof previewOpenInvoices>> | null>(null);
+  const [stockPreview, setStockPreview] = useState<Awaited<ReturnType<typeof previewStockSnap>> | null>(null);
   // Con qué política de cobro entran los saldos del corte. Nace vacía a
   // propósito: hasta hoy entraban en "NONE" (Sin mora) por omisión de la
   // columna, y eso es un número de negocio decidido por el sistema.
@@ -178,9 +179,19 @@ function Page() {
             </button>
           </div>
           {preview && (
-            <p className="mt-2 text-[12px] text-muted">
-              {preview.open} entrarían · {preview.skipped} ya están · {preview.rows.filter((r) => !r.partnerId).length} sin catálogo
-            </p>
+            <div className="mt-2 text-[12px] text-muted">
+              <p>
+                {preview.open} entrarían · {preview.skipped} ya están · {preview.rows.filter((r) => !r.partnerId).length} sin catálogo
+                {preview.differing > 0 && <span className="text-warn"> · {preview.differing} con otros importes</span>}
+              </p>
+              {preview.differing > 0 && (
+                <ul className="mt-1 list-disc pl-4 text-warn">
+                  {preview.rows.filter((r) => r.differs).map((r) => (
+                    <li key={r.key}>{r.differs}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </li>
 
@@ -195,9 +206,28 @@ function Page() {
             onChange={(e) => setCsvStock(e.target.value)}
             placeholder={"ALB-10,001,25,18.5"}
           />
+          <div className="mt-2 flex flex-wrap gap-2">
           <button
             type="button"
-            className="erp-btn-primary mt-2"
+            className="erp-btn"
+            disabled={busy || !csvStock.trim()}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                setStockPreview(await previewStockSnap({ data: { csv: csvStock } }));
+              } catch (e) {
+                setError(humanError(e));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Previsualizar
+          </button>
+          <button
+            type="button"
+            className="erp-btn-primary"
             disabled={busy || !csvStock.trim()}
             onClick={async () => {
               setBusy(true);
@@ -208,6 +238,7 @@ function Page() {
                   `Inventario de corte: ${r.inserted} partidas, ${r.skipped} ya estaban${r.rejected.length ? `, ${r.rejected.length} rechazadas` : ""}.`,
                 );
                 setRejects(r.rejected.map((x) => x.reason));
+                setStockPreview(null);
               } catch (e) {
                 setError(humanError(e));
               } finally {
@@ -217,6 +248,22 @@ function Page() {
           >
             Cargar existencias
           </button>
+          </div>
+          {stockPreview && (
+            <div className="mt-2 text-[12px] text-muted">
+              <p>
+                {stockPreview.open} entrarían · {stockPreview.skipped} ya están · {stockPreview.problems} con problema
+                {stockPreview.differing > 0 && <span className="text-warn"> · {stockPreview.differing} con otros números</span>}
+              </p>
+              {(stockPreview.differing > 0 || stockPreview.problems > 0) && (
+                <ul className="mt-1 list-disc pl-4">
+                  {stockPreview.rows.filter((r) => r.differs || r.problem).map((r, i) => (
+                    <li key={i} className={r.differs ? "text-warn" : undefined}>{r.differs ?? r.problem}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </li>
 
         <li className="erp-card p-4">

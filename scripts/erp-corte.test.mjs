@@ -21,6 +21,7 @@ import {
   parseOpenInvoices,
   parseStockSnap,
   previewOpenInvoiceRows,
+  previewStockRows,
 } from "../src/lib/erp/cutover-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -99,8 +100,8 @@ function postStockStub(calls) {
   return async (sql, a) => {
     calls.push(a);
     await sql`
-      insert into stock_moves (company_id, ref, move_type, origin, location_to, product_id, quantity, created_by)
-      values (${a.companyId}, ${"INI/TEST"}, ${a.moveType}, ${a.origin}, ${a.locationTo}, ${a.productId}, ${a.quantity}, ${a.userId})
+      insert into stock_moves (company_id, ref, move_type, origin, location_to, product_id, quantity, unit_cost, created_by)
+      values (${a.companyId}, ${"INI/TEST"}, ${a.moveType}, ${a.origin}, ${a.locationTo}, ${a.productId}, ${a.quantity}, ${a.unitCost}, ${a.userId})
     `;
   };
 }
@@ -321,5 +322,74 @@ test("Decisión 64 (existencias): sin costo (vacío o ≤ 0) la fila se rechaza 
   assert.equal(calls.length, 0, "el kardex no se tocó");
   const n = (await db.query(`select count(*)::int as n from stock_moves`)).rows[0].n;
   assert.equal(n, 0);
+  await db.close();
+});
+
+// ---------- paso 2: Decisión 65 ----------
+// Un folio (o producto+bodega) ya cargado que llega con importes distintos en
+// una segunda pegada NO se ignora en silencio: el preview marca la diferencia
+// sin aplicarla, y la persona decide. Lo idéntico sigue saliendo como "ya está".
+
+test("Decisión 65 (saldos): mismo folio con otro saldo → el preview lo marca; idéntico → solo skip", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const rows = parseOpenInvoices(CSV_INV, "2026-09-16");
+  await applyOpenInvoiceRows(sql, { companyId: 1, userId: "u1", policyCode: "ESTANDAR", circuitCode: "ASR", rows, foldName });
+  const otra = parseOpenInvoices(
+    [
+      "CL0001,A-292,2025-11-01,2026-04-01,150000,20000,135000,MXN,cliente", // saldo distinto
+      "PR0001,F-88,2025-12-01,2026-01-15,50000,0,50000,USD,proveedor", // idéntica
+    ].join("\n"),
+    "2026-09-16",
+  );
+  const p = await previewOpenInvoiceRows(sql, { companyId: 1, rows: otra });
+  const cambiada = p.rows.find((r) => r.folio === "A-292");
+  assert.equal(cambiada.skip, true, "no se aplica: sigue siendo skip");
+  assert.ok(cambiada.differs, "pero la diferencia se dice");
+  assert.match(cambiada.differs, /130000/, "con el saldo guardado");
+  assert.match(cambiada.differs, /135000/, "y el del CSV");
+  const igual = p.rows.find((r) => r.folio === "F-88");
+  assert.equal(igual.skip, true);
+  assert.equal(igual.differs, undefined, "idéntico no alarma");
+  assert.equal(p.differing, 1);
+  await db.close();
+});
+
+test("Decisión 65 (saldos): mismo folio con otro cargo también se marca", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const rows = parseOpenInvoices(CSV_INV, "2026-09-16");
+  await applyOpenInvoiceRows(sql, { companyId: 1, userId: "u1", policyCode: "ESTANDAR", circuitCode: "ASR", rows, foldName });
+  const otra = parseOpenInvoices("CL0001,A-292,2025-11-01,2026-04-01,155000,20000,130000,MXN,cliente", "2026-09-16");
+  const p = await previewOpenInvoiceRows(sql, { companyId: 1, rows: otra });
+  assert.match(p.rows[0].differs, /150000/);
+  assert.match(p.rows[0].differs, /155000/);
+  await db.close();
+});
+
+test("Decisión 65 (existencias): el preview nuevo marca ya está / con otros números / sin catálogo / sin costo", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const calls = [];
+  await applyStockRows(sql, {
+    companyId: 1, userId: "u1", rows: parseStockSnap("ALB-10,001,25,18.5"), postStock: postStockStub(calls),
+  });
+  const otra = parseStockSnap(
+    [
+      "ALB-10,001,30,18.5", // misma llave, otra cantidad
+      "NOEXISTE,001,5,10", // sin catálogo
+      "ALB-10,001,25,18.5", // idéntica (misma llave otra vez: ya está)
+    ].join("\n"),
+  );
+  const p = await previewStockRows(sql, { companyId: 1, rows: otra });
+  assert.equal(p.rows[0].skip, true, "ya hay INI de ese producto+bodega: no se aplica");
+  assert.ok(p.rows[0].differs, "y la diferencia de cantidad se dice");
+  assert.match(p.rows[0].differs, /25/);
+  assert.match(p.rows[0].differs, /30/);
+  assert.match(p.rows[1].problem, /NOEXISTE/, "sin catálogo se ve desde el preview");
+  assert.equal(p.rows[2].skip, true);
+  assert.equal(p.rows[2].differs, undefined, "idéntica no alarma");
+  const sinCosto = await previewStockRows(sql, { companyId: 1, rows: parseStockSnap("ALB-10,001,25,") });
+  assert.match(sinCosto.rows[0].problem, /sin costo/i, "sin costo se ve desde el preview (Decisión 64)");
   await db.close();
 });

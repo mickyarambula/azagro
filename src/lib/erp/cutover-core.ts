@@ -97,25 +97,106 @@ export function cutoverKeyOf(r: InvRow) {
   return `${r.kind}:${r.partnerCode}:${r.folio}`;
 }
 
+/** ¿Dos importes son el mismo dinero? Mismo umbral que usa el parseo (± 0.009). */
+function sameMoney(a: number, b: number) {
+  return Math.abs(a - b) < 0.009;
+}
+
 export async function previewOpenInvoiceRows(sql: Sql, o: { companyId: number; rows: InvRow[] }) {
-  const rows = [];
+  const rows: (InvRow & { key: string; partnerName: string; partnerId: number; skip: boolean; differs?: string })[] = [];
   for (const r of o.rows) {
     const key = cutoverKeyOf(r);
-    const exists = await sql<{ id: number }>`
-      select id from invoices where company_id = ${o.companyId} and cutover_key = ${key} limit 1
+    const exists = await sql<{ id: number; amount: string; opening_paid: string }>`
+      select id, amount::text, coalesce(opening_paid, 0)::text as opening_paid
+      from invoices where company_id = ${o.companyId} and cutover_key = ${key} limit 1
     `;
     const partner = await sql<{ id: number; name: string }>`
       select id, name from partners where company_id = ${o.companyId} and upper(code) = ${r.partnerCode} limit 1
     `;
+    // Decisión 65: lo ya cargado que llega con OTROS importes no se ignora en
+    // silencio — se compara contra lo congelado al importar (amount y
+    // opening_paid no cambian con los cobros posteriores; residual sí, por
+    // eso no se compara contra residual).
+    let differs: string | undefined;
+    if (exists[0]) {
+      const storedCargo = Number(exists[0].amount);
+      const storedSaldo = storedCargo - Number(exists[0].opening_paid);
+      const csvCargo = r.cargo || r.saldo + r.abono;
+      if (!sameMoney(storedCargo, csvCargo) || !sameMoney(storedSaldo, r.saldo)) {
+        differs = `Folio ${r.folio}: ya está cargado con cargo ${storedCargo} y saldo de corte ${storedSaldo}; el CSV trae cargo ${csvCargo} y saldo ${r.saldo}. No se aplica — si el bueno es el nuevo, se corrige la factura a mano.`;
+      }
+    }
     rows.push({
       ...r,
       key,
       partnerName: partner[0]?.name ?? "",
       partnerId: partner[0]?.id ?? 0,
       skip: Boolean(exists[0]),
+      ...(differs ? { differs } : {}),
     });
   }
-  return { rows, open: rows.filter((r) => !r.skip).length, skipped: rows.filter((r) => r.skip).length };
+  return {
+    rows,
+    open: rows.filter((r) => !r.skip).length,
+    skipped: rows.filter((r) => r.skip).length,
+    differing: rows.filter((r) => r.differs).length,
+  };
+}
+
+/**
+ * Preview de existencias (no existía): los mismos candados que el apply —
+ * sin costo (Decisión 64), sin catálogo (Decisión 66) — y la comparación de
+ * la Decisión 65 contra el saldo inicial ya cargado, ANTES de aplicar nada.
+ */
+export async function previewStockRows(sql: Sql, o: { companyId: number; rows: StockRow[] }) {
+  const rows: (StockRow & { skip: boolean; differs?: string; problem?: string })[] = [];
+  for (const r of o.rows) {
+    if (!(r.cost > 0)) {
+      rows.push({ ...r, skip: false, problem: `Producto ${r.productCode} sin costo en el CSV: captura el costo real (vacío no es cero).` });
+      continue;
+    }
+    const product = await sql<{ id: number }>`
+      select id from products where company_id = ${o.companyId} and upper(code) = ${r.productCode} limit 1
+    `;
+    if (!product[0]) {
+      rows.push({ ...r, skip: false, problem: `Producto ${r.productCode} no está en catálogo` });
+      continue;
+    }
+    const loc = await sql<{ id: number }>`
+      select id from locations
+      where company_id = ${o.companyId} and (upper(code) = ${r.locationCode} or upper(name) = ${r.locationCode})
+      limit 1
+    `;
+    if (!loc[0]) {
+      rows.push({ ...r, skip: false, problem: `Bodega ${r.locationCode} no está en catálogo` });
+      continue;
+    }
+    const already = await sql<{ quantity: string; unit_cost: string }>`
+      select quantity::text, coalesce(unit_cost, 0)::text as unit_cost
+      from stock_moves
+      where company_id = ${o.companyId} and product_id = ${product[0].id} and location_to = ${loc[0].id}
+        and move_type = 'opening' and origin = 'Corte Compaq'
+      limit 1
+    `;
+    if (!already[0]) {
+      rows.push({ ...r, skip: false });
+      continue;
+    }
+    const storedQty = Number(already[0].quantity);
+    const storedCost = Number(already[0].unit_cost);
+    let differs: string | undefined;
+    if (!sameMoney(storedQty, r.qty) || !sameMoney(storedCost, r.cost)) {
+      differs = `${r.productCode} en ${r.locationCode}: ya está el saldo inicial con ${storedQty} a ${storedCost}; el CSV trae ${r.qty} a ${r.cost}. No se aplica — si el bueno es el nuevo, se ajusta en inventario.`;
+    }
+    rows.push({ ...r, skip: true, ...(differs ? { differs } : {}) });
+  }
+  return {
+    rows,
+    open: rows.filter((x) => !x.skip && !x.problem).length,
+    skipped: rows.filter((x) => x.skip).length,
+    differing: rows.filter((x) => x.differs).length,
+    problems: rows.filter((x) => x.problem).length,
+  };
 }
 
 export async function applyOpenInvoiceRows(
