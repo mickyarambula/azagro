@@ -373,7 +373,9 @@ test("decideQuote: días factura de Ajustes (tope = plazo), política de mora po
   const ops = src("src/lib/erp/ops.ts");
   const body = fnBody(ops, "decideQuote");
   assert.ok(body.includes("const invoiceDays = days > 0 ? Math.min(pol.invoiceDays || days, days) : 0;"), "factura = Ajustes, sin pasar del plazo");
-  assert.ok(body.includes(`const policyCode = days > 0 ? (grp[0]?.group_name === "Grupo SL" ? "GRUPO_SL" : "ESTANDAR") : "NONE";`), "mora por cliente");
+  // Decisión 73 (17-sep-2026, con OK del dueño): la política sale de la ficha del cliente, no del nombre de su grupo.
+  assert.ok(body.includes("coalesce(policy_code,'') as policy_code from partners where id = ${q[0].partner_id}") && body.includes("const policyCode = days > 0 ? ficha[0]!.policy_code : NO_MORA_POLICY;"), "mora por cliente: la de su ficha");
+  assert.ok(body.includes("no tiene política de cobro en su ficha: captúrala en Clientes antes de aceptar la cotización a crédito."), "sin política en la ficha no se acepta a crédito");
   assert.ok(body.includes(`const priceMode = days > 0 ? "financed" : "cash";`), "modo de precio");
 });
 

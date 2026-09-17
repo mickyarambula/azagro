@@ -39,7 +39,7 @@ export type OrderDraft = {
 };
 
 export type OrderLookups = {
-  customers: Array<{ id: number; code: string; name: string; group_name: string; payment_days: number; credit_limit: string }>;
+  customers: Array<{ id: number; code: string; name: string; group_name: string; payment_days: number; credit_limit: string; policy_code: string }>;
   asr: Array<{ id: number; name: string }>;
   products: Array<{ id: number; code: string; name: string; uom: string; list_price: string; product_type: string }>;
   locations: Array<{ id: number; name: string; loc_type: string }>;
@@ -90,8 +90,10 @@ export function applyPartnerDefaults(form: OrderDraft, partner: OrderLookups["cu
     invoiceDays: days,
     creditDays: days,
     priceMode: "financed",
-    // A crédito «Sin mora» no vale (Decisión 68): se vacía para que la persona elija.
-    policyCode: partner.group_name === "Grupo SL" ? "GRUPO_SL" : form.policyCode === NO_MORA_POLICY ? "" : form.policyCode,
+    // Decisión 73: la política la propone la FICHA del cliente (ya no el
+    // nombre del grupo). Sin política en la ficha queda vacía para que la
+    // persona elija — nunca se arrastra la del cliente anterior ni «Sin mora».
+    policyCode: partner.policy_code || "",
   };
 }
 

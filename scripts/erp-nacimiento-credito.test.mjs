@@ -192,7 +192,8 @@ test("#2 cableado: los cuatro nacimientos pasan por guardSaleTerms, y nadie escr
   assert.ok(cs.includes("'contado', ${NO_MORA_POLICY})"), "createSale escribe plazo y política, no los hereda de la columna");
   const ops = src("src/lib/erp/ops.ts");
   const dq = fnBody(ops, "decideQuote");
-  assert.ok(dq.includes(`const policyCode = days > 0 ? (grp[0]?.group_name === "Grupo SL" ? "GRUPO_SL" : "ESTANDAR") : "NONE";`), "la regla por grupo sigue tal cual (erp-dos-precios la congela; el #21 es otro tema)");
+  // Decisión 73 (17-sep-2026, con OK del dueño — mismo literal que erp-dos-precios): la política sale de la ficha del cliente.
+  assert.ok(dq.includes("const policyCode = days > 0 ? ficha[0]!.policy_code : NO_MORA_POLICY;"), "la política de la ficha; contado = Sin mora");
   assert.ok(dq.includes("await guardSaleTerms(sql, cid, { creditDays: dues.creditDays, policyCode });"), "…pero el resultado pasa por la misma regla");
   const cpo = src("src/lib/erp/cpo.ts");
   assert.ok(cpo.includes("z.object({ cpoId: z.number(), locationId: z.number(), policyCode: z.string().min(1) })"), "OC del cliente: la política se pide al convertir (Decisión 69 b)");
@@ -229,7 +230,8 @@ test("#2 cableado: el formulario arranca vacío a crédito, pone «Sin mora» de
   assert.ok(form.includes("const off = credit ? p.code === NO_MORA_POLICY : p.code !== NO_MORA_POLICY;"), "a crédito «Sin mora» apagada; de contado solo ella");
   const defaults = fnBody(form, "applyPartnerDefaults");
   assert.ok(defaults.includes("policyCode: NO_MORA_POLICY,"), "cliente de contado → Sin mora");
-  assert.ok(defaults.includes('form.policyCode === NO_MORA_POLICY ? "" : form.policyCode'), "cliente a crédito: si venía Sin mora, se vacía para que elija");
+  // Decisión 73 (17-sep-2026, con OK del dueño): la política la propone la ficha del cliente; sin política, vacío.
+  assert.ok(defaults.includes('policyCode: partner.policy_code || "",'), "a crédito: la de la ficha o vacío para elegir — nunca Sin mora ni la del cliente anterior");
   assert.equal((form.match(/policyCode: form\.policyCode === NO_MORA_POLICY \? "" : form\.policyCode/g) || []).length, 2, "cambiar el plazo a crédito también vacía «Sin mora» (credit_days; Fecha y Cosecha comparten rama)");
 });
 

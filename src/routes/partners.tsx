@@ -29,6 +29,9 @@ function Layout() {
   const { can } = useAccess();
   const canEdit = can("partners", "edit");
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listPartners>>>([]);
+  // Decisión 73: quién NO tiene política de cobro se ve aquí, no cliente por
+  // cliente cuando se detenga una cotización. Un conteo arriba y un filtro.
+  const [soloSinPolitica, setSoloSinPolitica] = useState(false);
 
   useEffect(() => {
     void listPartners().then(setRows).catch(() => setRows([]));
@@ -38,12 +41,13 @@ function Layout() {
     const term = q.trim().toLowerCase();
     return rows
       .filter((r) => (tab === "proveedores" ? r.is_supplier : r.is_customer))
+      .filter((r) => !(soloSinPolitica && tab !== "proveedores") || !r.policy_code)
       .filter((r) => {
         if (!term) return true;
         return [r.code, r.name, r.legal_name, r.rfc, r.group_name, r.city, r.email, r.phone].join(" ").toLowerCase().includes(term);
       })
       .sort((a, b) => a.name.localeCompare(b.name, "es"));
-  }, [rows, tab, q]);
+  }, [rows, tab, q, soloSinPolitica]);
 
   const groups = useMemo(() => {
     const map = new Map<string, typeof filtered>();
@@ -58,6 +62,7 @@ function Layout() {
 
   const selectedId = pathname.match(/\/partners\/(\d+)/)?.[1];
   const isCliente = tab !== "proveedores";
+  const sinPolitica = useMemo(() => rows.filter((r) => r.is_customer && !r.policy_code).length, [rows]);
 
   return (
     <AppShell flush>
@@ -105,6 +110,15 @@ function Layout() {
                 onChange={(e) => navigate({ search: { tab, q: e.target.value } })}
               />
             </label>
+            {isCliente && sinPolitica > 0 && (
+              <button
+                type="button"
+                className={cn("mt-2 w-full rounded border border-warn px-2 py-1 text-left text-[12px] text-warn", soloSinPolitica && "bg-paper")}
+                onClick={() => setSoloSinPolitica((v) => !v)}
+              >
+                {sinPolitica} {sinPolitica === 1 ? "cliente" : "clientes"} sin política de cobro · {soloSinPolitica ? "ver todos" : "ver solo estos"}
+              </button>
+            )}
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {groups.map(([L, items]) => (
@@ -122,7 +136,10 @@ function Layout() {
                       search={{ tab, q }}
                       className={cn("block border-l-2 px-3 py-2.5", on ? "border-accent bg-paper" : "border-transparent hover:bg-paper")}
                     >
-                      <p className="truncate text-[13px] font-medium">{r.name}</p>
+                      <p className="truncate text-[13px] font-medium">
+                        {r.name}
+                        {isCliente && !r.policy_code && <span className="ml-2 text-[11px] font-normal text-warn">sin política</span>}
+                      </p>
                       <p className="truncate text-[12px] text-muted">
                         {r.code}
                         {num(r.ar) || num(r.ap) ? ` · ${money(isCliente ? r.ar : r.ap)}` : ""}

@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
-import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, noMoraMessage, pctRate, policyChargesInterest, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
+import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, noMoraMessage, pctRate, policyChargesInterest, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates, NO_MORA_POLICY} from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { guardSaleTerms } from "@/lib/erp/sale-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
@@ -1636,15 +1636,21 @@ export const decideQuote = createServerFn({ method: "POST" })
     // con esos días y por eso quedan como plazo financiero / mora. La factura
     // vence a los días de Ajustes ("plazo factura"), sin pasar del plazo
     // financiero (la mora no puede arrancar antes del vencimiento de factura).
-    // La política de mora sale del cliente: Grupo SL → GRUPO_SL, los demás →
-    // ESTANDAR; de contado no hay mora.
+    // La política de cobro sale de la ficha del cliente (Decisión 73); de
+    // contado no hay mora.
     const pol = await policy(sql, cid);
     const days = offer === "credit" ? q[0].credit_days || 0 : 0;
     const termKind = days > 0 ? "credit_days" : "contado";
     const invoiceDays = days > 0 ? Math.min(pol.invoiceDays || days, days) : 0;
     const dues = computeDues({ date: today, termKind, invoiceDays, creditDays: days });
-    const grp = await sql<{ group_name: string }>`select coalesce(group_name,'') as group_name from partners where id = ${q[0].partner_id}`;
-    const policyCode = days > 0 ? (grp[0]?.group_name === "Grupo SL" ? "GRUPO_SL" : "ESTANDAR") : "NONE";
+    // Decisión 73: la política de cobro sale de la FICHA del cliente, no del
+    // nombre de su grupo. Sin política en la ficha no se acepta a crédito:
+    // se captura en Clientes primero (consecuencia operativa conocida).
+    const ficha = await sql<{ name: string; policy_code: string }>`select name, coalesce(policy_code,'') as policy_code from partners where id = ${q[0].partner_id}`;
+    if (days > 0 && !ficha[0]?.policy_code) {
+      throw new Error(`El cliente ${ficha[0]?.name ?? ""} no tiene política de cobro en su ficha: captúrala en Clientes antes de aceptar la cotización a crédito.`);
+    }
+    const policyCode = days > 0 ? ficha[0]!.policy_code : NO_MORA_POLICY;
     // Decisiones 68 y 69: la misma regla única que saveOrder — la política
     // tiene que existir en el catálogo y cuadrar con el plazo.
     await guardSaleTerms(sql, cid, { creditDays: dues.creditDays, policyCode });

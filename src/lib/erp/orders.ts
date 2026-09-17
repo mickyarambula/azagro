@@ -88,8 +88,9 @@ export const orderLookups = createServerFn({ method: "GET" })
       group_name: string;
       payment_days: number;
       credit_limit: string;
+      policy_code: string;
     }>`
-      select id, code, name, group_name, payment_days, credit_limit::text
+      select id, code, name, group_name, payment_days, credit_limit::text, coalesce(policy_code,'') as policy_code
       from partners where company_id = ${companyId} and is_customer = true order by name
     `;
     const asr = await sql<{ id: number; name: string }>`

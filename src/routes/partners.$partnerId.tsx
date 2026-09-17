@@ -50,6 +50,7 @@ function Ficha() {
       late_rate: num(p.late_rate),
       is_customer: p.is_customer,
       is_supplier: p.is_supplier,
+      policy_code: p.policy_code ?? "",
     });
     setMeta({ ar: p.ar, reserved: p.reserved ?? "0", ap: p.ap });
     setPeople(d.contacts);
@@ -113,6 +114,7 @@ function Ficha() {
         form={form}
         setForm={setForm}
         groups={lookups?.groups ?? []}
+        policies={lookups?.policies ?? []}
         onCreateGroup={async (code, name) => {
           await saveLookup({ data: { kind: "partner_group", code, name } });
           setLookups(await listLookups());

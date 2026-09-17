@@ -26,7 +26,11 @@ export const listLookups = createServerFn({ method: "GET" })
     const groups = await sql<{ id: number; code: string; name: string }>`
       select id, code, name from partner_groups where company_id = ${companyId} order by name
     `;
-    return { uoms, kinds, groups };
+    // Decisión 73: la ficha del cliente elige su política de cobro de aquí.
+    const policies = await sql<{ code: string; name: string }>`
+      select code, name from credit_policies where company_id = ${companyId} order by code
+    `;
+    return { uoms, kinds, groups, policies };
   });
 
 export const saveLookup = createServerFn({ method: "POST" })

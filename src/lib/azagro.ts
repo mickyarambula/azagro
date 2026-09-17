@@ -564,6 +564,7 @@ export const listPartners = createServerFn({ method: "GET" })
       city: string;
       group_name: string;
       legal_name: string;
+      policy_code: string | null;
       ar: string;
       ap: string;
     }>`
@@ -603,12 +604,20 @@ export const savePartner = createServerFn({ method: "POST" })
       notes: z.string().optional().default(""),
       group_name: z.string().optional().default(""),
       legal_name: z.string().optional().default(""),
+      // Decisión 73: la política de cobro del cliente vive aquí. Vacío = sin
+      // política; un pedido a crédito la pedirá. Nunca se supone.
+      policy_code: z.string().optional().default(""),
     }),
   )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "partners", "edit");
+    const policyCode = (data.policy_code ?? "").trim();
+    if (policyCode) {
+      const pol = await sql<{ code: string }>`select code from credit_policies where company_id = ${m.company_id} and code = ${policyCode}`;
+      if (!pol[0]) throw new Error(`La política de cobro «${policyCode}» no existe en Ajustes → Políticas de cobro.`);
+    }
     let code = (data.code ?? "").trim().toUpperCase();
     if (!code) {
       const prefix = data.is_supplier && !data.is_customer ? "P-" : "C-";
@@ -628,7 +637,8 @@ export const savePartner = createServerFn({ method: "POST" })
           late_rate = ${data.late_rate}, email = ${data.email ?? ""},
           phone = ${data.phone ?? ""}, city = ${data.city ?? ""},
           address = ${data.address ?? ""}, notes = ${data.notes ?? ""},
-          group_name = ${data.group_name ?? ""}, legal_name = ${data.legal_name ?? ""}
+          group_name = ${data.group_name ?? ""}, legal_name = ${data.legal_name ?? ""},
+          policy_code = ${policyCode || null}
         where id = ${data.id} and company_id = ${m.company_id}
       `;
       if (before[0]) {
@@ -654,10 +664,10 @@ export const savePartner = createServerFn({ method: "POST" })
       return { id: data.id };
     }
     const row = await sql<{ id: number }>`
-      insert into partners (company_id, code, name, rfc, is_customer, is_supplier, credit_limit, payment_days, late_rate, email, phone, city, address, notes, group_name, legal_name, seller_id)
+      insert into partners (company_id, code, name, rfc, is_customer, is_supplier, credit_limit, payment_days, late_rate, email, phone, city, address, notes, group_name, legal_name, seller_id, policy_code)
       values (${m.company_id}, ${code}, ${data.name}, ${data.rfc ?? ""}, ${data.is_customer}, ${data.is_supplier},
         ${data.credit_limit}, ${data.payment_days}, ${data.late_rate}, ${data.email ?? ""}, ${data.phone ?? ""}, ${data.city ?? ""},
-        ${data.address ?? ""}, ${data.notes ?? ""}, ${data.group_name ?? ""}, ${data.legal_name ?? ""}, ${context.userId})
+        ${data.address ?? ""}, ${data.notes ?? ""}, ${data.group_name ?? ""}, ${data.legal_name ?? ""}, ${context.userId}, ${policyCode || null})
       returning id
     `;
     if (data.is_supplier) {
@@ -705,11 +715,12 @@ export const getPartner = createServerFn({ method: "POST" })
       group_name: string;
       legal_name: string;
       notes: string;
+      policy_code: string;
       ar: string;
       ap: string;
     }>`
       select p.id, p.code, p.name, p.rfc, p.is_customer, p.is_supplier, p.credit_limit::text,
-        p.payment_days, p.late_rate::text, p.email, p.phone, p.city, p.address, p.group_name, p.legal_name, p.notes,
+        p.payment_days, p.late_rate::text, p.email, p.phone, p.city, p.address, p.group_name, p.legal_name, p.notes, coalesce(p.policy_code,'') as policy_code,
         coalesce((select sum(residual) from invoices i where i.partner_id = p.id and i.kind = 'customer' and i.state = 'open'),0)::text as ar,
         coalesce((select sum(residual) from invoices i where i.partner_id = p.id and i.kind = 'supplier' and i.state = 'open'),0)::text as ap
       from partners p

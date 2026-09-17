@@ -35,6 +35,7 @@ function Nuevo() {
     late_rate: 0,
     is_customer: !isProv,
     is_supplier: isProv,
+    policy_code: "",
   });
   const [lookups, setLookups] = useState<Awaited<ReturnType<typeof listLookups>> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -95,6 +96,7 @@ function Nuevo() {
         form={form}
         setForm={setForm}
         groups={lookups?.groups ?? []}
+        policies={lookups?.policies ?? []}
         onCreateGroup={async (code, name) => {
           await saveLookup({ data: { kind: "partner_group", code, name } });
           setLookups(await listLookups());

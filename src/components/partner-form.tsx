@@ -1,3 +1,4 @@
+import { NO_MORA_POLICY } from "@/lib/erp/credit";
 import { useState } from "react";
 import { CatalogSelect } from "@/components/catalog-select";
 import { Field } from "@/components/erp";
@@ -20,6 +21,8 @@ export type PartnerDraft = {
   late_rate: number;
   is_customer: boolean;
   is_supplier: boolean;
+  /** Decisión 73: política de cobro del cliente; vacío = sin política (un pedido a crédito la pedirá). */
+  policy_code: string;
 };
 
 export function KindChips({ customer, supplier }: { customer: boolean; supplier: boolean }) {
@@ -66,12 +69,14 @@ export function PartnerFields({
   showKind = true,
   groups = [],
   onCreateGroup,
+  policies = [],
 }: {
   form: PartnerDraft;
   setForm: (f: PartnerDraft) => void;
   showKind?: boolean;
   groups?: Array<{ code: string; name: string }>;
   onCreateGroup?: (code: string, name: string) => Promise<void>;
+  policies?: Array<{ code: string; name: string }>;
 }) {
   return (
     <div className="grid gap-4">
@@ -138,6 +143,24 @@ export function PartnerFields({
             value={form.credit_limit}
             onChange={(e) => setForm({ ...form, credit_limit: Number(e.target.value) })}
           />
+        </Field>
+        <Field label={form.is_customer && !form.policy_code ? "Política de cobro — sin política: captúrala" : "Política de cobro"}>
+          <select
+            className={form.is_customer && !form.policy_code ? "erp-input border-warn" : "erp-input"}
+            value={form.policy_code}
+            onChange={(e) => setForm({ ...form, policy_code: e.target.value })}
+          >
+            <option value="">Sin política capturada</option>
+            {/* «Sin mora» es solo de contado (Decisión 68): no es una política de cliente. */}
+            {policies.filter((p) => p.code !== NO_MORA_POLICY).map((p) => (
+              <option key={p.code} value={p.code}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <span className="text-[11px] text-muted">
+            La hereda cada pedido a crédito (se puede cambiar por pedido). Sin política, aceptar una cotización a crédito se detiene hasta capturarla.
+          </span>
         </Field>
       </div>
 
