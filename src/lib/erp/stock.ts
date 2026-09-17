@@ -371,11 +371,20 @@ export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
   }
   const paid = next === "paid";
   if (paid) {
+    // Hallazgo #18 de la auditoría (17-sep-2026): la fecha en que quedó pagada
+    // es la del DINERO — el último abono vivo (sin reverses_id y sin
+    // contrario), no el día en que alguien lo capturó. Un cobro del viernes
+    // capturado el lunes son tres días de mora que el estado de cuenta, la FI
+    // manual y el P&L cobraban de más. Sin abono vivo (no debería pasar), hoy.
     await sql`
-      update invoices
+      update invoices i
       set residual = 0, state = 'paid',
-        paid_date = coalesce(paid_date, ${todayMx()}::date)
-      where id = ${invoiceId}
+        paid_date = coalesce(i.paid_date,
+          (select max(p.date) from payment_allocs pa join payments p on p.id = pa.payment_id
+            where pa.invoice_id = i.id and p.reverses_id is null
+              and not exists (select 1 from payments r where r.reverses_id = p.id)),
+          ${todayMx()}::date)
+      where i.id = ${invoiceId}
     `;
     return 0;
   }
