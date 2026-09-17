@@ -1,0 +1,14 @@
+-- 0042: la partida de la devolución se identifica por sales_lines.id, no por
+-- product_id (AUDITORIA.md § 3 grupo D, hallazgos #5, #22, #23, 17-sep-2026).
+-- Con el mismo producto en dos partidas del pedido, returnSale tomaba la
+-- primera que encontraba (precio de la NC y qty_returned de la partida
+-- equivocada) y reverseReturn restaba qty_returned a TODAS las partidas de
+-- ese producto. Desde aquí returnSale recibe lineId y la NC guarda en cada
+-- renglón de qué partida salió; la reversa (paso 8) regresa qty_returned a
+-- ESA partida.
+--
+-- Aditiva: una sola columna nullable. Los renglones de NC que ya existen
+-- quedan en null (legado): su reversa sigue por producto, exactamente como
+-- se escribieron — mismo patrón "amarre nuevo / amarre viejo" del kardex
+-- (Decisión 42).
+alter table invoice_lines add column if not exists line_id integer references sales_lines(id);

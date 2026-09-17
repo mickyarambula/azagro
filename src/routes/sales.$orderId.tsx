@@ -165,7 +165,15 @@ function Ficha() {
   const liveFvs = invoices.filter((i) => i.name.startsWith("FV-") && i.state !== "reversed" && !i.reverses_id);
   useEffect(() => {
     if (liveFvs.length < 2) { setRetProposal(null); return; }
-    const lines = sold.map((l) => ({ productId: l.product_id, qty: retQty[l.product_id] ?? 0 })).filter((l) => l.qty > 0);
+    // Las casillas van por partida (l.id); la factura a la que abona se decide
+    // por producto (Decisión 52): dos partidas del mismo producto se suman antes
+    // de preguntar cuál factura cubre todo — no se evalúan por separado.
+    const porProducto = new Map<number, number>();
+    for (const l of sold) {
+      const q = retQty[l.id] ?? 0;
+      if (q > 0) porProducto.set(l.product_id, (porProducto.get(l.product_id) ?? 0) + q);
+    }
+    const lines = [...porProducto].map(([productId, qty]) => ({ productId, qty }));
     let alive = true;
     void returnProposal({ data: { soId: id, lines } })
       .then((r) => { if (!alive) return; setRetProposal(r); setRetFv((cur) => (cur != null && r.invoices.some((i) => i.id === cur) ? cur : r.proposedId)); })
@@ -847,17 +855,18 @@ function Ficha() {
               {sold.map((l) => {
                 const max = Math.max(0, num(l.qty_delivered) - num(l.qty_returned));
                 return (
-                  <tr key={l.product_id} className="border-t border-line">
+                  <tr key={l.id} className="border-t border-line">
                     <td className="py-2">
                       <span className="font-medium">{l.name}</span>
                       <span className="ml-2 font-mono text-[11px] text-muted">{l.code}</span>
+                      <span className="ml-2 text-[11px] text-muted">{moneyIn(num(l.unit_price), form.currency)}</span>
                     </td>
                     <td className="py-2 text-right tabular-nums">{qty(l.qty_delivered)} {l.uom}</td>
                     <td className="py-2 text-right tabular-nums">{qty(l.qty_returned)}</td>
                     <td className="py-2 text-right">
                       <QtyField
-                        value={retQty[l.product_id] ?? 0}
-                        onChange={(n) => setRetQty((p) => ({ ...p, [l.product_id]: Math.min(max, Math.max(0, n)) }))}
+                        value={retQty[l.id] ?? 0}
+                        onChange={(n) => setRetQty((p) => ({ ...p, [l.id]: Math.min(max, Math.max(0, n)) }))}
                       />
                     </td>
                   </tr>
@@ -900,7 +909,7 @@ function Ficha() {
               disabled={busy}
               onClick={async () => {
                 const lines = sold
-                  .map((l) => ({ productId: l.product_id, qty: retQty[l.product_id] ?? 0 }))
+                  .map((l) => ({ lineId: l.id, qty: retQty[l.id] ?? 0 }))
                   .filter((l) => l.qty > 0);
                 if (!lines.length) {
                   setError("Indica cuánto se devuelve en al menos una partida");

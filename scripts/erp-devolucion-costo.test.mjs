@@ -134,7 +134,7 @@ test("CENTRAL (cableado): el importe de la devolución se sigue calculando con p
   const az = src("src/lib/azagro.ts");
   const body = fnBody(az, "returnSale");
   assert.ok(body.includes("credit += take.qty * Number(src.unit_price);"), "el importe sale del precio de la partida");
-  assert.ok(body.includes("values (${nc[0]!.id}, ${take.productId}, ${take.qty}, ${Number(src.unit_price)}, ${-amt})"), "los renglones de la NC, igual");
+  assert.ok(body.includes("values (${nc[0]!.id}, ${src.product_id}, ${src.id}, ${take.qty}, ${Number(src.unit_price)}, ${-amt})"), "los renglones de la NC, igual (grupo D: el producto y la partida salen del renglón elegido)");
   assert.ok(body.includes("applied = Math.min(credit, Number(fv[0].residual));"), "el abono a la FV, igual");
   // Ninguna de las variables de costo nuevas toca el cálculo del importe.
   const desdeCredit = body.slice(body.indexOf("let credit = 0;"), body.indexOf("const ncN = await sql"));
@@ -164,7 +164,7 @@ test("deliveredUnitCost: amarra por folio del pedido + producto + salida, y devu
 test("returnSale le pasa a postStock el costo con el que salió, y postStock lo respeta", () => {
   const az = src("src/lib/azagro.ts");
   const body = fnBody(az, "returnSale");
-  assert.ok(body.includes("const exitCost = await deliveredUnitCost(sql, m.company_id, so[0].name, take.productId);"));
+  assert.ok(body.includes("const exitCost = await deliveredUnitCost(sql, m.company_id, so[0].name, src.product_id);"));
   assert.ok(body.includes("unitCost: exitCost ?? undefined,"), "sin salida encontrada se deja que postStock haga lo de siempre");
   // postStock solo busca un costo cuando no le dieron uno.
   const post = fnBody(src("src/lib/erp/stock.ts"), "postStock");
@@ -177,8 +177,8 @@ test("returnSale le pasa a postStock el costo con el que salió, y postStock lo 
 // ---------------------------------------------------------------------------
 test("returnSale devuelve costo de salida y promedio antes/después por partida", () => {
   const body = fnBody(src("src/lib/azagro.ts"), "returnSale");
-  assert.ok(body.includes("const avgBefore = await avgCostAt(sql, m.company_id, take.productId, so[0].location_id);"));
-  assert.ok(body.includes("const avgAfter = await avgCostAt(sql, m.company_id, take.productId, so[0].location_id);"));
+  assert.ok(body.includes("const avgBefore = await avgCostAt(sql, m.company_id, src.product_id, so[0].location_id);"));
+  assert.ok(body.includes("const avgAfter = await avgCostAt(sql, m.company_id, src.product_id, so[0].location_id);"));
   assert.ok(body.includes("costs.push({"), "una fila por partida devuelta");
   assert.ok(body.includes("found: exitCost != null,"), "se distingue el costo de salida del promedio de hoy");
   assert.ok(body.includes("costs,"), "y sale en la respuesta, no se queda en el servidor");

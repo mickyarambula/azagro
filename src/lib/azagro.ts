@@ -2312,7 +2312,9 @@ export const returnSale = createServerFn({ method: "POST" })
     z.object({
       soId: z.number(),
       reason: z.string().optional().default(""),
-      lines: z.array(z.object({ productId: z.number(), qty: z.number().positive() })).min(1),
+      // Grupo D (auditoría, 17-sep-2026): la partida es sales_lines.id. Con el
+      // mismo producto en dos renglones, product_id no dice cuál se devuelve.
+      lines: z.array(z.object({ lineId: z.number(), qty: z.number().positive() })).min(1),
       // BLOQUE DE PARCIALES, paso 5 (Decisión 52): a cuál factura abona la
       // devolución. La propone `returnProposal` (la factura donde viajó el
       // producto); la persona confirma o cambia. Sin esto: la última viva,
@@ -2406,8 +2408,15 @@ export const returnSale = createServerFn({ method: "POST" })
       avgBefore: number;
       avgAfter: number;
     }> = [];
+    // La misma partida dos veces en un envío pasaría dos veces el candado de
+    // `max` (que lee el arreglo en memoria): se rechaza antes de mover nada.
+    const vistas = new Set<number>();
     for (const take of data.lines) {
-      const src = lines.find((l) => l.product_id === take.productId);
+      if (vistas.has(take.lineId)) throw new Error("La misma partida viene dos veces en la devolución: captúrala una sola vez.");
+      vistas.add(take.lineId);
+    }
+    for (const take of data.lines) {
+      const src = lines.find((l) => l.id === take.lineId);
       if (!src) throw new Error("Esa partida no está en el pedido");
       const max = Number(src.qty_delivered) - Number(src.qty_returned);
       if (take.qty > max + 0.0001) {
@@ -2420,25 +2429,25 @@ export const returnSale = createServerFn({ method: "POST" })
         // existió. Sin salida encontrada (datos viejos) no se bloquea la
         // devolución: entra al promedio de hoy — que es lo que postStock hace
         // solo — y se avisa en pantalla y en bitácora, con folio y número.
-        const exitCost = await deliveredUnitCost(sql, m.company_id, so[0].name, take.productId);
-        const avgBefore = await avgCostAt(sql, m.company_id, take.productId, so[0].location_id);
+        const exitCost = await deliveredUnitCost(sql, m.company_id, so[0].name, src.product_id);
+        const avgBefore = await avgCostAt(sql, m.company_id, src.product_id, so[0].location_id);
         const mv = await postStock(sql, {
           companyId: m.company_id,
           userId: context.userId,
           moveType: "return",
           origin: ncName,
-          productId: take.productId,
+          productId: src.product_id,
           quantity: take.qty,
           locationTo: so[0].location_id,
           unitCost: exitCost ?? undefined,
           date: today,
         });
-        const avgAfter = await avgCostAt(sql, m.company_id, take.productId, so[0].location_id);
+        const avgAfter = await avgCostAt(sql, m.company_id, src.product_id, so[0].location_id);
         posted.push(mv.ref);
         // Decisión 20: el promedio se acepta movido y SE MUESTRA, con el
         // número. Que se vea, no que el sistema finja que nada pasó.
         costs.push({
-          productId: take.productId,
+          productId: src.product_id,
           qty: take.qty,
           unitCost: mv.unitCost,
           found: exitCost != null,
@@ -2464,11 +2473,13 @@ export const returnSale = createServerFn({ method: "POST" })
       returning id
     `;
     for (const take of data.lines) {
-      const src = lines.find((l) => l.product_id === take.productId)!;
+      const src = lines.find((l) => l.id === take.lineId)!;
       const amt = take.qty * Number(src.unit_price);
+      // line_id (migración 0042): de qué partida sale este renglón de la NC,
+      // para que la reversa (paso 8) regrese qty_returned a ESA partida.
       await sql`
-        insert into invoice_lines (invoice_id, product_id, qty, unit_price, amount)
-        values (${nc[0]!.id}, ${take.productId}, ${take.qty}, ${Number(src.unit_price)}, ${-amt})
+        insert into invoice_lines (invoice_id, product_id, line_id, qty, unit_price, amount)
+        values (${nc[0]!.id}, ${src.product_id}, ${src.id}, ${take.qty}, ${Number(src.unit_price)}, ${-amt})
       `;
     }
 

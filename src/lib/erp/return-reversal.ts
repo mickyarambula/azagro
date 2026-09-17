@@ -70,7 +70,7 @@ type Chain = {
   preview: ReturnReversalPreview;
   companyId: number;
   moves: Array<{ id: number; product_id: number; quantity: number; unit_cost: number; location_to: number }>;
-  lines: Array<{ product_id: number; qty: number }>;
+  lines: Array<{ product_id: number; line_id: number | null; qty: number }>;
   partnerId: number;
 };
 
@@ -117,8 +117,9 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
   if (later.length) blockers.push(`${n.name} no es la última devolución de ${n.so_name}. Revierte primero ${later[0]!.name}.`);
 
   // Los renglones de la NC: qué se devolvió (cantidades positivas).
-  const lines = await sql<{ product_id: number; qty: string; code: string; product: string; uom: string }>`
-    select il.product_id, il.qty::text, p.code, p.name as product, coalesce(p.uom,'') as uom
+  // line_id (0042): de qué partida salió cada renglón; null en NC anteriores.
+  const lines = await sql<{ product_id: number; line_id: number | null; qty: string; code: string; product: string; uom: string }>`
+    select il.product_id, il.line_id, il.qty::text, p.code, p.name as product, coalesce(p.uom,'') as uom
     from invoice_lines il join products p on p.id = il.product_id
     where il.invoice_id = ${n.id} order by il.id
   `;
@@ -154,6 +155,11 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
 
   // Kardex: los movimientos de regreso de ESTA devolución.
   const moves: Chain["moves"] = [];
+  // Grupo D: una NC puede devolver dos partidas del mismo producto → dos
+  // movimientos `return` con el mismo origin y producto. Cada renglón de la NC
+  // amarra a SU movimiento (en el orden en que se escribieron, sin repetir),
+  // no los dos al último: la liga reverses_id de la reversa tiene que ser 1:1.
+  const usados: number[] = [];
   if (!direct && n.so_location) {
     for (const l of lines) {
       const qty = Number(l.qty);
@@ -162,8 +168,10 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
         select m.id, m.ref, m.quantity::text, coalesce(m.unit_cost,0)::text as unit_cost, m.location_to, loc.name as location
         from stock_moves m left join locations loc on loc.id = m.location_to
         where m.company_id = ${companyId} and m.move_type = 'return' and m.origin = ${n.name} and m.product_id = ${l.product_id}
+          and m.quantity = ${qty}
+          and not (m.id = any(${usados}))
           and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
-        order by m.id desc limit 1
+        order by m.id asc limit 1
       `;
       let matchedBy: "nc" | "legacy" = "nc";
       if (!mv[0]) {
@@ -183,6 +191,7 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
         continue;
       }
       const m = mv[0];
+      usados.push(m.id);
       const salidas = await sql<{ ref: string; quantity: string }>`
         select ref, quantity::text from stock_moves
         where company_id = ${companyId} and product_id = ${l.product_id} and location_from = ${m.location_to} and id > ${m.id}
@@ -214,7 +223,7 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
   // La NC abierta con saldo negativo (crédito a favor) deja de contar; la FV vuelve a deber lo del abono virtual.
   const after = r2(before - (n.state === "open" ? Number(n.residual) : 0) + (preview.virtualPayment?.amount ?? 0));
   preview.partnerDebt = { name: n.so_partner ?? "", before, after };
-  return { preview, companyId, moves, lines: lines.map((l) => ({ product_id: l.product_id, qty: Number(l.qty) })), partnerId: n.so_partner_id ?? 0 };
+  return { preview, companyId, moves, lines: lines.map((l) => ({ product_id: l.product_id, line_id: l.line_id ?? null, qty: Number(l.qty) })), partnerId: n.so_partner_id ?? 0 };
 }
 
 async function auditRejected(sql: Sql, companyId: number, userId: string, chain: Chain) {
@@ -272,7 +281,14 @@ export const reverseReturn = createServerFn({ method: "POST" })
       await tx`update invoices set state = 'reversed', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason} where id = ${pv.nc.id} and company_id = ${companyId}`;
       // 4) La partida: lo devuelto, de regreso.
       for (const l of fresh.lines) {
-        await tx`update sales_lines set qty_returned = greatest(0, qty_returned - ${l.qty}) where so_id = ${pv.so.id} and product_id = ${l.product_id}`;
+        if (l.line_id != null) {
+          // Grupo D: la NC sabe de qué partida salió (invoice_lines.line_id,
+          // 0042): qty_returned regresa a ESA partida, no a todas las del producto.
+          await tx`update sales_lines set qty_returned = greatest(0, qty_returned - ${l.qty}) where id = ${l.line_id} and so_id = ${pv.so.id}`;
+        } else {
+          // NC de antes de la 0042, sin liga a partida: por producto, como se escribió.
+          await tx`update sales_lines set qty_returned = greatest(0, qty_returned - ${l.qty}) where so_id = ${pv.so.id} and product_id = ${l.product_id}`;
+        }
       }
       await writeAudit(tx, {
         companyId, userId: context.userId, action: "revertir-devolucion", entity: "invoice", entityId: pv.nc.id, name: pv.nc.name,
