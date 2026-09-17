@@ -126,6 +126,37 @@ async function chainForPurchase(sql: Sql, companyId: number, poId: number) {
       `${o.name} es directa / brokeraje y su pedido ${o.so_name ?? ""} ya se entregó al cliente: la mercancía ya se movió del proveedor al cliente. Eso no se cancela.`,
     );
   }
+  // Grupo E de la auditoría (17-sep-2026): con entregas por partes el pedido
+  // sigue `confirmed` aunque ya haya salido mercancía del proveedor al
+  // cliente. En directo, "movió mercancía" no lo dice el estado del pedido:
+  // lo dice cada evento vivo — la FP real que nació con esa entrega
+  // (event_ref, Decisiones 14 y 29) o la FV viva por evento del pedido con
+  // productos de esta OC. La salida es revertir esa entrega, una a la vez.
+  if (o.fulfill_kind === "direct") {
+    const eventos = await sql<{ event_ref: string; docs: string }>`
+      select x.event_ref, string_agg(x.name, ', ' order by x.name) as docs
+      from (
+        select i.event_ref, i.name from invoices i
+        where i.company_id = ${companyId} and i.kind = 'supplier' and i.origin = ${o.name}
+          and i.event_ref is not null and i.state <> 'reversed'
+        union
+        select i.event_ref, i.name from invoices i
+        where i.company_id = ${companyId} and i.kind = 'customer' and i.order_id = ${o.so_id ?? 0}
+          and i.event_ref is not null and i.state <> 'reversed' and i.reverses_id is null
+          and exists (
+            select 1 from invoice_lines il join purchase_lines pl on pl.product_id = il.product_id and pl.po_id = ${o.id}
+            where il.invoice_id = i.id
+          )
+      ) x
+      group by x.event_ref order by x.event_ref
+    `;
+    if (eventos.length) {
+      blockers.push(
+        `${o.name} es directa / brokeraje y ya se entregó al cliente en ${eventos.map((e) => `${e.event_ref} (${e.docs})`).join(", ")}: la mercancía ya se movió del proveedor al cliente. ` +
+          `Eso no se cancela, se revierte: «Revertir ${eventos[0]!.event_ref}» en el pedido ${o.so_name ?? ""}, una entrega a la vez.`,
+      );
+    }
+  }
   const money = await moneyLinked(sql, companyId, "po_id", o.id);
   if (money.bank || money.expenses) {
     blockers.push(
@@ -135,11 +166,15 @@ async function chainForPurchase(sql: Sql, companyId: number, poId: number) {
   }
   // La FP que nació con esta OC (defecto anterior a la Decisión 14). Sin abonos
   // se revierte; con un solo abono, ya se le pagó al proveedor: paso 5.
+  // Solo la que NO tiene event_ref: una FP con evento (RCP/ o ENV/) es deuda
+  // real por mercancía que se movió y nunca se ofrece como reversible desde
+  // aquí — la detiene el candado de recepción o el de entrega por evento.
   const fps = await sql<{ id: number; name: string; amount: string; residual: string; due_date: string; state: string; paid: string }>`
     select i.id, i.name, i.amount::text, i.residual::text, i.due_date::text, i.state,
       coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid
     from invoices i
     where i.company_id = ${companyId} and i.kind = 'supplier' and i.origin = ${o.name} and i.state <> 'reversed'
+      and i.event_ref is null
     order by i.id
   `;
   for (const fp of fps) {
