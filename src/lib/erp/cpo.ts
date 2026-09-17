@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
-import { assertCan } from "@/lib/erp/acl";
+import { activeMember, assertCan } from "@/lib/erp/acl";
 import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { nearestRate } from "@/lib/erp/credit";
@@ -54,6 +54,10 @@ export const listCustomerPOs = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
+    // Hallazgo #13 de la auditoría (17-sep-2026): expone precios de OC de
+    // cliente a cualquier miembro activo, sin permiso ni filtro de cartera propia.
+    await assertCan(sql, context.userId, "sales", "view");
+    const me = await activeMember(sql, context.userId);
     await ensure(sql);
     const pos = await sql<{
       id: number;
@@ -74,6 +78,7 @@ export const listCustomerPOs = createServerFn({ method: "GET" })
       join partners p on p.id = c.partner_id
       left join sales_orders so on so.id = c.so_id
       where c.company_id = ${companyId}
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by c.id desc
     `;
     const lines = await sql<{

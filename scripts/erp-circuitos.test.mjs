@@ -310,7 +310,14 @@ test("paso 2: un pedido que vino de cotización NUNCA elige circuito a mano — 
 test("paso 2: las tres pantallas de origen — solicitud, cotización directa, pedido directo — proponen con la regla y dejan cambiar", () => {
   // Solicitud: ya cubierto arriba (CircuitSelect con inheritCircuit en vivo).
   const quotes = src("src/routes/quotes.tsx");
-  assert.ok(quotes.includes('const isAdmin = useAccess().role === "admin";'), "cotizaciones: sabe si el usuario es administrador");
+  // Hallazgo #16 de la auditoría (17-sep-2026, con OK del dueño): useAccess()
+  // en Page (que renderiza AppShell) siempre veía el valor por omisión; el
+  // selector nunca era editable ni para admin. AccessGate lo resuelve DENTRO
+  // del árbol, en los dos sitios donde se usa.
+  assert.ok(quotes.includes('import { AccessGate } from "@/components/access-gate";'), "cotizaciones: usa el bridge de contexto");
+  assert.equal((quotes.match(/<AccessGate>\n\s*\{\(\{ role \}\) => /g) || []).length, 2, "los dos selectores de circuito, dentro de AppShell");
+  assert.ok(quotes.includes("editable={role === \"admin\"}") , "cotización directa nueva: sabe si el usuario es administrador");
+  assert.ok(!quotes.includes('useAccess().role === "admin"'), "ya no se calcula fuera del árbol de AppShell");
   assert.ok(quotes.includes('const [circuitCode, setCircuitCode] = useState<CircuitCode>("CONTADO");'), "cotización directa nueva: propone con la regla");
   assert.ok(quotes.includes("circuitCode: circuitTouched && isSelectableCircuit(circuitCode) ? circuitCode : undefined,"), "…y solo manda el pick si lo tocó (si no, el servidor propone igual)");
   assert.ok(quotes.includes("{!qrow.request_name && revisable ? ("), "revisión: el selector solo aparece en una cotización DIRECTA (sin solicitud) y todavía abierta");

@@ -163,6 +163,10 @@ export const listNotifications = createServerFn({ method: "GET" })
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
     await ensureAlerts(sql);
+    // Hallazgo #12 de la auditoría (17-sep-2026): el resumen de vencimientos
+    // trae folios y saldos de cartera completos — el mismo candado que
+    // getAlertDigest (acl.credit), no solo `status='active'`.
+    const me = await activeMember(sql, context.userId);
     const rows = await sql<{
       id: number;
       kind: string;
@@ -173,6 +177,7 @@ export const listNotifications = createServerFn({ method: "GET" })
     }>`
       select id, kind, title, body, read_at::text, created_at::text
       from notifications where company_id = ${companyId}
+        and (${me.acl.credit} <> 'none' or kind <> 'due')
       order by id desc limit 30
     `;
     return { rows, unread: rows.filter((r) => !r.read_at).length };

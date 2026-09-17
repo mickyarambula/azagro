@@ -2,7 +2,7 @@ import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tan
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { useAccess } from "@/lib/access";
+import { AccessGate } from "@/components/access-gate";
 import { listProducts } from "@/lib/azagro";
 import { cn, num, qty } from "@/lib/utils";
 
@@ -21,8 +21,6 @@ function Layout() {
   const { tab, tipo, q } = Route.useSearch();
   const navigate = useNavigate({ from: "/products" });
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const { can } = useAccess();
-  const canEdit = can("products", "edit");
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listProducts>>>([]);
 
   useEffect(() => {
@@ -64,11 +62,17 @@ function Layout() {
             </button>
           ))}
         </div>
-        {canEdit && tab === "catalogo" && (
-          <Link to="/products/nuevo" search={{ tab: "catalogo", tipo, q }} className="erp-btn-primary grid place-items-center">
-            + Alta
-          </Link>
-        )}
+        {/* Hallazgo #17: useAccess() en Layout (que renderiza AppShell) siempre
+            ve el valor por omisión; AccessGate lo llama donde sí hay contexto. */}
+        <AccessGate>
+          {({ can }) =>
+            can("products", "edit") && tab === "catalogo" && (
+              <Link to="/products/nuevo" search={{ tab: "catalogo", tipo, q }} className="erp-btn-primary grid place-items-center">
+                + Alta
+              </Link>
+            )
+          }
+        </AccessGate>
       </div>
 
       <div className="flex min-h-0 flex-1">

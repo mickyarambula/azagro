@@ -2,7 +2,7 @@ import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tan
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { useAccess } from "@/lib/access";
+import { AccessGate } from "@/components/access-gate";
 import { listPartners } from "@/lib/azagro";
 import { cn, money, num } from "@/lib/utils";
 
@@ -26,8 +26,6 @@ function Layout() {
   const { tab, q } = Route.useSearch();
   const navigate = useNavigate({ from: "/partners" });
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const { can } = useAccess();
-  const canEdit = can("partners", "edit");
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listPartners>>>([]);
   // Decisión 73: quién NO tiene política de cobro se ve aquí, no cliente por
   // cliente cuando se detenga una cotización. Un conteo arriba y un filtro.
@@ -85,17 +83,23 @@ function Layout() {
             </button>
           ))}
         </div>
-        {canEdit && (
-          <div className="flex gap-2">
-            <Link
-              to="/partners/nuevo"
-              search={{ tipo: isCliente ? "cliente" : "proveedor", tab, q }}
-              className="erp-btn-primary grid place-items-center"
-            >
-              + Alta
-            </Link>
-          </div>
-        )}
+        {/* Hallazgo #17: useAccess() en Layout (que renderiza AppShell) siempre
+            ve el valor por omisión; AccessGate lo llama donde sí hay contexto. */}
+        <AccessGate>
+          {({ can }) =>
+            can("partners", "edit") && (
+              <div className="flex gap-2">
+                <Link
+                  to="/partners/nuevo"
+                  search={{ tipo: isCliente ? "cliente" : "proveedor", tab, q }}
+                  className="erp-btn-primary grid place-items-center"
+                >
+                  + Alta
+                </Link>
+              </div>
+            )
+          }
+        </AccessGate>
       </div>
 
       <div className="flex min-h-0 flex-1">

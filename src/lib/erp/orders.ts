@@ -167,6 +167,9 @@ export const getOrder = createServerFn({ method: "POST" })
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
     await assertCan(sql, context.userId, "sales", "view");
+    // Hallazgo #14 de la auditoría (17-sep-2026): listOrders filtra cartera
+    // propia; getOrder (el documento más visitado) no — con el id/URL, cualquiera veía el pedido de otro vendedor.
+    const own = await activeMember(sql, context.userId);
     await sql`alter table sales_orders add column if not exists fletero text not null default ''`;
     await sql`alter table sales_orders add column if not exists placas text not null default ''`;
     await sql`alter table sales_orders add column if not exists chofer text not null default ''`;
@@ -232,7 +235,12 @@ export const getOrder = createServerFn({ method: "POST" })
         quote_id, accepted_offer, circuit_code,
         cancelled_at::text, cancel_reason,
         closed_short_at::text, closed_short_reason
-      from sales_orders where id = ${data.id} and company_id = ${companyId}
+      from sales_orders
+      where id = ${data.id} and company_id = ${companyId}
+        and (${own.own_only} = false or exists (
+          select 1 from partners pp where pp.id = sales_orders.partner_id
+            and (pp.seller_id = ${context.userId} or pp.seller_id is null)
+        ))
     `;
     if (!rows[0]) throw new Error("Pedido no encontrado");
     const quoteId = rows[0].quote_id ?? 0;

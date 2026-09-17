@@ -167,6 +167,7 @@ export const listRequests = createServerFn({ method: "GET" })
       from customer_requests r
       join partners p on p.id = r.partner_id
       where r.company_id = ${companyId}
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by r.id desc
     `;
     const customers = await sql<{ id: number; code: string; name: string }>`
@@ -220,6 +221,7 @@ export const getRequest = createServerFn({ method: "POST" })
       from customer_requests r
       join partners p on p.id = r.partner_id
       where r.id = ${data.id} and r.company_id = ${companyId}
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;
     if (!head[0]) throw new Error("Solicitud no encontrada");
     // Si ya generó cotización VIVA, la solicitud se muestra bloqueada con la

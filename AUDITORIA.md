@@ -373,6 +373,8 @@ Código: src/lib/erp/cutover-core.ts:57 (`? "supplier" : "customer"` con respald
 
 **Arreglo propuesto.** listNotifications debe llamar assertCan/activeMember y aplicar el mismo filtro `acl.credit === "none"` que getAlertDigest (vaciar o filtrar por kind), o dejar de guardar el cuerpo completo en `notifications.body` y guardar solo un resumen sin montos ni nombres.
 
+> **Decidido y construido el 17-sep-2026 — #12 CERRADO.** `listNotifications` (`alerts.ts`) carga `activeMember` y filtra `kind <> 'due' or acl.credit <> 'none'`: sin permiso de cartera, el digest de vencimientos no llega a la campana. `scripts/erp-permisos-contexto.test.mjs`.
+
 #### 13. [Alta] listCustomerPOs no valida ningún permiso ni módulo — expone precios de pedidos de cliente a cualquier miembro activo
 
 - **Tipo:** bug · **Confianza del hallazgo:** confirmado · **Votos (jueces que dijeron real=true):** 3/3 · **Lentes:** permisos-contexto
@@ -388,6 +390,8 @@ Código: src/lib/erp/cutover-core.ts:57 (`? "supplier" : "customer"` con respald
 
 **Arreglo propuesto.** Agregar `assertCan(sql, userId, "sales", "view")` (o el módulo que corresponda a CPO) y el mismo filtro own_only que usa listOrders/listQuotes.
 
+> **Decidido y construido el 17-sep-2026 — #13 CERRADO.** `listCustomerPOs` (`cpo.ts`) exige `sales:view` y filtra `(own_only = false or seller_id = usuario or seller_id null)`, igual que `listOrders`.
+
 #### 14. [Alta] getOrder (detalle de pedido) no filtra por cartera propia, aunque listOrders sí lo hace
 
 - **Tipo:** bug · **Confianza del hallazgo:** confirmado · **Votos (jueces que dijeron real=true):** 3/3 · **Lentes:** permisos-contexto, escenarios-B
@@ -402,6 +406,8 @@ Código: src/lib/erp/cutover-core.ts:57 (`? "supplier" : "customer"` con respald
 **Cómo se reprodujo.** Script: /private/tmp/claude-501/-Users-mickyarambula-Documents-azagro/be9f8639-8845-4a6d-b99d-8f75ac479a99/scratchpad/repro-getorder-own-only.mjs (correr con `NODE_PATH=/Users/mickyarambula/Documents/azagro/node_modules node <script>`). Aplica migrations/*.sql en PGlite, crea dos vendedores `ventas` con own_only=true, dos clientes con seller_id distinto y el pedido PV/0077 (id 77) del cliente de B con notas 'nota privada de B' y delivery_to 'Rancho El Secreto'. Salida para el usuario u_vendA: `me.own_only = true`; SQL literal de listOrders -> `[]`; SQL literal de getOrder({id:77}) -> `[{ id: 77, name: 'PV/0077', partner_id: 20, notes: 'nota privada de B', delivery_to: 'Rancho El Secreto', total: '15000.00' }]`; partidas -> `[{ qty: '100.000', unit_price: '150.0000', name: 'Albendazol 10' }]`; veredicto impreso: "REPRODUCIDO: la lista lo esconde, el detalle lo entrega". Código: orders.ts:156 (filtro en listOrders) vs orders.ts:233 (`where id = ${data.id} and company_id = ${companyId}` sin seller_id); `grep -rn own_only src` no arroja ningún getter de detalle; acl.ts:73 `ventas.ownOnly: true`; users.ts:205 `data.ownOnly ?? ROLE_META[data.role].ownOnly`; erp-permissions.test.mjs:481-497 solo cubre listQuotes/listOrders/listInvoices/listDealPnl/getPanorama/getUpcomingDue/getDashboard.
 
 **Arreglo propuesto.** Agregar el mismo filtro own_only que listOrders al select de getOrder, o validar `seller_id` del partner contra `context.userId` después de leer la fila y antes de continuar.
+
+> **Decidido y construido el 17-sep-2026 — #14 CERRADO.** `getOrder` filtra por SQL con una subconsulta correlacionada (`exists (select 1 from partners pp where pp.id = sales_orders.partner_id and (pp.seller_id = usuario or pp.seller_id is null))`) — sin joinear `partners` en el select principal, para no chocar con la larga lista de columnas ya existente. Con cartera propia, un pedido ajeno responde "Pedido no encontrado", no un error de permiso: no revela que existe.
 
 #### 15. [Alta] listRequests y getRequest (solicitudes) ignoran por completo cartera propia (own_only)
 
@@ -422,6 +428,8 @@ Código: requests.ts:169 `where r.company_id = ${companyId}` y :222 `where r.id 
 
 **Arreglo propuesto.** Añadir a listRequests y getRequest el mismo patrón `(${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)` que ya usan listQuotes/listOrders.
 
+> **Decidido y construido el 17-sep-2026 — #15 CERRADO.** Exactamente ese patrón, en las dos funciones — ambas ya joineaban `partners p`, sin más cambio de esquema.
+
 #### 16. [Alta] En /quotes, useAccess() se llama en el mismo componente que renderiza <AppShell> — el selector de circuito nunca es editable, ni para el administrador
 
 - **Tipo:** bug · **Confianza del hallazgo:** confirmado · **Votos (jueces que dijeron real=true):** 3/3 · **Lentes:** permisos-contexto
@@ -437,6 +445,8 @@ Código: requests.ts:169 `where r.company_id = ${companyId}` y :222 `where r.id 
 
 **Arreglo propuesto.** Mismo patrón que ya se aplicó en index.tsx (`InicioBody`) y purchases.tsx (`CloseShortPurchaseButton`): extraer un componente hijo que se renderice DENTRO de `<AppShell>` y llame `useAccess()` ahí, o pasar `isAdmin` como prop calculado en un componente descendiente del AppShell.
 
+> **Decidido y construido el 17-sep-2026 — #16 CERRADO.** `AccessGate` (`src/components/access-gate.tsx`, nuevo): un render-prop que llama `useAccess()` donde SE USA en el JSX (ya dentro de `<AppShell>`), sin reescribir la función `Page` completa. Los dos `<CircuitSelect>` de `/quotes` quedan envueltos. **Con OK del dueño** cambió el literal de `erp-circuitos.test.mjs:313` (congelaba justo el defecto).
+
 #### 17. [Alta] En /products y /partners, el botón "+ Alta" nunca aparece para ningún rol por el mismo defecto de contexto
 
 - **Tipo:** bug · **Confianza del hallazgo:** confirmado · **Votos (jueces que dijeron real=true):** 3/3 · **Lentes:** permisos-contexto
@@ -451,6 +461,8 @@ Código: requests.ts:169 `where r.company_id = ${companyId}` y :222 `where r.id 
 **Cómo se reprodujo.** Comandos: `sed -n 1,100p src/routes/products.tsx` (useAccess en l.24, `<AppShell flush>` en l.46, botón l.67-71 dentro de la misma `function Layout`); `sed -n 1,100p src/routes/partners.tsx` (useAccess l.29, AppShell l.63, botón l.83-93, misma `Layout`); `cat src/lib/access.tsx` (fallback `can: () => false` cuando no hay provider); `grep -rn AccessProvider src` → único uso: `src/components/app-shell.tsx:330` (dentro del render de AppShell); `grep -n Provider src/routes/__root.tsx` → solo AuthProvider; `sed -n 34,46p src/routes/index.tsx` → comentario del propio código que describe este exacto defecto como "Defecto real ... (verificado)" y lo corrige separando `InicioBody`; `grep -rn 'products/nuevo\|partners/nuevo' src` → /products/nuevo solo aparece en routeTree.gen.ts y en el botón roto de products.tsx:68; /partners/nuevo también en purchases.tsx:199 y order-form.tsx:209. Regla React: `useContext` devuelve el valor del Provider ancestro más cercano; un componente que renderiza al Provider no es descendiente de él.
 
 **Arreglo propuesto.** Mismo arreglo que en quotes.tsx: mover `useAccess()` a un componente hijo renderizado dentro de `<AppShell>`, o pasar `canEdit` calculado desde un lugar con contexto.
+
+> **Decidido y construido el 17-sep-2026 — #17 CERRADO.** El mismo `AccessGate` envuelve el botón «+ Alta» en `/products` y `/partners`. `scripts/erp-permisos-contexto.test.mjs`.
 
 #### 18. [Alta] Al liquidar una factura, `paid_date` queda con la fecha de captura, no con la fecha del cobro
 

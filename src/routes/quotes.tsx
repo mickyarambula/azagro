@@ -22,7 +22,7 @@ import { exportCsv } from "@/lib/export-csv";
 import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
 import { circuitForTerm, circuitLabel, inheritCircuit, isSelectableCircuit, type CircuitCode } from "@/lib/erp/circuits";
 import { CircuitSelect } from "@/components/circuit-select";
-import { useAccess } from "@/lib/access";
+import { AccessGate } from "@/components/access-gate";
 
 export const Route = createFileRoute("/quotes")({
   // ?ver=<id> abre esa cotización al entrar (ligas desde la solicitud y el pedido).
@@ -126,7 +126,6 @@ function OfferCells({
 }
 
 function Page() {
-  const isAdmin = useAccess().role === "admin";
   const navigate = useNavigate();
   const [data, setData] = useState<Awaited<ReturnType<typeof listQuotes>> | null>(null);
   const [locs, setLocs] = useState<Array<{ id: number; name: string }>>([]);
@@ -488,14 +487,20 @@ function Page() {
             </HeadBox>
           ) : null}
           <HeadBox label="Circuito de financiamiento">
-            <CircuitSelect
-              value={circuitCode}
-              editable={isAdmin}
-              onChange={(code) => {
-                setCircuitCode(code);
-                setCircuitTouched(true);
-              }}
-            />
+            {/* Hallazgo #16: useAccess() aquí (en Page) no ve el contexto de
+                AppShell; AccessGate lo llama donde sí lo tiene. */}
+            <AccessGate>
+              {({ role }) => (
+                <CircuitSelect
+                  value={circuitCode}
+                  editable={role === "admin"}
+                  onChange={(code) => {
+                    setCircuitCode(code);
+                    setCircuitTouched(true);
+                  }}
+                />
+              )}
+            </AccessGate>
           </HeadBox>
           <HeadBox label="Totales">
             {priceOffer !== "credit" ? <p className="text-sm tabular-nums">Contado {moneyIn(cashTotal, currency)}</p> : null}
@@ -796,11 +801,15 @@ function Page() {
                         <p className="text-sm font-semibold">Documento al cliente</p>
                         <span className="erp-chip">Revisión {qrow.revision}</span>
                         {!qrow.request_name && revisable ? (
-                          <CircuitSelect
-                            value={circuitOverride ?? (inheritCircuit(qrow.circuit_code, agreedDays) as "CONTADO" | "ASR")}
-                            editable={isAdmin}
-                            onChange={(code) => setCircuitOverride(code)}
-                          />
+                          <AccessGate>
+                            {({ role }) => (
+                              <CircuitSelect
+                                value={circuitOverride ?? (inheritCircuit(qrow.circuit_code, agreedDays) as "CONTADO" | "ASR")}
+                                editable={role === "admin"}
+                                onChange={(code) => setCircuitOverride(code)}
+                              />
+                            )}
+                          </AccessGate>
                         ) : (
                           <span className="erp-chip" title="Circuito de financiamiento (etiqueta: sigue al plazo; la comisión y la base del precio salen de aquí, congeladas al cotizar)">
                             {circuitLabel(qrow.circuit_code)}
