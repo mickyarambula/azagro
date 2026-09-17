@@ -4,6 +4,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
 import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, noMoraMessage, pctRate, policyChargesInterest, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates } from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
+import { guardSaleTerms } from "@/lib/erp/sale-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
@@ -1643,6 +1644,9 @@ export const decideQuote = createServerFn({ method: "POST" })
     const dues = computeDues({ date: today, termKind, invoiceDays, creditDays: days });
     const grp = await sql<{ group_name: string }>`select coalesce(group_name,'') as group_name from partners where id = ${q[0].partner_id}`;
     const policyCode = days > 0 ? (grp[0]?.group_name === "Grupo SL" ? "GRUPO_SL" : "ESTANDAR") : "NONE";
+    // Decisiones 68 y 69: la misma regla única que saveOrder — la política
+    // tiene que existir en el catálogo y cuadrar con el plazo.
+    await guardSaleTerms(sql, cid, { creditDays: dues.creditDays, policyCode });
     const priceMode = days > 0 ? "financed" : "cash";
     const fulfillKind = data.fulfillKind ?? "inventory";
     const routeKind = fulfillKind === "direct" ? "supplier" : "own";
@@ -1939,12 +1943,13 @@ export async function applyInvoicePayment(
     due_date: string;
     order_id: number | null;
     credit_days: number;
+    policy_code: string;
     circuit_code: string | null;
     state: string;
   }>`
     select id, kind, residual::text, amount::text, coalesce(inv_class,'product') as inv_class,
       coalesce(currency,'MXN') as currency, coalesce(amount_fx,0)::text as amount_fx, coalesce(fx_agreed,0)::text as fx_agreed,
-      partner_id, name, date::text, due_date::text, order_id, coalesce(credit_days,0)::int as credit_days, circuit_code, state from invoices
+      partner_id, name, date::text, due_date::text, order_id, coalesce(credit_days,0)::int as credit_days, coalesce(policy_code,'') as policy_code, circuit_code, state from invoices
     where id = ${opts.invoiceId} and company_id = ${opts.companyId}
     for update
   `;
@@ -2082,9 +2087,16 @@ export async function applyInvoicePayment(
   // Descuento REAL por pronto pago: si pagó antes del umbral y lo que falta
   // del saldo cabe en la bonificación (días hasta el plazo financiero, a TIIE
   // de emisión + spread de costo), ese resto se perdona y la factura se cierra.
+  // Solo si el documento genera interés (la política lo dice — «Sin mora» lo
+  // apaga, igual que en el estado de cuenta) y si tiene plazo financiero: con
+  // 0 días no hay financiamiento que devolver, y no se rellena con Ajustes
+  // (hallazgo #1 de la auditoría, Decisión 68). De contado tampoco se pide TIIE.
   let discount = 0;
   let discountDetail = "";
-  if (inv[0].kind === "customer" && inv[0].inv_class === "product" && Number(inv[0].amount) > 0 && newRes > 0.009) {
+  if (
+    inv[0].kind === "customer" && inv[0].inv_class === "product" && Number(inv[0].amount) > 0 && newRes > 0.009 &&
+    policyChargesInterest(inv[0].policy_code) && inv[0].credit_days > 0
+  ) {
     const pol = await policy(sql, opts.companyId);
     // La TIIE solo hace falta si el pago cae antes del umbral (Ajustes). Si
     // hace falta y la tabla no tiene renglón para la fecha de emisión, el cobro
@@ -2107,8 +2119,9 @@ export async function applyInvoicePayment(
       issueDate: inv[0].date,
       payDate,
       thresholdDays: pol.earlyPayDays,
-      // Se bonifican los días no usados del plazo de ESTE pedido.
-      financialDays: inv[0].credit_days || pol.creditDays,
+      // Se bonifican los días no usados del plazo de ESTE pedido — nunca el
+      // de Ajustes: credit_days = 0 es contado, y de contado no se llega aquí.
+      financialDays: inv[0].credit_days,
       tiieAtIssue,
       costSpread: pol.asrSpread,
     });
@@ -2507,7 +2520,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               issueDate: inv.date,
               payDate: fechaBono,
               thresholdDays: pol.earlyPayDays,
-              financialDays: inv.credit_days || pol.creditDays,
+              // Los días de ESTE documento: 0 = contado = nada que bonificar.
+              financialDays: inv.credit_days,
               tiieAtIssue: tiieIssuePick.rate,
               costSpread: pol.asrSpread,
             })

@@ -17,6 +17,8 @@ type Line = { productId: number; qty: number; unitPrice: number; uom: string };
 function Page() {
   const [data, setData] = useState<Awaited<ReturnType<typeof listCustomerPOs>> | null>(null);
   const [locs, setLocs] = useState<Array<{ id: number }>>([]);
+  // Decisión 69 (b): la política de cobro del pedido se elige al convertir.
+  const [policyByRow, setPolicyByRow] = useState<Record<number, string>>({});
   const [partnerId, setPartnerId] = useState(0);
   const [customerPo, setCustomerPo] = useState("");
   const [poDate, setPoDate] = useState(todayMx);
@@ -225,17 +227,34 @@ function Page() {
                 <td className="px-3 py-3 text-right tabular-nums">{money(row.total)}</td>
                 <td className="px-4 py-3 text-right">
                   {row.status !== "converted" && locs[0] && (
-                    <button
-                      type="button"
-                      className="erp-btn h-8 text-[12px]"
-                      onClick={() =>
-                        convertCustomerPO({ data: { cpoId: row.id, locationId: locs[0]!.id } })
-                          .then(load)
-                          .catch((e) => setError(e instanceof Error ? e.message : "Error"))
-                      }
-                    >
-                      Convertir a pedido
-                    </button>
+                    <div className="flex items-center justify-end gap-2">
+                      <select
+                        className="erp-input h-8 text-[12px]"
+                        value={policyByRow[row.id] ?? ""}
+                        onChange={(e) => setPolicyByRow((m) => ({ ...m, [row.id]: e.target.value }))}
+                        aria-label="Política de cobro del pedido"
+                      >
+                        <option value="">Política de cobro</option>
+                        {data?.policies.map((p) => (
+                          <option key={p.code} value={p.code}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="erp-btn h-8 text-[12px]"
+                        disabled={!policyByRow[row.id]}
+                        title={policyByRow[row.id] ? undefined : "Elige la política de cobro del pedido"}
+                        onClick={() =>
+                          convertCustomerPO({ data: { cpoId: row.id, locationId: locs[0]!.id, policyCode: policyByRow[row.id] ?? "" } })
+                            .then(load)
+                            .catch((e) => setError(e instanceof Error ? e.message : "Error"))
+                        }
+                      >
+                        Convertir a pedido
+                      </button>
+                    </div>
                   )}
                 </td>
               </tr>

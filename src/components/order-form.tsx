@@ -6,7 +6,7 @@ import { HeadBox, Field } from "@/components/erp";
 import { MoneyField, QtyField, UomSelect } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { computeDues, type TermKind } from "@/lib/erp/order-terms";
-import { validateDueDates } from "@/lib/erp/credit";
+import { NO_MORA_POLICY, validateDueDates } from "@/lib/erp/credit";
 import { cn, fmtDate, moneyIn, num } from "@/lib/utils";
 import { type CircuitCode } from "@/lib/erp/circuits";
 import { CircuitSelect } from "@/components/circuit-select";
@@ -79,7 +79,8 @@ export function applyPartnerDefaults(form: OrderDraft, partner: OrderLookups["cu
       invoiceDue: form.date,
       creditDue: form.date,
       priceMode: "cash",
-      policyCode: partner.group_name === "Grupo SL" ? "GRUPO_SL" : form.policyCode,
+      // Decisión 69 (a): contado ⇔ «Sin mora».
+      policyCode: NO_MORA_POLICY,
     };
   }
   return {
@@ -89,7 +90,8 @@ export function applyPartnerDefaults(form: OrderDraft, partner: OrderLookups["cu
     invoiceDays: days,
     creditDays: days,
     priceMode: "financed",
-    policyCode: partner.group_name === "Grupo SL" ? "GRUPO_SL" : form.policyCode,
+    // A crédito «Sin mora» no vale (Decisión 68): se vacía para que la persona elija.
+    policyCode: partner.group_name === "Grupo SL" ? "GRUPO_SL" : form.policyCode === NO_MORA_POLICY ? "" : form.policyCode,
   };
 }
 
@@ -302,14 +304,15 @@ export function OrderFields({
                     invoiceDue: form.date,
                     creditDue: form.date,
                     priceMode: "cash",
+                    policyCode: NO_MORA_POLICY,
                   });
                 } else if (termKind === "credit_days") {
                   // Plazo del cliente si lo tiene; si no, los de Ajustes.
                   const days = form.invoiceDays || partner?.payment_days || lookups.terms.invoiceDays;
                   const credit = form.creditDays || partner?.payment_days || lookups.terms.creditDays;
-                  setForm({ ...form, termKind, invoiceDays: days, creditDays: credit, priceMode: "financed" });
+                  setForm({ ...form, termKind, invoiceDays: days, creditDays: credit, priceMode: "financed", policyCode: form.policyCode === NO_MORA_POLICY ? "" : form.policyCode });
                 } else {
-                  setForm({ ...form, termKind, priceMode: "financed" });
+                  setForm({ ...form, termKind, priceMode: "financed", policyCode: form.policyCode === NO_MORA_POLICY ? "" : form.policyCode });
                 }
               }}
               options={TERMS}
@@ -394,13 +397,20 @@ export function OrderFields({
         )}
 
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Política de mora">
+          <Field label="Política de cobro">
+            {/* Decisiones 68 y 69: se elige, no viene puesta. A crédito «Sin mora»
+                no vale; de contado es la única. El servidor lo vuelve a comprobar. */}
             <select className="erp-input" disabled={locked} value={form.policyCode} onChange={(e) => setForm({ ...form, policyCode: e.target.value })}>
-              {lookups.policies.map((p) => (
-                <option key={p.code} value={p.code}>
-                  {p.name}
-                </option>
-              ))}
+              <option value="">Elige la política de cobro</option>
+              {lookups.policies.map((p) => {
+                const credit = (preview?.creditDays ?? 0) > 0;
+                const off = credit ? p.code === NO_MORA_POLICY : p.code !== NO_MORA_POLICY;
+                return (
+                  <option key={p.code} value={p.code} disabled={off}>
+                    {p.name}{off ? (credit ? " (solo contado)" : " (solo crédito)") : ""}
+                  </option>
+                );
+              })}
             </select>
           </Field>
           <Field label="Despachar desde">

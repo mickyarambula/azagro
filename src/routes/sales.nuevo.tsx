@@ -33,7 +33,9 @@ function empty(lookups: OrderLookups): OrderDraft {
     routeKind: "own",
     asrPartnerId: lookups.asr[0]?.id ?? null,
     locationId: loc?.id ?? 0,
-    policyCode: lookups.policies.find((p) => p.code === "NONE")?.code ?? lookups.policies[0]?.code ?? "NONE",
+    // Decisión 68: la política se elige, no viene puesta (applyPartnerDefaults
+    // pone «Sin mora» solo si el cliente es de contado).
+    policyCode: "",
     priceMode: "custom",
     deliveryTo: "",
     notes: "",

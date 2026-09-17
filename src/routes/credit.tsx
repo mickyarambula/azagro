@@ -433,6 +433,16 @@ function Page() {
               // «Sin mora» apaga el interés del documento: ni TIIE ni FI.
               const cobraInteres = policyChargesInterest(inv.policy_code);
               const polDoc = settings.policies.find((x) => x.code === inv.policy_code) ?? null;
+              // Una NC, FI o ATC no es factura de producto: no genera mora ni
+              // tiene política (desde la 0040 nace sin ella, no en «Sin mora»).
+              if (inv.inv_class !== "product") {
+                return (
+                  <div className="mt-2 text-[12px] text-muted">
+                    <p>Vence {dateDMY(inv.due_date)} · {exactClock(inv.due_date, pay.date).label}.</p>
+                    <p className="mt-1">Este documento no es una factura de producto: no genera interés de mora.</p>
+                  </div>
+                );
+              }
               if (!cobraInteres) {
                 return (
                   <div className="mt-2 text-[12px] text-muted">

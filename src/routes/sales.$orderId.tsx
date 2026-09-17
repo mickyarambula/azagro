@@ -149,7 +149,7 @@ function Ficha() {
       routeKind: (["own", "supplier", "asr"].includes(o.route_kind) ? o.route_kind : "own") as OrderDraft["routeKind"],
       asrPartnerId: o.asr_partner_id,
       locationId: o.location_id,
-      policyCode: o.policy_code || "NONE",
+      policyCode: o.policy_code || "",
       priceMode: (["cash", "financed", "custom"].includes(o.price_mode) ? o.price_mode : "custom") as OrderDraft["priceMode"],
       deliveryTo: o.delivery_to,
       notes: o.notes,

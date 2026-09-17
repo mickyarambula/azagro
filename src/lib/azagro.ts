@@ -10,7 +10,7 @@ import { rememberTrade } from "@/lib/erp/links";
 import { seedAcl, type AppRole } from "@/lib/erp/acl";
 import { activeMember, assertCan, canRevert, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
 import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
-import { addDays, nearestRate, requireRate } from "@/lib/erp/credit";
+import { addDays, nearestRate, NO_MORA_POLICY, requireRate } from "@/lib/erp/credit";
 import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
@@ -18,6 +18,7 @@ import { purchaseLineGaps, salesLineGaps } from "@/lib/erp/parciales";
 import { todayMx } from "@/lib/utils";
 import { circuitTerms, inheritCircuit } from "@/lib/erp/circuits";
 import { computeDues, TERM_KINDS, type TermKind } from "@/lib/erp/order-terms";
+import { guardSaleTerms } from "@/lib/erp/sale-terms";
 
 export type Role = AppRole;
 
@@ -115,14 +116,14 @@ export async function seedCompany(sql: Sql, companyId: number) {
   await sql`alter table sales_orders add column if not exists credit_due date`;
   await sql`alter table sales_orders add column if not exists route_kind text not null default 'own'`;
   await sql`alter table sales_orders add column if not exists asr_partner_id integer`;
-  await sql`alter table sales_orders add column if not exists policy_code text not null default 'NONE'`;
+  await sql`alter table sales_orders add column if not exists policy_code text`;
   await sql`alter table sales_orders add column if not exists oc_cliente text not null default ''`;
   await sql`alter table sales_orders add column if not exists price_mode text not null default 'custom'`;
   await sql`alter table sales_lines add column if not exists uom text not null default ''`;
   await sql`alter table invoices add column if not exists credit_due date`;
   await sql`alter table invoices add column if not exists invoice_days integer`;
   await sql`alter table invoices add column if not exists credit_days integer`;
-  await sql`alter table invoices add column if not exists policy_code text not null default 'NONE'`;
+  await sql`alter table invoices add column if not exists policy_code text`;
   // Paso 1 del catálogo de circuitos: etiqueta por documento (migración 0025).
   await sql`alter table sales_orders add column if not exists circuit_code text`;
   await sql`alter table invoices add column if not exists circuit_code text`;
@@ -1708,12 +1709,16 @@ export const createSale = createServerFn({ method: "POST" })
         detail: creditDetail(exposure, total),
       });
     }
+    // Este camino no captura plazo: es contado, y de contado la política es
+    // «Sin mora» — escrito aquí, no heredado de un default de la columna
+    // (Decisiones 68 y 69, misma regla y mismo lugar que saveOrder).
+    await guardSaleTerms(sql, m.company_id, { creditDays: 0, policyCode: NO_MORA_POLICY });
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${m.company_id}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const so = await sql<{ id: number }>`
-      insert into sales_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, delivery_to, owner_id)
+      insert into sales_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, delivery_to, owner_id, term_kind, policy_code)
       values (${m.company_id}, ${name}, ${data.partnerId}, ${todayMx()}, 'confirmed', ${data.locationId}, ${data.notes ?? ""}, ${total},
-        ${data.currency ?? "MXN"}, ${data.fxRate ?? 1}, ${data.deliveryTo ?? ""}, ${context.userId})
+        ${data.currency ?? "MXN"}, ${data.fxRate ?? 1}, ${data.deliveryTo ?? ""}, ${context.userId}, 'contado', ${NO_MORA_POLICY})
       returning id
     `;
     for (const line of data.lines) {
@@ -1970,6 +1975,10 @@ export async function issueDeliveryInvoice(
   });
   const invoiceDue = dues.invoiceDue;
   const creditDue = dues.creditDue;
+  // Decisión 68: la FV hereda la política del pedido tal cual. Sin política
+  // capturada no se factura — ya no se rellena con «Sin mora».
+  const policyCode = (so[0].policy_code ?? "").trim();
+  if (!policyCode) throw new Error(`${so[0].name} no tiene política de cobro capturada: captúrala en el pedido antes de facturar.`);
 
   const ic = await sql<{ c: number }>`select count(*)::int as c from invoices where company_id = ${opts.companyId} and kind = 'customer'`;
   const iname = `FV-${String((ic[0]?.c ?? 0) + 1).padStart(4, "0")}`;
@@ -2031,7 +2040,7 @@ export async function issueDeliveryInvoice(
     values (
       ${opts.companyId}, 'customer', ${iname}, ${so[0].partner_id}, ${today}, ${invoiceDue}, ${creditDue}, 'open',
       ${mxn}, ${mxn}, ${so[0].name}, ${currency}, ${currency === "USD" && fx ? mxn / fx : 0}, ${fx}, 'product', ${so[0].id},
-      ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${so[0].policy_code ?? "NONE"},
+      ${so[0].invoice_days ?? 0}, ${so[0].credit_days ?? 0}, ${policyCode},
       ${opts.userId}, ${snap}, ${inheritCircuit(so[0].circuit_code, so[0].credit_days ?? 0)}, ${opts.eventRef}
     )
     returning id

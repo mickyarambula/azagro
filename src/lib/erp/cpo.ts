@@ -6,6 +6,7 @@ import { assertCan } from "@/lib/erp/acl";
 import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { nearestRate } from "@/lib/erp/credit";
+import { guardSaleTerms } from "@/lib/erp/sale-terms";
 import { circuitForTerm } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -94,7 +95,10 @@ export const listCustomerPOs = createServerFn({ method: "GET" })
     const products = await sql<{ id: number; code: string; name: string; uom: string; list_price: string }>`
       select id, code, name, uom, list_price::text from products where company_id = ${companyId} order by code
     `;
-    return { pos, lines, customers, products };
+    const policies = await sql<{ code: string; name: string }>`
+      select code, name from credit_policies where company_id = ${companyId} order by code
+    `;
+    return { pos, lines, customers, products, policies };
   });
 
 export const createCustomerPO = createServerFn({ method: "POST" })
@@ -148,7 +152,9 @@ export const createCustomerPO = createServerFn({ method: "POST" })
 
 export const convertCustomerPO = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ cpoId: z.number(), locationId: z.number() }))
+  // Decisión 69 (b): la política de cobro se PIDE al convertir, como en el
+  // corte; hasta hoy se escribía 'NONE' aquí y un pedido a crédito nacía sin mora.
+  .validator(z.object({ cpoId: z.number(), locationId: z.number(), policyCode: z.string().min(1) }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
@@ -195,6 +201,7 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
       throw new Error("El cliente no tiene plazo de pago capturado. Captúralo en su ficha (0 = contado) antes de convertir la OC.");
     }
     const plazo = partner[0].payment_days;
+    await guardSaleTerms(sql, companyId, { creditDays: plazo, policyCode: data.policyCode });
     const so = await sql<{ id: number }>`
       insert into sales_orders (
         company_id, name, partner_id, date, state, location_id, notes, total,
@@ -203,7 +210,7 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
       ) values (
         ${companyId}, ${name}, ${cpo[0].partner_id}, ${today}, 'draft', ${data.locationId},
         ${cpo[0].notes}, ${total}, ${cpo[0].currency}, ${fxRate}, '', ${context.userId},
-        'credit_days', ${plazo}, ${plazo}, 'own', 'NONE', ${cpo[0].customer_po_number}, 'custom', ${circuitForTerm(plazo)}
+        'credit_days', ${plazo}, ${plazo}, 'own', ${data.policyCode}, ${cpo[0].customer_po_number}, 'custom', ${circuitForTerm(plazo)}
       )
       returning id
     `;

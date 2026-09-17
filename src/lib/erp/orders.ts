@@ -6,8 +6,9 @@ import { activeMember, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/a
 import { writeAudit } from "@/lib/erp/audit";
 import { todayMx } from "@/lib/utils";
 import { computeDues } from "@/lib/erp/order-terms";
+import { guardSaleTerms } from "@/lib/erp/sale-terms";
 import { computeDealPnl } from "@/lib/erp/reports";
-import { assertDueOk, validateDueDates } from "@/lib/erp/credit";
+import { assertDueOk, NO_MORA_POLICY, validateDueDates } from "@/lib/erp/credit";
 import { creditDetail, creditExceededMessage, creditExposure, creditRoom } from "@/lib/erp/credit-limit";
 import { rememberTrade } from "@/lib/erp/links";
 import { policy } from "@/lib/erp/ops";
@@ -219,7 +220,7 @@ export const getOrder = createServerFn({ method: "POST" })
     }>`
       select id, name, partner_id, date::text, state, location_id, notes, total::text, currency, fx_rate::text,
         delivery_to, term_kind, invoice_days, credit_days, invoice_due::text, credit_due::text,
-        route_kind, asr_partner_id, policy_code, oc_cliente, price_mode,
+        route_kind, asr_partner_id, coalesce(policy_code,'') as policy_code, oc_cliente, price_mode,
         coalesce(fletero,'') as fletero, coalesce(placas,'') as placas,
         coalesce(chofer,'') as chofer, coalesce(vehicle_brand,'') as vehicle_brand,
         coalesce(ship_mode,'azagro') as ship_mode,
@@ -390,9 +391,11 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
       total: string;
       accepted_offer: string | null;
       circuit_code: string | null;
+      policy_code: string;
     }>`
       select id, name, state, date::text, quote_id, coalesce(credit_days,0)::int as credit_days,
-        coalesce(invoice_days,0)::int as invoice_days, invoice_due::text, credit_due::text, total::text, accepted_offer, circuit_code
+        coalesce(invoice_days,0)::int as invoice_days, invoice_due::text, credit_due::text, total::text, accepted_offer, circuit_code,
+        coalesce(policy_code,'') as policy_code
       from sales_orders where id = ${data.id} and company_id = ${companyId}
     `;
     if (!so[0]) throw new Error("Pedido no encontrado");
@@ -491,6 +494,12 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
     for (const n of nuevos) {
       await sql`update sales_lines set unit_price = ${n.price} where id = ${n.id}`;
     }
+    // Decisión 69 (a): contado ⇔ «Sin mora». Al pasar a contado la política es
+    // Sin mora; al pasar a crédito una «Sin mora» se vacía para que la persona
+    // la elija en la ficha antes de confirmar (saveOrder la exige). No se
+    // decide una política por ella: solo se quita la que ya no vale.
+    const policyAfter = dues.creditDays > 0 ? (so[0].policy_code === NO_MORA_POLICY ? "" : so[0].policy_code) : NO_MORA_POLICY;
+    if (policyAfter !== so[0].policy_code) cambios.push(`política ${so[0].policy_code || "—"} → ${policyAfter || "por elegir"}`);
     await sql`
       update sales_orders set
         term_kind = ${termKind},
@@ -500,6 +509,7 @@ export const changeOrderTerm = createServerFn({ method: "POST" })
         credit_due = ${dues.creditDue},
         price_mode = ${days > 0 ? "financed" : "cash"},
         circuit_code = ${circuit},
+        policy_code = ${policyAfter},
         total = ${total}
       where id = ${so[0].id} and company_id = ${companyId}
     `;
@@ -542,6 +552,10 @@ export const saveOrder = createServerFn({ method: "POST" })
         allowPast: true,
       }),
     );
+    // Decisiones 68 y 69: en ventas a crédito siempre hay mora — la política se
+    // elige (nunca por omisión) y «Sin mora» es solo de contado. Un pedido que
+    // no cumple no se guarda, ni en borrador.
+    await guardSaleTerms(sql, companyId, { creditDays: dues.creditDays, policyCode: data.policyCode });
     const total = data.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
     const asrId = data.routeKind === "asr" ? data.asrPartnerId ?? null : null;
     if (data.routeKind === "asr" && !asrId) throw new Error("El circuito ASR necesita la contraparte (Santa Rosa / ASR)");
