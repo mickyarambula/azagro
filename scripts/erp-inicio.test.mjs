@@ -161,9 +161,29 @@ test("getDashboard: vence esta semana (por pagar), límite excedido y entregado 
   const body = fnBody(src("src/lib/azagro.ts"), "getDashboard");
   assert.ok(body.includes("payableWeek: seeCredit ? Number(payableWeek[0]?.total ?? 0) : 0"));
   assert.ok(body.includes("due_date >= ${today}::date and due_date <= ${today}::date + 7"), "ventana de 7 días, no de mes");
-  assert.ok(body.includes("const creditExceeded = seeCredit ? await creditExceededSummary(sql, cid) : { n: 0, amount: 0 };"));
-  assert.ok(body.includes("const porFacturarRows = seeCredit ? (await salesLineGaps(sql, cid)).porFacturar : [];"));
+  // 16-sep-2026 (cartera propia): creditExceededSummary recibe ownOnly/userId
+  // del vendedor; entregado sin facturar se apaga con own_only (salesLineGaps
+  // es company-wide, compartida con /inventory).
+  assert.ok(body.includes("await creditExceededSummary(sql, cid, { ownOnly: me.own_only, userId: context.userId })"));
+  assert.ok(body.includes("const porFacturarRows = seeCredit && !me.own_only ? (await salesLineGaps(sql, cid)).porFacturar : [];"));
   assert.ok(body.includes("r.porFacturar * r.unitPrice"), "el dinero parado se valúa con el precio de la línea");
+});
+
+test("getDashboard: cartera propia (own_only) filtra por cobrar, vencidas, pedidos confirmados y límite excedido — mismo patrón que listQuotes/listOrders/getUpcomingDue", () => {
+  const body = fnBody(src("src/lib/azagro.ts"), "getDashboard");
+  const clause = "own_only} = false or";
+  const occurrences = (body.match(new RegExp(clause.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
+  assert.ok(occurrences >= 4, `own_only debe filtrar ar, overdue_n, so pendientes y confirmedNotDelivered (encontradas ${occurrences})`);
+  assert.ok(body.includes("p.seller_id = ${context.userId} or p.seller_id is null"), "cubre 'sin vendedor asignado', como el resto del sistema");
+});
+
+test("Cola operativa vuelve al inicio (regresión: se había quitado al rediseñar) — pendingSo/pendingPo, visible a quien ve ventas o compras", () => {
+  const s = src("src/routes/index.tsx");
+  assert.ok(s.includes("Cola operativa"));
+  assert.ok(s.includes("data?.pendingSo"));
+  assert.ok(s.includes("data?.pendingPo"));
+  assert.ok(s.includes('const seeSales = access.can("sales");'));
+  assert.ok(s.includes('const seePurchases = access.can("purchases");'));
 });
 
 test("getDashboard: pedidos confirmados sin entregar cuenta lo cerrado corto como resuelto (paso 7)", () => {

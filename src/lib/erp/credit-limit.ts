@@ -83,7 +83,16 @@ export function creditExceededMessage(x: CreditExposure) {
  * Decisión 62), pero en un solo viaje a la base para todos los clientes con
  * límite capturado, en vez de uno por cliente.
  */
-export async function creditExceededSummary(sql: Sql, companyId: number): Promise<{ n: number; amount: number }> {
+export async function creditExceededSummary(
+  sql: Sql,
+  companyId: number,
+  opts: { ownOnly?: boolean; userId?: string } = {},
+): Promise<{ n: number; amount: number }> {
+  // Cartera propia (own_only): mismo patrón que listQuotes / listOrders /
+  // getUpcomingDue — un vendedor ve solo lo suyo; un cliente sin vendedor
+  // cuenta para todos.
+  const ownOnly = opts.ownOnly ?? false;
+  const userId = opts.userId ?? "";
   const rows = await sql<{ n: number; amount: string }>`
     select count(*)::int as n, coalesce(sum(used - credit_limit), 0)::text as amount
     from (
@@ -107,6 +116,7 @@ export async function creditExceededSummary(sql: Sql, companyId: number): Promis
           and coalesce(so.term_kind,'credit_days') <> 'contado'
       ) res on true
       where p.company_id = ${companyId} and p.is_customer = true and p.credit_limit > 0
+        and (${ownOnly} = false or p.seller_id = ${userId} or p.seller_id is null)
     ) x
     where used > credit_limit
   `;

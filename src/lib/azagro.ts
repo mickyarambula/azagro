@@ -310,12 +310,17 @@ export const getDashboard = createServerFn({ method: "GET" })
     const cid = me.company_id;
     await ensureStock(sql);
     const today = todayMx();
+    // Cartera propia (own_only): un vendedor ve solo lo suyo — mismo patrón
+    // que listQuotes / listOrders / listInvoices / getUpcomingDue. Un cliente
+    // sin vendedor asignado se cuenta para todos (nadie se queda huérfano).
     const ar = await sql<{ total: string; overdue: string }>`
       select
-        coalesce(sum(residual),0)::text as total,
-        coalesce(sum(case when due_date < ${today}::date then residual else 0 end),0)::text as overdue
-      from invoices
-      where company_id = ${cid} and kind = 'customer' and state = 'open'
+        coalesce(sum(i.residual),0)::text as total,
+        coalesce(sum(case when i.due_date < ${today}::date then i.residual else 0 end),0)::text as overdue
+      from invoices i
+      join partners p on p.id = i.partner_id
+      where i.company_id = ${cid} and i.kind = 'customer' and i.state = 'open'
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;
     const ap = await sql<{ total: string }>`
       select coalesce(sum(residual),0)::text as total
@@ -402,8 +407,12 @@ export const getDashboard = createServerFn({ method: "GET" })
     const pending = await sql<{ po: number; so: number; overdue_n: number }>`
       select
         (select count(*)::int from purchase_orders where company_id = ${cid} and state not in ('done','cancelled')) as po,
-        (select count(*)::int from sales_orders where company_id = ${cid} and state not in ('done','cancelled')) as so,
-        (select count(*)::int from invoices where company_id = ${cid} and kind = 'customer' and state = 'open' and due_date < ${today}::date) as overdue_n
+        (select count(*)::int from sales_orders so join partners p on p.id = so.partner_id
+          where so.company_id = ${cid} and so.state not in ('done','cancelled')
+            and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)) as so,
+        (select count(*)::int from invoices i join partners p on p.id = i.partner_id
+          where i.company_id = ${cid} and i.kind = 'customer' and i.state = 'open' and i.due_date < ${today}::date
+            and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)) as overdue_n
     `;
     const cash = await sql<{ total: string }>`
       select coalesce(sum(
@@ -464,7 +473,9 @@ export const getDashboard = createServerFn({ method: "GET" })
     const confirmedNotDelivered = await sql<{ n: number; oldest: number | null }>`
       select count(*)::int as n, max(${today}::date - so.date) as oldest
       from sales_orders so
+      join partners p on p.id = so.partner_id
       where so.company_id = ${cid} and so.state = 'confirmed'
+        and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
         and exists (
           select 1 from sales_lines sl
           where sl.so_id = so.id and sl.qty_delivered + coalesce(sl.qty_closed_short,0) < sl.qty - 0.0001
@@ -477,11 +488,17 @@ export const getDashboard = createServerFn({ method: "GET" })
     const seeCosts = canSeeCosts(me.role);
     const seePartners = me.acl.partners !== "none";
     // Paso 6 de PARCIALES.md (Decisión 51): la misma cuenta con la que
-    // saveOrder decide si un pedido cabe, resumida para el inicio.
-    const creditExceeded = seeCredit ? await creditExceededSummary(sql, cid) : { n: 0, amount: 0 };
+    // saveOrder decide si un pedido cabe, resumida para el inicio. Cartera
+    // propia: cada vendedor ve sus clientes pasados de línea, no los de todos.
+    const creditExceeded = seeCredit
+      ? await creditExceededSummary(sql, cid, { ownOnly: me.own_only, userId: context.userId })
+      : { n: 0, amount: 0 };
     // Decisión 47: en bodega propia entregar no factura — la mercancía que
     // ya salió y todavía no se facturó es normal, pero es dinero parado.
-    const porFacturarRows = seeCredit ? (await salesLineGaps(sql, cid)).porFacturar : [];
+    // salesLineGaps es compartida con /inventory (company-wide a propósito
+    // ahí); no distingue vendedor, así que con cartera propia esta cifra se
+    // oculta en vez de enseñar el total de todos como si fuera el de uno.
+    const porFacturarRows = seeCredit && !me.own_only ? (await salesLineGaps(sql, cid)).porFacturar : [];
     const deliveredNotInvoiced = {
       n: porFacturarRows.length,
       amount: porFacturarRows.reduce((s, r) => s + r.porFacturar * r.unitPrice, 0),

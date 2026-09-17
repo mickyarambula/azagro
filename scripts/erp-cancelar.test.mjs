@@ -109,7 +109,10 @@ test("src/lib: ningún `<> 'paid'` ni `<> 'done'` suelto sobre state — todos p
 test("azagro.ts: tablero (pendientes PO/SO) y pendientes-por-recibir excluyen cancelado", () => {
   const c = src("src/lib/azagro.ts");
   assert.ok(c.includes("state not in ('done','cancelled')) as po,"));
-  assert.ok(c.includes("state not in ('done','cancelled')) as so,"));
+  // 16-sep-2026 (rediseño del inicio, cartera propia): "so" ahora se une con
+  // partners para el filtro own_only; el excluye-cancelado se queda igual,
+  // solo cambia el alias.
+  assert.ok(c.includes("so.state not in ('done','cancelled')"));
   assert.ok(c.includes("and po.state not in ('done','cancelled')"));
 });
 

@@ -54,6 +54,10 @@ function InicioBody() {
   const seeBanks = access.can("banks");
   const seeStockValue = canSeeCosts(access.role);
   const seeMonth = seeCredit && canSeeMargins(access.role);
+  // Operativo, no dinero: lo ven ventas, compras y almacén por igual (cada
+  // uno ve sus módulos — ownOnly ya filtra "so" del lado del vendedor).
+  const seeSales = access.can("sales");
+  const seePurchases = access.can("purchases");
 
   useEffect(() => {
     getDashboard()
@@ -309,7 +313,31 @@ function InicioBody() {
           </div>
         )}
 
-        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <div className="mt-4 grid gap-3 lg:grid-cols-3">
+          {(seeSales || seePurchases) && (
+            <div className="erp-card p-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-[13px] font-semibold">Cola operativa</h3>
+                <Link to="/sales" search={{ tab: "confirmed", q: "" }} className="text-[12px] font-medium text-accent">
+                  Pedidos
+                </Link>
+              </div>
+              <ul className="mt-3 space-y-2 text-sm">
+                {seeSales && (
+                  <li className="flex justify-between">
+                    <span className="text-muted">Ventas por entregar</span>
+                    <span className="tabular-nums">{data?.pendingSo ?? "—"}</span>
+                  </li>
+                )}
+                {seePurchases && (
+                  <li className="flex justify-between">
+                    <span className="text-muted">Compras por recibir</span>
+                    <span className="tabular-nums">{data?.pendingPo ?? "—"}</span>
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
           {seeMonth && pnl && (
             <div className="erp-card p-4">
               <div className="flex items-center justify-between">

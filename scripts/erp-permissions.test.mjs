@@ -487,6 +487,7 @@ test("own_only: listQuotes, listOrders, listInvoices y reports.ts filtran por ve
     ["src/lib/erp/reports.ts", "listDealPnl", "p.seller_id"],
     ["src/lib/erp/reports.ts", "getPanorama", "p.seller_id"],
     ["src/lib/erp/reports.ts", "getUpcomingDue", "p.seller_id"],
+    ["src/lib/azagro.ts", "getDashboard", "p.seller_id"],
   ];
   for (const [file, fn, sellerCol] of cases) {
     const body = fnBody(src(file), fn);
