@@ -32,6 +32,7 @@ function kindLabel(k: string) {
   if (k === "pago") return "Pago";
   if (k === "gasto") return "Gasto";
   if (k === "transferencia") return "Transferencia";
+  if (k === "saldo-inicial") return "Saldo inicial";
   return "Ajuste";
 }
 

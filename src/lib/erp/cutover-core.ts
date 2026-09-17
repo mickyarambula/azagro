@@ -325,3 +325,123 @@ export async function applyStockRows(
   }
   return { inserted, skipped, rejected };
 }
+
+// ---------------------------------------------------------------------------
+// Bancos del corte (Decisión 63, migración 0038).
+//
+// El saldo inicial de cada cuenta entra como un MOVIMIENTO de banco con
+// fecha y rastro (`bank_moves`, kind 'saldo-inicial', cutover_key
+// 'bank:CUENTA'), no pisando `banks.opening`. El saldo en pantalla ya es
+// opening + Σ movimientos, así que cuadra sin tocar ningún lector. Nace
+// conciliado: el saldo inicial ES el estado de cuenta del banco, el ancla
+// contra la que se concilia lo demás.
+//
+// Candado contra el doble conteo: una cuenta con `opening` capturado a mano
+// (≠ 0) se rechaza — si también entrara el movimiento, sumaría dos veces.
+// El candado en sentido contrario (no capturar `opening` a mano cuando ya
+// hay movimiento de corte) vive en saveBankOpening (ops.ts).
+// ---------------------------------------------------------------------------
+
+export type BankRow = { account: string; amount: number; date: string };
+
+export const BANK_CUTOVER_KIND = "saldo-inicial";
+export const BANK_CUTOVER_MEMO = "Saldo inicial — Corte Compaq";
+
+export function parseBankSnap(raw: string, today: string): BankRow[] {
+  const out: BankRow[] = [];
+  for (const line of splitCsv(raw)) {
+    const c = cells(line);
+    if (!c[0] || (/cuenta|banco|account|bank/i.test(c[0]!) && out.length === 0)) continue;
+    const amount = num(c[1] || "0");
+    if (Math.abs(amount) < 0.009) continue;
+    out.push({ account: (c[0] || "").toUpperCase(), amount, date: (c[2] || today).slice(0, 10) });
+  }
+  return out;
+}
+
+/**
+ * La llave es por la CUENTA ENCONTRADA (su id), no por el texto tecleado: la
+ * misma cuenta pegada una vez por nombre y otra por número es una sola.
+ */
+export function bankKeyOf(bankId: number) {
+  return `bank:${bankId}`;
+}
+
+async function findBank(sql: Sql, companyId: number, account: string) {
+  return sql<{ id: number; name: string; opening: string }>`
+    select id, name, opening::text from banks
+    where company_id = ${companyId} and (upper(name) = ${account} or upper(account) = ${account})
+    limit 1
+  `;
+}
+
+export async function previewBankRows(sql: Sql, o: { companyId: number; rows: BankRow[] }) {
+  const rows: (BankRow & { key: string; bankId: number; bankName: string; skip: boolean; differs?: string; problem?: string })[] = [];
+  for (const r of o.rows) {
+    const bank = await findBank(sql, o.companyId, r.account);
+    if (!bank[0]) {
+      rows.push({ ...r, key: "", bankId: 0, bankName: "", skip: false, problem: `Cuenta ${r.account} no está en Bancos: créala primero.` });
+      continue;
+    }
+    const key = bankKeyOf(bank[0].id);
+    const exists = await sql<{ amount: string }>`
+      select amount::text from bank_moves where company_id = ${o.companyId} and cutover_key = ${key} limit 1
+    `;
+    if (exists[0]) {
+      const stored = Number(exists[0].amount);
+      const differs = sameMoney(stored, r.amount)
+        ? undefined
+        : `Cuenta ${r.account}: ya está el saldo inicial con ${stored}; el CSV trae ${r.amount}. No se aplica — si el bueno es el nuevo, se ajusta con un movimiento de banco.`;
+      rows.push({ ...r, key, bankId: bank[0].id, bankName: bank[0].name, skip: true, ...(differs ? { differs } : {}) });
+      continue;
+    }
+    if (!sameMoney(Number(bank[0].opening), 0)) {
+      rows.push({
+        ...r, key, bankId: bank[0].id, bankName: bank[0].name, skip: false,
+        problem: `Cuenta ${r.account} ya tiene saldo inicial capturado a mano en Bancos (${Number(bank[0].opening)}): déjalo en 0 antes de importar, o no importes esta cuenta.`,
+      });
+      continue;
+    }
+    rows.push({ ...r, key, bankId: bank[0].id, bankName: bank[0].name, skip: false });
+  }
+  return {
+    rows,
+    open: rows.filter((x) => !x.skip && !x.problem).length,
+    skipped: rows.filter((x) => x.skip).length,
+    differing: rows.filter((x) => x.differs).length,
+    problems: rows.filter((x) => x.problem).length,
+  };
+}
+
+export async function applyBankRows(sql: Sql, o: { companyId: number; userId: string; rows: BankRow[] }) {
+  let inserted = 0;
+  let skipped = 0;
+  const rejected: { reason: string }[] = [];
+  for (const r of o.rows) {
+    const bank = await findBank(sql, o.companyId, r.account);
+    if (!bank[0]) {
+      rejected.push({ reason: `Cuenta ${r.account} no está en Bancos: créala primero.` });
+      continue;
+    }
+    const key = bankKeyOf(bank[0].id);
+    const exists = await sql<{ id: number }>`
+      select id from bank_moves where company_id = ${o.companyId} and cutover_key = ${key} limit 1
+    `;
+    if (exists[0]) {
+      skipped += 1;
+      continue;
+    }
+    if (!sameMoney(Number(bank[0].opening), 0)) {
+      rejected.push({
+        reason: `Cuenta ${r.account} ya tiene saldo inicial capturado a mano en Bancos (${Number(bank[0].opening)}): déjalo en 0 antes de importar, o no importes esta cuenta.`,
+      });
+      continue;
+    }
+    await sql`
+      insert into bank_moves (company_id, bank_id, date, amount, memo, kind, reconciled, created_by, cutover_key)
+      values (${o.companyId}, ${bank[0].id}, ${r.date}, ${r.amount}, ${BANK_CUTOVER_MEMO}, ${BANK_CUTOVER_KIND}, true, ${o.userId}, ${key})
+    `;
+    inserted += 1;
+  }
+  return { inserted, skipped, rejected };
+}

@@ -1876,6 +1876,17 @@ export const saveBankOpening = createServerFn({ method: "POST" })
     const before = await sql<{ opening: string; name: string }>`
       select opening::text, name from banks where id = ${data.bankId} and company_id = ${cid}
     `;
+    // Decisión 63: si la cuenta ya tiene su saldo inicial del corte (un
+    // movimiento con fecha, migración 0038), capturar otro a mano sumaría
+    // dos veces. Salida: ajustarlo con un movimiento de banco.
+    const corte = await sql<{ id: number }>`
+      select id from bank_moves where bank_id = ${data.bankId} and company_id = ${cid} and cutover_key is not null limit 1
+    `;
+    if (corte[0]) {
+      throw new Error(
+        `${before[0]?.name ?? "Esta cuenta"} ya tiene su saldo inicial del corte como movimiento con fecha. No se captura otro a mano: si está mal, se ajusta con un movimiento de banco.`,
+      );
+    }
     await sql`update banks set opening = ${data.opening} where id = ${data.bankId} and company_id = ${cid}`;
     if (before[0] && Number(before[0].opening) !== data.opening) {
       await writeAudit(sql, {

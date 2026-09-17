@@ -22,6 +22,9 @@ import {
   parseStockSnap,
   previewOpenInvoiceRows,
   previewStockRows,
+  applyBankRows,
+  parseBankSnap,
+  previewBankRows,
 } from "../src/lib/erp/cutover-core.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -92,6 +95,8 @@ async function freshDb() {
   await db.exec(`insert into credit_policies (company_id, code, name) values (1, 'ESTANDAR', 'Estándar')`);
   await db.exec(`insert into products (company_id, code, name) values (1, 'ALB-10', 'Albendazol 10')`);
   await db.exec(`insert into locations (company_id, code, name) values (1, '001', 'Bodega Mochis')`);
+  await db.exec(`insert into banks (company_id, name, account, currency) values (1, 'BBVA Operativa', '0123456789', 'MXN')`);
+  await db.exec(`insert into banks (company_id, name, account, currency, opening) values (1, 'Banorte Vieja', '999', 'MXN', 5000)`);
   return db;
 }
 
@@ -392,4 +397,103 @@ test("Decisión 65 (existencias): el preview nuevo marca ya está / con otros n�
   const sinCosto = await previewStockRows(sql, { companyId: 1, rows: parseStockSnap("ALB-10,001,25,") });
   assert.match(sinCosto.rows[0].problem, /sin costo/i, "sin costo se ve desde el preview (Decisión 64)");
   await db.close();
+});
+
+// ---------- paso 3: Decisión 63 (bancos, migración 0038) ----------
+// El saldo inicial de cada cuenta entra por /importar como movimiento de
+// banco con fecha, idempotente por cutover_key, conciliado (es el estado de
+// cuenta del banco), sin tocar banks.opening. Candado contra el doble conteo
+// en los dos sentidos.
+
+test("migración 0038: bank_moves.cutover_key con índice único parcial", () => {
+  const m = src("migrations/0038_bancos_corte.sql");
+  assert.ok(m.includes("alter table bank_moves add column if not exists cutover_key text"));
+  assert.ok(m.includes("bank_moves_cutover_key_uq"));
+  assert.ok(m.includes("where cutover_key is not null"));
+});
+
+test("parseBankSnap: cuenta, saldo, fecha; encabezado fuera; saldo 0 fuera; fecha de hoy si falta", () => {
+  const rows = parseBankSnap(["cuenta,saldo,fecha", "BBVA Operativa,125000.50,2026-09-15", "0123456789,0,", "999,-1200"].join("\n"), "2026-09-16");
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], { account: "BBVA OPERATIVA", amount: 125000.5, date: "2026-09-15" });
+  assert.deepEqual(rows[1], { account: "999", amount: -1200, date: "2026-09-16" });
+});
+
+test("bancos: entra como movimiento conciliado con fecha y cutover_key; el saldo en pantalla cuadra; segunda pegada se salta", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const rows = parseBankSnap("0123456789,125000.50,2026-09-15", "2026-09-16");
+  const r1 = await applyBankRows(sql, { companyId: 1, userId: "u1", rows });
+  assert.deepEqual(r1, { inserted: 1, skipped: 0, rejected: [] });
+  const m = (await db.query(
+    `select b.name, m.date::text as date, m.amount::float8 as amount, m.memo, m.kind, m.reconciled, m.cutover_key, b.opening::float8 as opening
+     from bank_moves m join banks b on b.id = m.bank_id`,
+  )).rows;
+  assert.equal(m.length, 1);
+  assert.equal(m[0].name, "BBVA Operativa", "encontrada por número de cuenta");
+  assert.equal(m[0].date, "2026-09-15");
+  assert.equal(m[0].amount, 125000.5);
+  assert.equal(m[0].kind, "saldo-inicial");
+  assert.equal(m[0].reconciled, true, "el saldo inicial ES el estado de cuenta: nace conciliado");
+  const bankId = (await db.query(`select id from banks where account = '0123456789'`)).rows[0].id;
+  assert.equal(m[0].cutover_key, `bank:${bankId}`, "la llave es por la cuenta encontrada, no por el texto tecleado");
+  assert.equal(m[0].opening, 0, "banks.opening no se toca");
+  const bal = (await db.query(
+    `select (b.opening + coalesce((select sum(amount) from bank_moves x where x.bank_id = b.id), 0))::float8 as cash
+     from banks b where b.account = '0123456789'`,
+  )).rows[0].cash;
+  assert.equal(bal, 125000.5, "la fórmula de siempre (opening + Σ movimientos) da el saldo del corte");
+  const r2 = await applyBankRows(sql, { companyId: 1, userId: "u1", rows });
+  assert.deepEqual(r2, { inserted: 0, skipped: 1, rejected: [] });
+  await db.close();
+});
+
+test("bancos: cuenta desconocida y cuenta con opening a mano se rechazan (66 + candado de doble conteo); el resto entra", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  const rows = parseBankSnap(["NOEXISTE,100", "999,7000", "BBVA OPERATIVA,1000"].join("\n"), "2026-09-16");
+  const r = await applyBankRows(sql, { companyId: 1, userId: "u1", rows });
+  assert.equal(r.inserted, 1);
+  assert.equal(r.rejected.length, 2);
+  assert.match(r.rejected[0].reason, /NOEXISTE/);
+  assert.match(r.rejected[1].reason, /999/);
+  assert.match(r.rejected[1].reason, /a mano/, "dice que el problema es el opening capturado a mano");
+  assert.match(r.rejected[1].reason, /5000/, "y cuánto es");
+  await db.close();
+});
+
+test("bancos: el preview marca ya está / con otro saldo / sin cuenta / opening a mano (Decisión 65)", async () => {
+  const db = await freshDb();
+  const sql = tagOf(db);
+  await applyBankRows(sql, { companyId: 1, userId: "u1", rows: parseBankSnap("0123456789,125000.50", "2026-09-16") });
+  const p = await previewBankRows(sql, {
+    companyId: 1,
+    rows: parseBankSnap(["0123456789,130000", "BBVA OPERATIVA,125000.50", "NOEXISTE,1", "999,1"].join("\n"), "2026-09-16"),
+  });
+  assert.equal(p.rows[0].skip, true);
+  assert.match(p.rows[0].differs, /125000.5/);
+  assert.match(p.rows[0].differs, /130000/);
+  assert.equal(p.rows[1].skip, true, "la misma cuenta por NOMBRE es la misma llave: no entraría dos veces");
+  assert.equal(p.rows[1].differs, undefined, "y con el mismo saldo no alarma");
+  assert.match(p.rows[2].problem, /NOEXISTE/);
+  assert.match(p.rows[3].problem, /a mano/);
+  assert.equal(p.open, 0);
+  assert.equal(p.skipped, 2);
+  assert.equal(p.differing, 1);
+  assert.equal(p.problems, 2);
+  await db.close();
+});
+
+test("wiring: saveBankOpening se detiene si la cuenta ya tiene saldo inicial del corte (candado en sentido contrario)", () => {
+  const ops = src("src/lib/erp/ops.ts");
+  const body = ops.slice(ops.indexOf("export const saveBankOpening"), ops.indexOf("export const saveBankOpening") + 2500);
+  assert.ok(body.includes("cutover_key is not null"), "consulta el movimiento de corte antes de pisar opening");
+  assert.ok(body.indexOf("cutover_key is not null") < body.indexOf("update banks set opening"), "y lo hace ANTES del update");
+  const cut = src("src/lib/erp/cutover.ts");
+  assert.ok(cut.includes("applyBankRows(sql, {"), "cutover.ts usa el core de bancos");
+  assert.ok(cut.includes('"banks", "edit"'), "con permiso banks:edit");
+  const page = src("src/routes/importar.tsx");
+  assert.ok(page.includes("applyBankSnap"), "la pantalla tiene la sección de bancos");
+  const banks = src("src/routes/banks.tsx");
+  assert.ok(banks.includes('"saldo-inicial"'), "la pantalla de bancos nombra el movimiento del corte");
 });

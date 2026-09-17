@@ -19,7 +19,7 @@ Tabla movida desde `CLAUDE.md` § Mapa el 16-sep-2026, byte por byte. Se consult
 | Mora / estado de cuenta | `src/lib/erp/credit.ts` |
 | Expediente (cadena SOL→…→FV) | `src/lib/erp/deal.ts` |
 | Catálogos Compaq (CL/PV/productos/almacenes) | `src/lib/erp/catalog.ts` + `compaq.ts` |
-| Corte / importar / respaldo | `src/lib/erp/cutover.ts`, ruta `/importar` |
+| Corte / importar / respaldo | `src/lib/erp/cutover.ts` (permisos, transacción, bitácora) + `src/lib/erp/cutover-core.ts` (parseo y loops de saldos, existencias y bancos, sin dependencias de servidor, probado en PGlite por `scripts/erp-corte.test.mjs`), ruta `/importar` |
 | Bitácora | `src/lib/erp/audit.ts`, ruta `/bitacora` |
 | Archivos del folio | `src/lib/erp/files.ts` |
 | RFQ sin pedido de cliente | `src/lib/erp/rfq.ts`, `/rfq/nuevo` |

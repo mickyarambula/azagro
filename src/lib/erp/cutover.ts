@@ -15,6 +15,9 @@ import {
   parseStockSnap,
   previewOpenInvoiceRows,
   previewStockRows,
+  applyBankRows,
+  parseBankSnap,
+  previewBankRows,
 } from "@/lib/erp/cutover-core";
 
 async function cid(sql: Sql, userId: string) {
@@ -209,6 +212,51 @@ export const applyStockSnap = createServerFn({ method: "POST" })
     });
     } catch (err) {
       await logImportFailure(boot, context.userId, "Existencias de corte", err);
+      throw err;
+    }
+  });
+
+/**
+ * Bancos del corte (Decisión 63, migración 0038): el saldo inicial de cada
+ * cuenta como movimiento de banco con fecha, idempotente, conciliado. Ver
+ * el encabezado de la sección en cutover-core.ts.
+ */
+export const previewBankSnap = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ csv: z.string().min(3) }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    await assertCan(sql, context.userId, "banks", "edit");
+    const companyId = await cid(sql, context.userId);
+    return previewBankRows(sql, { companyId, rows: parseBankSnap(data.csv, todayMx()) });
+  });
+
+export const applyBankSnap = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ csv: z.string().min(3) }))
+  .handler(async ({ context, data }) => {
+    const boot = await getSql();
+    try {
+      return await withTx(async (sql) => {
+        await assertCan(sql, context.userId, "banks", "edit");
+        const companyId = await cid(sql, context.userId);
+        const { inserted, skipped, rejected } = await applyBankRows(sql, {
+          companyId,
+          userId: context.userId,
+          rows: parseBankSnap(data.csv, todayMx()),
+        });
+        await writeAudit(sql, {
+          companyId,
+          userId: context.userId,
+          action: "corte",
+          entity: "bank",
+          name: "Saldos iniciales de bancos",
+          detail: `entraron ${inserted}, ya estaban ${skipped}, rechazadas ${rejected.length}${rejectNote(rejected)}`,
+        });
+        return { inserted, skipped, rejected };
+      });
+    } catch (err) {
+      await logImportFailure(boot, context.userId, "Saldos iniciales de bancos", err);
       throw err;
     }
   });

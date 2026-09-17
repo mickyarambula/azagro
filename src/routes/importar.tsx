@@ -4,7 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { DocFiles } from "@/components/doc-files";
 import { useAccess } from "@/lib/access";
 import { resyncCompaq } from "@/lib/erp/catalogs";
-import { applyOpenInvoices, applyStockSnap, dbStatus, exportBackup, previewOpenInvoices, previewStockSnap } from "@/lib/erp/cutover";
+import { applyBankSnap, applyOpenInvoices, applyStockSnap, dbStatus, exportBackup, previewBankSnap, previewOpenInvoices, previewStockSnap } from "@/lib/erp/cutover";
 import { listCreditPolicies } from "@/lib/erp/ops";
 import { BACKUP_NOTE, clearLiveSince, LIVE_CLEAR_PHRASE, purgePreview, purgeTestData, setLiveSince } from "@/lib/erp/purge";
 import { dateTimeMx, humanError } from "@/lib/utils";
@@ -43,6 +43,8 @@ function Page() {
   const [csvStock, setCsvStock] = useState("");
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof previewOpenInvoices>> | null>(null);
   const [stockPreview, setStockPreview] = useState<Awaited<ReturnType<typeof previewStockSnap>> | null>(null);
+  const [csvBank, setCsvBank] = useState("");
+  const [bankPreview, setBankPreview] = useState<Awaited<ReturnType<typeof previewBankSnap>> | null>(null);
   // Con qué política de cobro entran los saldos del corte. Nace vacía a
   // propósito: hasta hoy entraban en "NONE" (Sin mora) por omisión de la
   // columna, y eso es un número de negocio decidido por el sistema.
@@ -258,6 +260,79 @@ function Page() {
               {(stockPreview.differing > 0 || stockPreview.problems > 0) && (
                 <ul className="mt-1 list-disc pl-4">
                   {stockPreview.rows.filter((r) => r.differs || r.problem).map((r, i) => (
+                    <li key={i} className={r.differs ? "text-warn" : undefined}>{r.differs ?? r.problem}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </li>
+
+        <li className="erp-card p-4">
+          <p className="font-semibold">4. Saldos iniciales de bancos</p>
+          <p className="mt-1 text-muted">
+            CSV: <code className="text-[12px]">cuenta (nombre o número), saldo, fecha</code>. Entra como movimiento de banco con esa
+            fecha, conciliado — es el saldo del estado de cuenta. Una cuenta por renglón; si ya tiene saldo inicial capturado a mano
+            en Bancos, se rechaza para no sumar dos veces.
+          </p>
+          <textarea
+            className="erp-input mt-2 min-h-20 font-mono text-[12px]"
+            value={csvBank}
+            onChange={(e) => setCsvBank(e.target.value)}
+            placeholder={"0123456789,125000.50,2026-09-15"}
+          />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="erp-btn"
+              disabled={busy || !csvBank.trim()}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                try {
+                  setBankPreview(await previewBankSnap({ data: { csv: csvBank } }));
+                } catch (e) {
+                  setError(humanError(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Previsualizar
+            </button>
+            <button
+              type="button"
+              className="erp-btn-primary"
+              disabled={busy || !csvBank.trim()}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                try {
+                  const r = await applyBankSnap({ data: { csv: csvBank } });
+                  setMsg(
+                    `Bancos de corte: ${r.inserted} cuentas, ${r.skipped} ya estaban${r.rejected.length ? `, ${r.rejected.length} rechazadas` : ""}.`,
+                  );
+                  setRejects(r.rejected.map((x) => x.reason));
+                  setBankPreview(null);
+                } catch (e) {
+                  setError(humanError(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Cargar saldos de bancos
+            </button>
+          </div>
+          {bankPreview && (
+            <div className="mt-2 text-[12px] text-muted">
+              <p>
+                {bankPreview.open} entrarían · {bankPreview.skipped} ya están · {bankPreview.problems} con problema
+                {bankPreview.differing > 0 && <span className="text-warn"> · {bankPreview.differing} con otro saldo</span>}
+              </p>
+              {(bankPreview.differing > 0 || bankPreview.problems > 0) && (
+                <ul className="mt-1 list-disc pl-4">
+                  {bankPreview.rows.filter((r) => r.differs || r.problem).map((r, i) => (
                     <li key={i} className={r.differs ? "text-warn" : undefined}>{r.differs ?? r.problem}</li>
                   ))}
                 </ul>
