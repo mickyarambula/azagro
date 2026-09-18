@@ -36,6 +36,16 @@ function Page() {
   const [poId, setPoId] = useState("");
   const [payKind, setPayKind] = useState<"cash" | "credit">("cash");
   const [bankId, setBankId] = useState("");
+  // Decisión 86: de una cuenta en dólares salen DÓLARES. El importe se captura
+  // en pesos y se declara el tipo de cambio del día; sin él no se registra.
+  const [fxRate, setFxRate] = useState(0);
+  const cuentaUsd = useMemo(() => (data?.banks ?? []).find((b) => String(b.id) === bankId)?.currency === "USD", [data, bankId]);
+  // Se PROPONE el de la tabla a la fecha de hoy y se puede corregir, igual que
+  // en la orden de compra y en la compra de dólares; sin renglón queda vacío y
+  // el candado del servidor detiene el gasto (regla 9).
+  useEffect(() => {
+    if (cuentaUsd && fxRate === 0 && data?.fxToday) setFxRate(data.fxToday.rate);
+  }, [cuentaUsd, fxRate, data]);
   const [invoiceRef, setInvoiceRef] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +90,7 @@ function Page() {
           poId: Number(poId) || undefined,
           payKind,
           bankId: payKind === "cash" ? Number(bankId) || undefined : undefined,
+          fxRate: cuentaUsd ? fxRate : undefined,
           invoiceRef,
           notes,
         },
@@ -222,6 +233,16 @@ function Page() {
                   onChange={setBankId}
                   placeholder="Cuenta…"
                 />
+              </Field>
+            )}
+            {payKind === "cash" && cuentaUsd && (
+              <Field label="Tipo de cambio del gasto (cuenta en dólares)">
+                <MoneyField value={fxRate} onChange={setFxRate} />
+                <p className="mt-1 text-[11px] text-muted">
+                  El importe se captura en pesos. De esta cuenta salen dólares: con el tipo de cambio se sabe cuántos.
+                  {data?.fxToday ? ` Tabla: ${data.fxToday.rate} (${data.fxToday.date}); corrígelo si el banco te dio otro.` : " Sin renglón en la tabla: captúralo en Ajustes → Tipo de cambio."}
+                  {fxRate > 1 && amount > 0 ? ` Saldrían US$${(Math.round((amount / fxRate) * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2 })}.` : ""}
+                </p>
               </Field>
             )}
             <Field label="Factura / ref">

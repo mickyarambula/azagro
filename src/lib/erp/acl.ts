@@ -204,6 +204,7 @@ export function pathModule(pathname: string): ModuleId {
   if (pathname.startsWith("/vencimientos")) return "credit";
   if (pathname.startsWith("/gastos")) return "gastos";
   if (pathname.startsWith("/banks")) return "banks";
+  if (pathname.startsWith("/posicion")) return "banks";
   if (pathname.startsWith("/statements")) return "statements";
   if (pathname.startsWith("/reportes")) return "credit";
   if (pathname.startsWith("/partners")) return "partners";

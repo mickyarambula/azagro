@@ -390,7 +390,7 @@ sesiones.
 9. Ve a "Inicio". "Caja" debe decir `$31,600.00` con "Saldos bancarios en pesos" (si quedaran dólares diría "Pesos · US$… en la cuenta en dólares"); "Por pagar" `$166,500.00` con "… · USD 9,000.00 en dólares"; "Inventario Azagro" con "Proveedor $185,000.00".
 10. Si el producto ya tenía inventario en pesos, el "Costo prom." es el promedio ponderado de lo anterior con estos 18,500 — nunca un promedio entre 1,000 "dólares" y pesos.
 
-**Lo que todavía NO se prueba aquí:** la posición cambiaria (cuánto se debe y nos deben en dólares por vencimiento, y qué está cubierto). Vender en dólares es el Escenario 11.
+**Lo que todavía NO se prueba aquí:** la posición cambiaria (cuánto se debe y nos deben en dólares por vencimiento, y qué está cubierto): va en el Escenario 13. Vender en dólares es el Escenario 11.
 
 ## ESCENARIO 11 — Vender en dólares: el precio se captura en dólares y todo lo enseña en dólares (Decisión 82, 18-sep-2026)
 
@@ -410,7 +410,7 @@ sesiones.
 10. Ve a "Cartera" → "Estados de cuenta" y pulsa "Ver" en AGRICOLA BERSE. En el bloque "MONEDA: DÓLAR AMERICANO": la FV con CARGO `USD 10,000.00`, ABONOS `USD 5,000.00`, SALDO `USD 5,000.00`; la NC con CARGO `−USD 5,000.00`; el "Total" con SALDO `USD 5,000.00`; y en "Por producto — saldo pendiente": "COFACTOR USD 5,000.00". Arriba a la derecha, "Saldo $92,500.00" es la cartera del cliente en pesos (así se suma la línea de crédito), y el texto de "Enviar" lo dice: "total en pesos; los renglones en dólares van al tipo de cambio pactado".
 11. Pulsa "Documento" en la cotización o en el pedido: el papel lleva "USD 1,000.00" por unidad y "USD 10,000.00" de total, "USD · dólar pactado 18.5". Ni un peso con signo US$.
 
-**Lo que todavía NO se prueba aquí:** la posición cambiaria (A.2); y una factura en dólares que se haya capturado ANTES del 18-sep-2026 con el precio tecleado como pesos: esa no se corrige sola, se revisa a mano.
+**Lo que todavía NO se prueba aquí:** la posición cambiaria (va en el Escenario 13); y una factura en dólares que se haya capturado ANTES del 18-sep-2026 con el precio tecleado como pesos: esa no se corrige sola, se revisa a mano.
 
 ## ESCENARIO 12 — Tres avisos cerrados de L4a: el ajuste cambiario en pesos, el precio en 0 de la OC del cliente, el circuito sin elegir (18-sep-2026)
 
@@ -425,6 +425,58 @@ sesiones.
 5. En la misma partida, escribe un precio (por ejemplo `1000`) y pulsa "Registrar OC" otra vez. Ahora sí se registra: aparece en la lista con "TOTAL" `USD 1,000.00` (o el importe que hayas capturado).
 6. Ve a "Cartera" → "Estados de cuenta", abre el de un cliente con saldo en dólares y con columna "Ut. cambiaria" visible (aparece cuando hay algún ajuste por tipo de cambio). Esa columna, tanto en la fila como en "Total", debe verse con signo `$` (pesos) — nunca con `US$`, ni en el bloque de dólares ni en el de pesos. Es un número chico y pre-existente: si en tu cartera no hay ningún ajuste cambiario todavía, no hay nada que ver en este paso; el número correcto es que **nunca** diga `US$` en esa columna.
 7. Con ese mismo cliente abierto, pulsa "Documento" (el papel que se manda). En la columna "Ut. cambiaria" del papel pasa exactamente lo mismo: siempre signo `$`, nunca `US$` — el papel tenía el mismo error que la pantalla y se corrigió junto.
+
+## ESCENARIO 13 — La posición cambiaria: cuánto se debe en dólares, qué está cubierto y cuánto se mueve si sube el dólar (Decisiones 83-86, 18-sep-2026)
+
+**El número que más importa:** con una factura del proveedor viva de **US$10,000**, una factura al cliente viva de **US$8,000** y **US$6,000** comprados en el banco, la pantalla tiene que decir **posición neta US$4,000** y **$4,000 por cada peso** que se mueva el dólar. Si el dólar sube un peso, se ganan 4,000 pesos; no 18,000 ni 24,000. Y de los US$10,000 que se deben, **US$6,000 salen como cubiertos** (los dólares que ya están comprados) y **US$4,000 como abiertos**.
+
+**Antes de empezar:** en "Ajustes" → "Tipo de cambio" captura el dólar de hoy en **18.5**. Necesitas dos cuentas de banco: una en pesos con saldo (por ejemplo "Banorte MXN" con 200,000) y una en dólares ("Banorte USD"). Necesitas un proveedor con "Plazo de pago (días)" capturado (usa **60**) y un cliente. Y un producto con "Costo de referencia" y "Precio de lista" capturados.
+
+### Parte A — Lo que se debe en dólares
+
+1. Ve a "Compras" → "Alta manual". Elige el proveedor, "Moneda" `USD`, y comprueba que "Tipo de cambio" se propone solo en `18.5`, con el texto "Tabla: 18.5 … Es el TC del proveedor; corrígelo si pactaron otro." (lo toma de la tabla, no lo inventa). Captura una partida de `10` a `1000`. "Guardar orden" y luego "Confirmar".
+2. Pulsa "Recibir" → "Recibir todo lo pendiente". Debes ver que nace **"FP-0001"** por **"USD 10,000.00 · TC 18.5 · $185,000.00"**. Esa es la deuda en dólares.
+
+### Parte B — Los dólares comprados
+
+3. Ve a "Cartera" → "Bancos". Arriba del formulario, en la fila de botones de tipo de movimiento, pulsa **"Compra de dólares"**. En "Cuenta" elige la de pesos y en "Cuenta destino (dólares)" la de dólares. El campo del importe se llama ahora **"Dólares"**: escribe `6000`. En "Tipo de cambio" escribe `18.4`. Pulsa **"Registrar compra de dólares"**. En la tarjeta de "Banorte USD" debe decir **"USD 6,000.00 · TC promedio 18.4 · $110,400.00 en pesos"**.
+
+### Parte C — Lo que deben los clientes en dólares
+
+4. Ve a "Ventas" → "Cotizaciones" → "Alta manual (sin solicitud)". "Moneda" `USD`, "Dólar pactado" `18.5`, "Precios" en "Contado", el cliente, `8` piezas a `1000` de precio. "Guardar cotización", luego "Ver" → elige la bodega → "Cliente aceptó → pedido" → "Confirmar" → "Entregar" → "Entregar todo lo pendiente" → "Facturar esta entrega". Debes ver **"FV-0001 · USD 8,000.00"**.
+
+### Parte D — La pantalla
+
+5. Ve a "Cartera" → **"Posición cambiaria"**. Arriba dice **"Corte 18/09/2026 · dólar de hoy 18.5 (tabla 18/09/2026)"**.
+6. Las cuatro tarjetas de arriba deben decir, en este orden:
+   - "Nos deben en dólares" **US$8,000.00**
+   - "Debemos en dólares" **US$10,000.00**
+   - "Dólares en caja" **US$6,000.00**, y debajo "TC promedio 18.4 · $110,400.00 en pesos"
+   - "Posición neta" **US$4,000.00** en verde, con "Nos deben más de lo que debemos: si el dólar sube, se gana"
+   **Ese es el número que más importa.** La posición neta es lo que nos deben más los dólares en caja, menos lo que debemos: 8,000 + 6,000 − 10,000.
+7. En la tarjeta "Si el dólar se mueve", el "Movimiento supuesto (pesos por dólar)" viene en `1.00`. A la derecha debe decir **$4,000.00** en verde. Cambia el movimiento a `2` y debe decir **$8,000.00**; escribe `-1` y debe decir **−$4,000.00** en rojo. Es una simulación tuya: no se guarda ni sale de la pantalla.
+8. En esa misma tarjeta, abajo: "Al dólar de hoy, lo vivo vale **$600.00** más o menos de lo que quedó registrado a su tipo de cambio pactado ($0.00 de los documentos y $600.00 de los dólares en caja)". Los 600 son de los dólares en caja: se compraron a 18.40 y hoy valen 18.50, o sea diez centavos por cada uno de los 6,000. Los documentos van en cero porque se pactaron **al mismo** tipo de cambio de hoy.
+9. En la tabla "Por vencimiento": un renglón **"Hoy"** con "Nos deben" `US$8,000.00` (si además tienes un pedido en dólares confirmado y todavía sin facturar, su importe sale en "Venta comprometida", nunca sumado dos veces con la factura), y un renglón **"31-60 días"** con "Debemos" `US$10,000.00`, "Neto" `−US$10,000.00` en rojo, **"Cubierto con dólares" `US$6,000.00`** en verde y **"Abierto" `US$4,000.00`** en ámbar. Los dólares que ya están comprados tapan 6,000 de la deuda; los otros 4,000 quedan al aire.
+10. En "Documento por documento": "FP-0001 · Factura del proveedor" con `−US$10,000.00`, "TC pactado" `18.5`, y "En pesos al pactado" y "En pesos al dólar de hoy" iguales ($185,000.00), "Diferencia" `—`. Y "FV-0001 · Factura al cliente" con `US$8,000.00`. Pulsa **"Exportar Excel"**: baja un archivo con esos mismos renglones.
+
+### Parte E — Los candados de tipo de cambio
+
+11. Ve a "Ajustes" → "Tipo de cambio" e intenta guardar un renglón con `1` (o con `0.05`). Debe rechazarlo con **"El tipo de cambio USD→MXN tiene que ser mayor que 1 (pesos por dólar)."** Antes se veía guardado y después detenía en silencio cotizar, recibir y facturar. El camino legítimo es capturar el dólar de verdad, como `18.5`.
+12. Ve a "Cartera" → "Gastos". En "Forma de pago" deja **"Contado"** y en **"Sale de la cuenta"** elige la cuenta **en dólares**. Aparece un campo nuevo, "Tipo de cambio del gasto (cuenta en dólares)", **ya con 18.5 propuesto de la tabla**. En "Importe" escribe `5000`: debajo del campo debe decir **"Saldrían US$270.27."** Pulsa "Registrar gasto". En "Bancos", la cuenta en dólares baja **US$270.27**, no 5,000. Antes de esto, ese mismo gasto sacaba **5,000 dólares**.
+13. Candado — borra el tipo de cambio (déjalo en `0`) y vuelve a pulsar "Registrar gasto". Debe detenerse con **"Sin tipo de cambio para el gasto pagado desde Banorte USD…"** y no registrar nada. El camino legítimo es el paso 12: el número que propone la tabla, o el que te haya dado el banco.
+
+### Parte F — La tarjeta del inicio
+
+14. Ve al inicio (el logotipo de arriba a la izquierda). Debe haber una tarjeta **"Exposición neta USD"** con el mismo número que la pantalla — si la pantalla dice US$4,000.00, la tarjeta dice US$4,000.00 — y debajo "Dólar de hoy 18.5 · $4,000.00 por cada peso que se mueva". Si los dos números no coinciden, avísame: salen del mismo lugar y no deberían poder diferir.
+
+**Quién la puede ver:** "Posición cambiaria" vive dentro del permiso de **Bancos**. Quien no tenga Bancos no ve la pantalla ni la tarjeta del inicio. La parte de "Si el dólar se mueve" y la revaluación piden además permiso de ver márgenes (administrador, gerencia y administración): un usuario de Bancos sin eso ve los dólares y las cubetas, pero no el resultado en pesos.
+
+### Parte G — La devolución no inventa exposición
+
+15. Vuelve a "Ventas" → "Pedidos de venta", abre PV-0001 y baja a "Devolución del cliente". En "A devolver" escribe `2`, en "Motivo" `No ocupó` y pulsa "Registrar devolución". En "Facturas de este pedido" la factura queda en **"FV-0001 · USD 6,000.00 · open"** y nace **"NC-0001 · USD 0.00 · paid"**.
+16. Vuelve a "Posición cambiaria". "Nos deben en dólares" debe decir **US$6,000.00**, y en "Por vencimiento" la columna "Venta comprometida" del renglón "Hoy" debe seguir en `—`. **Ese es el punto:** la nota de crédito bajó la factura, y no reapareció como "pedido sin facturar" por los 2 que el cliente devolvió. Lo mismo vale si se revierte una entrega. Si ves un pedido "sin facturar" por una cantidad que ya se devolvió o que se revirtió, avísame.
+
+**Lo que esta pantalla NO hace, a propósito:** no dice cuáles dólares de la caja se compraron para cuál orden. En el banco los dólares son una bolsa sola, sin etiqueta, así que la cobertura con dólares se mide a nivel empresa y por cubeta, nunca por pedido. Lo que sí se deriva pedido por pedido es la otra dinámica, la de pactar el tipo de cambio en las dos puntas: eso sale en la tabla "Por negocio".
 
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 

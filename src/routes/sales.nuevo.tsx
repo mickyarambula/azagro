@@ -3,10 +3,11 @@ import { useEffect, useState, type FormEvent } from "react";
 import { BackBar } from "@/components/erp";
 import { applyPartnerDefaults, duesPreview, OrderFields, type OrderDraft, type OrderLookups } from "@/components/order-form";
 import { inheritCircuit } from "@/lib/erp/circuits";
+import { salePriceShown } from "@/lib/erp/fx";
 import { orderLookups, saveOrder } from "@/lib/erp/orders";
 import { validateDueDates } from "@/lib/erp/credit";
 import { useAccess } from "@/lib/access";
-import { num, todayMx } from "@/lib/utils";
+import { todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/sales/nuevo")({
   component: Nuevo,
@@ -16,6 +17,11 @@ function empty(lookups: OrderLookups): OrderDraft {
   const first = lookups.customers[0];
   const loc = lookups.locations.find((l) => l.loc_type === "internal") ?? lookups.locations[0];
   const prod = lookups.products[0];
+  // El precio de lista vive en PESOS (L4a, Decisión 82) y este formulario nace
+  // en dólares: la primera partida tiene que proponerse ya convertida, igual
+  // que las que se agregan después (`salePriceShown` en `order-form.tsx`). Sin
+  // esto la pantalla proponía 18,500 bajo una columna que dice «(USD)»: si el
+  // vendedor lo aceptaba, el pedido nacía 18.5 veces más grande.
   const base: OrderDraft = {
     name: lookups.nextName,
     partnerId: first?.id ?? 0,
@@ -43,7 +49,7 @@ function empty(lookups: OrderLookups): OrderDraft {
       {
         productId: prod?.id ?? 0,
         qty: 1,
-        unitPrice: num(prod?.list_price),
+        unitPrice: salePriceShown(prod?.list_price ?? 0, "USD", lookups.fx?.rate ?? 0),
         uom: prod?.uom ?? "TM",
       },
     ],

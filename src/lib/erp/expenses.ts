@@ -3,7 +3,9 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
+import { fxToday, isUsdFx, missingFxMessage } from "@/lib/erp/fx";
 import { EXPENSE_CATALOG } from "@/lib/erp/catalog";
+import { todayMx } from "@/lib/utils";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -112,7 +114,12 @@ export const listExpenses = createServerFn({ method: "GET" })
     const banks = await sql<{ id: number; name: string; currency: string }>`
       select id, name, currency from banks where company_id = ${cid} order by id
     `;
-    return { expenses, categories, partners, sales, purchases, banks };
+    // El TC vigente hoy, para PROPONERLO cuando el gasto sale de una cuenta en
+    // dólares (D86). Se propone y se corrige, como en la OC y en la compra de
+    // dólares; sin renglón en la tabla la pantalla lo pide vacío y el servidor
+    // se detiene (regla 9).
+    const fx = await fxToday(sql, cid, todayMx());
+    return { expenses, categories, partners, sales, purchases, banks, fxToday: fx ? { date: fx.date, rate: Number(fx.rate) } : null };
   });
 
 export const addExpenseCategory = createServerFn({ method: "POST" })
@@ -150,6 +157,11 @@ export const createExpense = createServerFn({ method: "POST" })
       poId: z.number().optional(),
       payKind: z.enum(["cash", "credit"]),
       bankId: z.number().optional(),
+      // Decisión 86: si el gasto sale de una cuenta EN DÓLARES, el importe se
+      // captura en pesos y se declara el tipo de cambio del día. Sin él, un
+      // gasto de $5,000 sacaba 5,000 DÓLARES de la cuenta y destruía el costo
+      // en pesos del resto de los dólares (`usdCashAverage`).
+      fxRate: z.number().optional(),
       invoiceRef: z.string().optional().default(""),
       notes: z.string().optional().default(""),
     }),
@@ -173,10 +185,22 @@ export const createExpense = createServerFn({ method: "POST" })
     `;
     if (data.payKind === "cash" && data.bankId) {
       const cat = await sql<{ name: string }>`select name from expense_categories where id = ${data.categoryId}`;
+      // De una cuenta en dólares salen DÓLARES: el importe en pesos se
+      // convierte con el TC declarado, y el movimiento guarda los dos (D86).
+      const cuenta = await sql<{ currency: string; name: string }>`
+        select coalesce(currency,'MXN') as currency, name from banks where id = ${data.bankId} and company_id = ${cid}
+      `;
+      const enDolares = cuenta[0]?.currency === "USD";
+      if (enDolares && !isUsdFx(data.fxRate)) {
+        throw new Error(missingFxMessage(`el gasto pagado desde ${cuenta[0]?.name ?? "la cuenta en dólares"}`));
+      }
+      const pesos = Math.abs(data.amount);
+      const dolares = enDolares ? Math.round((pesos / Number(data.fxRate)) * 100) / 100 : 0;
       const mv = await sql<{ id: number }>`
-        insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, expense_id, so_id, po_id, created_by)
-        values (${cid}, ${data.bankId}, ${data.date}, ${-Math.abs(data.amount)}, ${cat[0]?.name ?? name},
-          ${data.partnerId ?? null}, 'gasto', ${exp[0]!.id}, ${data.soId ?? null}, ${data.poId ?? null}, ${context.userId})
+        insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, expense_id, so_id, po_id, created_by, amount_fx, fx_rate)
+        values (${cid}, ${data.bankId}, ${data.date}, ${enDolares ? -dolares : -pesos}, ${cat[0]?.name ?? name},
+          ${data.partnerId ?? null}, 'gasto', ${exp[0]!.id}, ${data.soId ?? null}, ${data.poId ?? null}, ${context.userId},
+          ${enDolares ? -dolares : 0}, ${enDolares ? Number(data.fxRate) : null})
         returning id
       `;
       await sql`update expenses set bank_move_id = ${mv[0]!.id} where id = ${exp[0]!.id}`;

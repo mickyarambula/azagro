@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getDashboard } from "@/lib/azagro";
+import { getFxPosition } from "@/lib/erp/fx-position-query";
 import { getCompanyPnl, getUpcomingDue, getUpcomingPayable } from "@/lib/erp/reports";
 import { useAccess } from "@/lib/access";
 import { canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
@@ -44,6 +45,7 @@ function Home() {
 function InicioBody() {
   const access = useAccess();
   const [data, setData] = useState<Awaited<ReturnType<typeof getDashboard>> | null>(null);
+  const [fx, setFx] = useState<Awaited<ReturnType<typeof getFxPosition>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resume, setResume] = useState<string | null>(null);
   const [due, setDue] = useState<Awaited<ReturnType<typeof getUpcomingDue>> | null>(null);
@@ -76,6 +78,15 @@ function InicioBody() {
       })
       .catch(() => undefined);
   }, [seeCredit]);
+
+  // BLOQUE A.2: la exposición en dólares, del mismo lugar que la pantalla de
+  // Posición cambiaria (nunca una segunda fórmula que diga otro número).
+  useEffect(() => {
+    if (!seeBanks) return;
+    void getFxPosition()
+      .then(setFx)
+      .catch(() => undefined);
+  }, [seeBanks]);
 
   useEffect(() => {
     if (!seeMonth) return;
@@ -240,6 +251,20 @@ function InicioBody() {
                 value={data ? money(data.ap) : "—"}
                 hint={`${data?.payableWeek ? `${money(data.payableWeek)} vence en 7 días` : "Nada vence esta semana"}${data?.apUsd ? ` · ${moneyIn(data.apUsd, "USD")} en dólares` : ""}`}
                 hintTone={data?.payableWeek ? "warn" : undefined}
+              />
+            )}
+            {seeBanks && (
+              <Kpi
+                label="Exposición neta USD"
+                value={fx ? moneyIn(fx.posicion.netoUsd, "USD") : "—"}
+                hint={
+                  fx
+                    ? `${fx.fxToday ? `Dólar de hoy ${fx.fxToday.rate}` : "Sin dólar de hoy"} · ${
+                        fx.verResultado ? `${money(fx.posicion.netoUsd)} por cada peso que se mueva` : "posición en dólares"
+                      }`
+                    : undefined
+                }
+                hintTone={fx && fx.posicion.netoUsd < 0 ? "warn" : undefined}
               />
             )}
             {seeStockValue && (

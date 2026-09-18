@@ -1,4 +1,4 @@
-import { snapOrConvert } from "@/lib/erp/fx";
+import { fxToday, isUsdFx, snapOrConvert } from "@/lib/erp/fx";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
@@ -108,12 +108,14 @@ export const orderLookups = createServerFn({ method: "GET" })
     const policies = await sql<{ code: string; name: string }>`
       select code, name from credit_policies where company_id = ${companyId} order by code
     `;
-    // Tipo de cambio propuesto: el renglón más reciente de la tabla, con su
-    // fecha, para que la pantalla diga de cuándo es. Tabla vacía = null y un
-    // pedido en dólares no se guarda hasta capturar uno.
-    const fx = await sql<{ usd_mxn: string; date: string }>`
-      select usd_mxn::text, date::text from fx_rates where company_id = ${companyId} order by date desc limit 1
-    `;
+    // Tipo de cambio propuesto: el renglón VIGENTE HOY (el más reciente igual
+    // o anterior a hoy), con su fecha, para que la pantalla diga de cuándo es.
+    // Tabla vacía = null y un pedido en dólares no se guarda hasta capturar uno.
+    // Antes tomaba el último renglón sin mirar la fecha: si un administrador
+    // capturaba el TC del lunes, un pedido del viernes nacía pactado con él
+    // (bloque A.2). Un solo lugar para la regla: `fxToday` (fx.ts).
+    const fxRow = await fxToday(sql, companyId, todayMx());
+    const fx = fxRow ? [{ usd_mxn: String(fxRow.rate), date: fxRow.date }] : [];
     // Plazos de Ajustes (factura / crédito): si faltan, policy() se detiene
     // con "Ajustes incompletos".
     const pol = await policy(sql, companyId);
@@ -551,7 +553,7 @@ export const saveOrder = createServerFn({ method: "POST" })
     }
 
     // Un pedido en dólares necesita tipo de cambio real (tabla o capturado).
-    if (data.currency === "USD" && !(data.fxRate > 0)) {
+    if (data.currency === "USD" && !isUsdFx(data.fxRate)) {
       throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de guardar un pedido en dólares.");
     }
     // Decisión 82: el precio llega en la moneda del pedido (la pantalla lo dice);

@@ -138,7 +138,7 @@ export function StatusPill({
 export function FinanceNav({
   current,
 }: {
-  current: "cobrar" | "pagar" | "vencimientos" | "statements" | "banks" | "gastos" | "cadena" | "reportes";
+  current: "cobrar" | "pagar" | "vencimientos" | "statements" | "banks" | "posicion" | "gastos" | "cadena" | "reportes";
 }) {
   const items = [
     { to: "/credit", search: { lado: "cobrar" }, id: "cobrar" as const, label: "Por cobrar" },
@@ -147,6 +147,7 @@ export function FinanceNav({
     { to: "/cadena", search: undefined, id: "cadena" as const, label: "Cadena" },
     { to: "/statements", search: undefined, id: "statements" as const, label: "Estados de cuenta" },
     { to: "/banks", search: undefined, id: "banks" as const, label: "Bancos" },
+    { to: "/posicion", search: undefined, id: "posicion" as const, label: "Posición cambiaria" },
     { to: "/gastos", search: undefined, id: "gastos" as const, label: "Gastos" },
     { to: "/reportes", search: undefined, id: "reportes" as const, label: "Utilidad" },
   ];

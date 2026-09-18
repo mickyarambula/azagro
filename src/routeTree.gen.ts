@@ -23,6 +23,7 @@ import { Route as ImportarRouteImport } from './routes/importar'
 import { Route as InventoryRouteImport } from './routes/inventory'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as PartnersRouteImport } from './routes/partners'
+import { Route as PosicionRouteImport } from './routes/posicion'
 import { Route as ProductsRouteImport } from './routes/products'
 import { Route as PurchasesRouteImport } from './routes/purchases'
 import { Route as QuotesRouteImport } from './routes/quotes'
@@ -119,6 +120,11 @@ const LoginRoute = LoginRouteImport.update({
 const PartnersRoute = PartnersRouteImport.update({
   id: '/partners',
   path: '/partners',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PosicionRoute = PosicionRouteImport.update({
+  id: '/posicion',
+  path: '/posicion',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProductsRoute = ProductsRouteImport.update({
@@ -272,6 +278,7 @@ export interface FileRoutesByFullPath {
   '/inventory': typeof InventoryRoute
   '/login': typeof LoginRoute
   '/partners': typeof PartnersRouteWithChildren
+  '/posicion': typeof PosicionRoute
   '/products': typeof ProductsRouteWithChildren
   '/purchases': typeof PurchasesRoute
   '/quotes': typeof QuotesRoute
@@ -314,6 +321,7 @@ export interface FileRoutesByTo {
   '/importar': typeof ImportarRoute
   '/inventory': typeof InventoryRoute
   '/login': typeof LoginRoute
+  '/posicion': typeof PosicionRoute
   '/purchases': typeof PurchasesRoute
   '/quotes': typeof QuotesRoute
   '/reportes': typeof ReportesRoute
@@ -354,6 +362,7 @@ export interface FileRoutesById {
   '/inventory': typeof InventoryRoute
   '/login': typeof LoginRoute
   '/partners': typeof PartnersRouteWithChildren
+  '/posicion': typeof PosicionRoute
   '/products': typeof ProductsRouteWithChildren
   '/purchases': typeof PurchasesRoute
   '/quotes': typeof QuotesRoute
@@ -399,6 +408,7 @@ export interface FileRouteTypes {
     | '/inventory'
     | '/login'
     | '/partners'
+    | '/posicion'
     | '/products'
     | '/purchases'
     | '/quotes'
@@ -441,6 +451,7 @@ export interface FileRouteTypes {
     | '/importar'
     | '/inventory'
     | '/login'
+    | '/posicion'
     | '/purchases'
     | '/quotes'
     | '/reportes'
@@ -480,6 +491,7 @@ export interface FileRouteTypes {
     | '/inventory'
     | '/login'
     | '/partners'
+    | '/posicion'
     | '/products'
     | '/purchases'
     | '/quotes'
@@ -524,6 +536,7 @@ export interface RootRouteChildren {
   InventoryRoute: typeof InventoryRoute
   LoginRoute: typeof LoginRoute
   PartnersRoute: typeof PartnersRouteWithChildren
+  PosicionRoute: typeof PosicionRoute
   ProductsRoute: typeof ProductsRouteWithChildren
   PurchasesRoute: typeof PurchasesRoute
   QuotesRoute: typeof QuotesRoute
@@ -636,6 +649,13 @@ declare module '@tanstack/react-router' {
       path: '/partners'
       fullPath: '/partners'
       preLoaderRoute: typeof PartnersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/posicion': {
+      id: '/posicion'
+      path: '/posicion'
+      fullPath: '/posicion'
+      preLoaderRoute: typeof PosicionRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/products': {
@@ -921,6 +941,7 @@ const rootRouteChildren: RootRouteChildren = {
   InventoryRoute: InventoryRoute,
   LoginRoute: LoginRoute,
   PartnersRoute: PartnersRouteWithChildren,
+  PosicionRoute: PosicionRoute,
   ProductsRoute: ProductsRouteWithChildren,
   PurchasesRoute: PurchasesRoute,
   QuotesRoute: QuotesRoute,

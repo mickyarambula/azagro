@@ -204,10 +204,15 @@ test("estado de cuenta: la fila de una FV en dólares sale en dólares al TC pac
   const fn = fnBody(src("src/lib/erp/ops.ts"), "getLiveStatement");
   assert.ok(fn.includes('const showFx = inv.currency === "USD" && isUsdFx(inv.fx_agreed) && Number(inv.amount_fx) !== 0 ? Number(inv.fx_agreed) : 1;'), "solo con TC pactado real y parte en dólares (negativa en una NC)");
   assert.ok(fn.includes("const u = (n: number) => (showFx === 1 ? n : Math.round((n / showFx) * 100) / 100);"), "una sola división, a centavos");
-  for (const k of ["cargo: u(cargo),", "saldo: u(saldo),", "abono: u(abono),", "interes: u(line?.interest ?? mora.interest),", "comisionFega: u(line?.comisionFega ?? 0),", "totalFinanciero: u(line?.totalFinanciero ?? mora.mora),", "dueNow: u(dueNow),", "liveMora: u(liveMora),", "bonificacion: bono.applies ? u(bono.bonus) : 0,"]) {
+  for (const k of ["cargo: u(cargo),", "saldo: u(saldo),", "abono: u(abono),", "interes: u(line?.interest ?? mora.interest),", "comisionFega: u(line?.comisionFega ?? 0),", "totalFinanciero: u(line?.totalFinanciero ?? mora.mora),", "liveMora: u(liveMora),", "bonificacion: bono.applies ? u(bono.bonus) : 0,"]) {
     assert.ok(fn.includes(k), k);
   }
   assert.ok(fn.includes("saldoMxn: saldo,"), "el saldo en pesos viaja aparte");
+  // Cerrado en A.2: `liveFx` es un ajuste de tipo de cambio (pesos por
+  // naturaleza), así que se suma al resto YA convertido en vez de dividirse
+  // junto con él. Nadie leía `dueNow`, pero mezclaba monedas dentro del número.
+  assert.ok(fn.includes("const dueNow = u(saldo + liveMora) + (showFx === 1 ? liveFx : 0);"), "dueNow no mezcla pesos con dólares");
+  assert.ok(fn.includes("\n          dueNow,"), "y se publica sin volver a dividir");
   assert.ok(fn.includes("const ar = customerRows.reduce((s, r) => s + r.saldoMxn, 0);"), "la cartera del socio no mezcla dólares con pesos");
   assert.ok(fn.includes("const ap = rows.filter((r) => r.kind === \"supplier\").reduce((s, r) => s + r.saldoMxn, 0);"));
   // El interés se calcula en pesos (capital: Math.max(0, cargo)) y solo se DIVIDE al enseñar: el motor no cambia.
@@ -255,4 +260,18 @@ test("el papel del estado de cuenta (doc-text.ts): la columna «Ut. cambiaria» 
   assert.ok(dt.includes('if (withFx) cells.push(moneyIn(rows.reduce((s, r) => s + r.utCambiaria, 0), "MXN"));'), "el total del papel");
   const fn = dt.slice(dt.indexOf("export function statementPaperRow"), dt.indexOf("export function quoteNotes"));
   assert.ok(!/utCambiaria.*\bmoney\(/.test(fn.replace(/moneyIn/g, "MONEYIN")), "ningún camino la enseña con el alias local (moneyIn con cur)");
+});
+
+test("el pedido levantado sin cotización propone la PRIMERA partida ya en dólares (agujero de L4a, 18-sep-2026)", () => {
+  // `/sales/nuevo` nace en dólares. La partida sembrada llevaba el precio de
+  // lista CRUDO — pesos — bajo una columna que dice «PRECIO / UOM (USD)»:
+  // 18,500 donde debía decir 1,000. Si el vendedor aceptaba el número, el
+  // pedido nacía 18.5 veces más grande. Las partidas agregadas después sí
+  // convertían (`order-form.tsx`), así que era un solo renglón.
+  const nuevo = src("src/routes/sales.nuevo.tsx");
+  assert.ok(
+    nuevo.includes('unitPrice: salePriceShown(prod?.list_price ?? 0, "USD", lookups.fx?.rate ?? 0),'),
+    "la primera partida pasa por salePriceShown, como las demás",
+  );
+  assert.ok(!nuevo.includes("unitPrice: num(prod?.list_price)"), "y ya no siembra el precio de lista en pesos");
 });

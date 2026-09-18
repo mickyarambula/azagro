@@ -531,7 +531,11 @@ export const saveTiie = createServerFn({ method: "POST" })
 
 export const saveFx = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ date: z.string(), usdMxn: z.number().positive() }))
+  // Un TC ≤ 1 no es un tipo de cambio USD→MXN: todo el sistema lo trata como
+  // «no hay» (`isUsdFx`), así que capturarlo dejaba un renglón que se ve
+  // guardado en Ajustes y detiene en silencio cotizar, recibir y facturar en
+  // dólares (bloque A.2).
+  .validator(z.object({ date: z.string(), usdMxn: z.number().gt(1, "El tipo de cambio USD→MXN tiene que ser mayor que 1 (pesos por dólar).") }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const cid = await companyOf(sql, context.userId);
@@ -2364,6 +2368,7 @@ export const addBankMove = createServerFn({ method: "POST" })
       // Una transferencia es entre cuentas de la MISMA moneda; entre monedas
       // distintas es una compra o venta de dólares (con TC), nunca el mismo
       // número acreditado en dos monedas.
+      let tcTraslado: number | null = null;
       if (data.kind === "transferencia") {
         if (!data.bankToId) throw new Error("Elige la cuenta destino");
         const pair = await sql<{ id: number; name: string; currency: string }>`
@@ -2377,6 +2382,25 @@ export const addBankMove = createServerFn({ method: "POST" })
             `${from.name} está en ${from.currency} y ${to.name} en ${to.currency}: una transferencia no cambia de moneda. ` +
               `Usa «${from.currency === "MXN" ? "Compra de dólares" : "Venta de dólares"}», que pide el tipo de cambio.`,
           );
+        }
+        // TRASLADO ENTRE DOS CUENTAS EN DÓLARES (Decisión 86). Son los MISMOS
+        // dólares cambiados de cuenta: no se compra ni se vende nada, así que
+        // el TC no se pregunta — se arrastra. Salen de la cuenta origen a su
+        // costo a promedio móvil y entran a la destino con ese mismo costo. Sin
+        // arrastrarlo, la destino los recibía «sin TC» y la empresa perdía en
+        // el papel la diferencia entre el promedio y el dólar de hoy, sin que
+        // un solo dólar hubiera salido. Si el origen no tiene costo conocido
+        // (saldo inicial del corte), no se inventa ninguno: va en null.
+        if (from.currency === "USD") {
+          const ms = await sql<{ amount: string; fx_rate: string | null; reverses_id: number | null }>`
+            select amount::text, fx_rate::text, reverses_id from bank_moves where bank_id = ${from.id} and company_id = ${cid} order by id
+          `;
+          const op = await sql<{ opening: string }>`select coalesce(opening,0)::text as opening from banks where id = ${from.id}`;
+          const avg = usdCashAverage({
+            opening: Number(op[0]?.opening ?? 0),
+            moves: ms.map((m) => ({ amount: m.amount, fxRate: m.fx_rate, reversal: m.reverses_id != null })),
+          });
+          tcTraslado = avg.avgFx;
         }
       }
       const signed =
@@ -2393,17 +2417,19 @@ export const addBankMove = createServerFn({ method: "POST" })
       }
       const memo = data.memo ?? "";
       const own = await sql<{ id: number }>`
-        insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, so_id, po_id, created_by)
+        insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, so_id, po_id, created_by, amount_fx, fx_rate)
         values (${cid}, ${data.bankId}, ${data.date}, ${signed}, ${memo}, ${data.partnerId ?? null},
-          ${data.kind}, ${data.invoiceId ?? null}, ${data.soId ?? null}, ${data.poId ?? null}, ${context.userId})
+          ${data.kind}, ${data.invoiceId ?? null}, ${data.soId ?? null}, ${data.poId ?? null}, ${context.userId},
+          ${tcTraslado != null ? signed : null}, ${tcTraslado})
         returning id
       `;
       if (data.kind === "transferencia") {
         if (!data.bankToId) throw new Error("Elige la cuenta destino");
         // Las dos patas quedan ligadas (Decisión 81), igual que en la compra de dólares.
         const other = await sql<{ id: number }>`
-          insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by, pair_id)
-          values (${cid}, ${data.bankToId}, ${data.date}, ${Math.abs(data.amount)}, ${memo || "Transferencia"}, 'transferencia', ${context.userId}, ${own[0]!.id})
+          insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by, pair_id, amount_fx, fx_rate)
+          values (${cid}, ${data.bankToId}, ${data.date}, ${Math.abs(data.amount)}, ${memo || "Transferencia"}, 'transferencia', ${context.userId}, ${own[0]!.id},
+            ${tcTraslado != null ? Math.abs(data.amount) : null}, ${tcTraslado})
           returning id
         `;
         await sql`update bank_moves set pair_id = ${other[0]!.id} where id = ${own[0]!.id}`;
@@ -2652,7 +2678,6 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           ? fxDifferential(Number(inv.amount_fx), Number(inv.fx_agreed), inv.fx_paid ? Number(inv.fx_paid) : null)
           : 0;
         const liveFx = Math.max(0, fxDiff - Number(inv.fx_invoiced));
-        const dueNow = saldo + liveMora + liveFx;
         // LA FILA SALE EN LA MONEDA DE LA FACTURA (L4a, Decisión 82). Todo lo
         // de arriba se calculó en pesos (cargo, abonos, saldo, interés, FEGA,
         // pronto pago: la línea de crédito es en pesos y el interés corre
@@ -2662,6 +2687,15 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // por TC (utCambiaria) es pesos por naturaleza y no se divide.
         const showFx = inv.currency === "USD" && isUsdFx(inv.fx_agreed) && Number(inv.amount_fx) !== 0 ? Number(inv.fx_agreed) : 1;
         const u = (n: number) => (showFx === 1 ? n : Math.round((n / showFx) * 100) / 100);
+        // `liveFx` es pesos por naturaleza (es un ajuste de tipo de cambio que
+        // nace de haber cobrado en pesos, no un saldo en dólares): no se divide
+        // — dividirlo sería inventar dólares — y en una fila que sale en dólares
+        // tampoco se suma, porque el número quedaría mezclado. Ahí vive en su
+        // propia columna, «Ut. cambiaria», siempre en pesos. En una factura en
+        // pesos todo es pesos y se suma como siempre.
+        // (Antes se dividía todo junto; nadie lee `dueNow`, pero mezclaba
+        // monedas dentro del mismo número — aviso de L4a, cerrado en A.2.)
+        const dueNow = u(saldo + liveMora) + (showFx === 1 ? liveFx : 0);
         const plazo = inv.credit_days || partner.payment_days || 0;
         const { serie, folio } = splitDocName(inv.name);
         const line = productDoc && !sinTiie
@@ -2782,7 +2816,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           liveMora: u(liveMora),
           liveFx,
           utCambiaria: fxDiff,
-          dueNow: u(dueNow),
+          dueNow,
           abono: u(abono),
           fechaAbono,
           fechaPago: line?.fechaPago ?? fechaAbono ?? asOf,

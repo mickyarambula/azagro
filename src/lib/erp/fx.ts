@@ -53,6 +53,21 @@ export function fxAt(table: FxRow[], asOf: string): FxRow | null {
  * el mismo número; en USD exige el TC (el de la tabla a la fecha, enseñado y
  * editable) y sin él se detiene.
  */
+/**
+ * EL TC DE HOY, UN SOLO LUGAR (bloque A.2). Antes esto se resolvía en catorce
+ * puntos del código y uno de ellos contestaba distinto (tomaba el último
+ * renglón de la tabla SIN tope de fecha: si alguien capturaba el tipo de
+ * cambio del lunes, un documento del viernes nacía con él).
+ *
+ * Devuelve el renglón vigente a la fecha — el más reciente igual o anterior,
+ * misma regla que la TIIE (`nearestRate`) — o null si la tabla no lo cubre.
+ * Nunca inventa un tipo de cambio: sin renglón, quien llama se detiene y avisa
+ * (regla 9).
+ */
+export async function fxToday(sql: Sql, companyId: number, asOf: string): Promise<FxRow | null> {
+  return fxAt(await loadFxTable(sql, companyId), asOf);
+}
+
 export function costToMxn(i: { cost: number; currency: Currency | string; fx?: number | string | null; what: string }) {
   if (i.currency === "USD") {
     if (!isUsdFx(i.fx)) throw new Error(missingFxMessage(i.what));
