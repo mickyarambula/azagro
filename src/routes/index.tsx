@@ -6,7 +6,7 @@ import { getCompanyPnl, getUpcomingDue, getUpcomingPayable } from "@/lib/erp/rep
 import { useAccess } from "@/lib/access";
 import { canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { prevPath } from "@/lib/trail";
-import { money, todayMx } from "@/lib/utils";
+import { money, todayMx, moneyIn } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({ component: Home });
 
@@ -219,12 +219,18 @@ function InicioBody() {
 
         {(seeCredit || seeBanks || seeStockValue) && (
           <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {seeBanks && <Kpi label="Caja" value={data ? money(data.cash) : "—"} hint="Saldos bancarios" />}
+            {seeBanks && (
+              <Kpi
+                label="Caja"
+                value={data ? money(data.cash) : "—"}
+                hint={data?.cashUsd ? `Pesos · ${moneyIn(data.cashUsd, "USD")} en la cuenta en dólares` : "Saldos bancarios en pesos"}
+              />
+            )}
             {seeCredit && (
               <Kpi
                 label="Por cobrar"
                 value={data ? money(data.ar) : "—"}
-                hint={data?.arOverdue ? `${money(data.arOverdue)} vencido` : "Al corriente"}
+                hint={`${data?.arOverdue ? `${money(data.arOverdue)} vencido` : "Al corriente"}${data?.arUsd ? ` · ${moneyIn(data.arUsd, "USD")} en dólares` : ""}`}
                 hintTone={data?.arOverdue ? "danger" : undefined}
               />
             )}
@@ -232,7 +238,7 @@ function InicioBody() {
               <Kpi
                 label="Por pagar"
                 value={data ? money(data.ap) : "—"}
-                hint={data?.payableWeek ? `${money(data.payableWeek)} vence en 7 días` : "Nada vence esta semana"}
+                hint={`${data?.payableWeek ? `${money(data.payableWeek)} vence en 7 días` : "Nada vence esta semana"}${data?.apUsd ? ` · ${moneyIn(data.apUsd, "USD")} en dólares` : ""}`}
                 hintTone={data?.payableWeek ? "warn" : undefined}
               />
             )}

@@ -158,3 +158,90 @@ export function mxnInvoicePaidInUsd(i: { amountUsd: number; fxPaid: number; resi
 export function fxResultDeltaFor(kind: string, fxDiff: number) {
   return kind === "supplier" ? r2(-fxDiff) : r2(fxDiff);
 }
+
+/**
+ * Decisión 77: el costo con el que una recepción entra al kardex, en pesos —
+ * `unit_price` de la OC × su TC si la OC es en dólares. Se convierte ANTES de
+ * `postStock`; el kardex no sabe de monedas. Una OC en dólares sin TC real no
+ * entra (misma salida que la FP: capturar el TC en Compras).
+ */
+export function receiptUnitCostMxn(i: { unitPrice: number | string; currency: string; fx: number | string | null | undefined; poName: string }) {
+  const unit = Number(i.unitPrice) || 0;
+  if (i.currency === "USD") {
+    if (!isUsdFx(i.fx)) {
+      throw new Error(
+        `${i.poName} está en dólares sin tipo de cambio: la mercancía no puede entrar al inventario en pesos. ` +
+          `Captura el TC de la orden en Compras (columna TC) y vuelve a recibir.`,
+      );
+    }
+    return r4(unit * Number(i.fx));
+  }
+  return r4(unit);
+}
+
+/**
+ * Decisión 81: comprar (o vender) dólares es un movimiento propio con tipo de
+ * cambio y las dos patas ligadas. En cada cuenta el movimiento va en SU moneda;
+ * `amount_fx` lleva los dólares del cambio con el signo de la pata.
+ */
+export type ExchangeKind = "compra-usd" | "venta-usd";
+export function exchangeLegs(i: { direction: ExchangeKind; usd: number; fx: number }) {
+  if (!isUsdFx(i.fx)) throw new Error(missingFxMessage(i.direction === "compra-usd" ? "la compra de dólares" : "la venta de dólares"));
+  const usd = r2(Math.abs(i.usd));
+  const mxn = r2(usd * i.fx);
+  if (i.direction === "compra-usd") {
+    return { usd, mxn, pesos: { amount: -mxn, amountFx: -usd }, dolares: { amount: usd, amountFx: usd } };
+  }
+  return { usd, mxn, pesos: { amount: mxn, amountFx: usd }, dolares: { amount: -usd, amountFx: -usd } };
+}
+
+/**
+ * Decisión 81: los dólares en caja llevan su costo en pesos a promedio móvil
+ * por cuenta — el patrón del kardex (`movingAverage`): cada entrada con TC
+ * (compra de dólares, cobro en dólares) se pondera; cada salida sale al
+ * promedio. Los dólares sin TC (el saldo inicial, un ajuste) se llevan aparte
+ * como «sin TC»: no se les inventa costo (regla 9). Los movimientos van en
+ * orden de captura; una salida consume primero los dólares con costo.
+ */
+export function usdCashAverage(i: { opening: number; moves: Array<{ amount: number | string; fxRate: number | string | null | undefined; reversal?: boolean }> }) {
+  let tracked = 0;
+  let costMxn = 0;
+  let untracked = Math.max(0, Number(i.opening) || 0);
+  for (const m of i.moves) {
+    const amount = Number(m.amount) || 0;
+    // Una reversa deshace el movimiento original a SU TC (el contra-movimiento lo
+    // copia), nunca al promedio: el promedio queda como si el original no hubiera existido.
+    if (m.reversal && isUsdFx(m.fxRate) && amount < 0) {
+      const out = Math.min(-amount, tracked);
+      costMxn -= out * Number(m.fxRate);
+      tracked -= out;
+      untracked = Math.max(0, untracked - (-amount - out));
+      continue;
+    }
+    if (amount > 0) {
+      if (isUsdFx(m.fxRate)) {
+        tracked += amount;
+        costMxn += amount * Number(m.fxRate);
+      } else {
+        untracked += amount;
+      }
+    } else if (amount < 0) {
+      let out = -amount;
+      const fromTracked = Math.min(out, tracked);
+      if (fromTracked > 0 && tracked > 0) {
+        costMxn -= (costMxn / tracked) * fromTracked;
+        tracked -= fromTracked;
+        out -= fromTracked;
+      }
+      untracked = Math.max(0, untracked - out);
+    }
+  }
+  const avgFx = tracked > 0.0000001 ? Math.round((costMxn / tracked) * 10000) / 10000 : null;
+  return {
+    usd: r2(tracked + untracked),
+    tracked: r2(tracked),
+    sinTc: r2(untracked),
+    avgFx,
+    mxn: avgFx != null ? r2(tracked * avgFx) : null,
+  };
+}

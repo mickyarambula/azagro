@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { fxResultDeltaFor, isUsdFx, missingFxMessage, mxnInvoicePaidInUsd, mxnToCostCurrency, settleMode, usdBankSettlement } from "@/lib/erp/fx";
+import { exchangeLegs, fxResultDeltaFor, isUsdFx, loadFxTable, missingFxMessage, mxnInvoicePaidInUsd, mxnToCostCurrency, settleMode, usdBankSettlement, usdCashAverage } from "@/lib/erp/fx";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
@@ -1837,6 +1837,19 @@ export const listBanks = createServerFn({ method: "GET" })
       where b.company_id = ${cid}
       order by b.id
     `;
+    // Decisión 81: los dólares en caja con su costo en pesos, a promedio móvil por cuenta.
+    const banksFx = [];
+    for (const b of banks) {
+      if (b.currency !== "USD") {
+        banksFx.push({ ...b, usd_avg_fx: null as number | null, usd_mxn: null as number | null, usd_sin_tc: 0 });
+        continue;
+      }
+      const ms = await sql<{ amount: string; fx_rate: string | null; reverses_id: number | null }>`
+        select amount::text, fx_rate::text, reverses_id from bank_moves where bank_id = ${b.id} and company_id = ${cid} order by id
+      `;
+      const avg = usdCashAverage({ opening: Number(b.opening), moves: ms.map((m) => ({ amount: m.amount, fxRate: m.fx_rate, reversal: m.reverses_id != null })) });
+      banksFx.push({ ...b, usd_avg_fx: avg.avgFx, usd_mxn: avg.mxn, usd_sin_tc: avg.sinTc });
+    }
     const moves = await sql<{
       id: number;
       bank: string;
@@ -1888,7 +1901,7 @@ export const listBanks = createServerFn({ method: "GET" })
     const purchases = await sql<{ id: number; name: string; partner_id: number }>`
       select id, name, partner_id from purchase_orders where company_id = ${cid} order by id desc limit 80
     `;
-    return { banks, moves, partners, invoices, sales, purchases };
+    return { banks: banksFx, moves, partners, invoices, sales, purchases, fxTable: await loadFxTable(sql, cid) };
   });
 
 export const saveBankOpening = createServerFn({ method: "POST" })
@@ -2231,8 +2244,10 @@ export const addBankMove = createServerFn({ method: "POST" })
       bankId: z.number(),
       date: z.string(),
       amount: z.number().positive(),
-      kind: z.enum(["cobro", "pago", "transferencia", "ajuste"]),
+      kind: z.enum(["cobro", "pago", "transferencia", "ajuste", "compra-usd", "venta-usd"]),
       memo: z.string().optional().default(""),
+      // Decisión 81: TC de la compra/venta de dólares (propuesto de la tabla, editable).
+      fxRate: z.number().positive().optional(),
       partnerId: z.number().optional(),
       invoiceId: z.number().optional(),
       soId: z.number().optional(),
@@ -2265,6 +2280,80 @@ export const addBankMove = createServerFn({ method: "POST" })
           fxTreatment: data.fxTreatment,
         });
       }
+      // Decisión 81: comprar (o vender) dólares es un movimiento propio: salen
+      // pesos de la cuenta en MXN y entran dólares a la cuenta en USD (o al
+      // revés), al TC capturado, y las dos patas quedan ligadas (pair_id).
+      // Nunca se acredita el mismo número en dos monedas.
+      if (data.kind === "compra-usd" || data.kind === "venta-usd") {
+        if (!data.bankToId) throw new Error("Elige la cuenta destino");
+        const legs = exchangeLegs({ direction: data.kind, usd: data.amount, fx: Number(data.fxRate) });
+        const pair = await sql<{ id: number; name: string; currency: string; opening: string; movement: string }>`
+          select b.id, b.name, coalesce(b.currency,'MXN') as currency, b.opening::text,
+            coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement
+          from banks b where b.id in (${data.bankId}, ${data.bankToId}) and b.company_id = ${cid}
+          for update
+        `;
+        const from = pair.find((b) => b.id === data.bankId);
+        const to = pair.find((b) => b.id === data.bankToId);
+        if (!from || !to || from.id === to.id) throw new Error("Elige dos cuentas distintas");
+        const compra = data.kind === "compra-usd";
+        const expectFrom = compra ? "MXN" : "USD";
+        const expectTo = compra ? "USD" : "MXN";
+        if (from.currency !== expectFrom || to.currency !== expectTo) {
+          throw new Error(
+            compra
+              ? `Compra de dólares: salen pesos de una cuenta en MXN y entran dólares a una cuenta en USD (${from.name} es ${from.currency}, ${to.name} es ${to.currency}).`
+              : `Venta de dólares: salen dólares de una cuenta en USD y entran pesos a una cuenta en MXN (${from.name} es ${from.currency}, ${to.name} es ${to.currency}).`,
+          );
+        }
+        const cashFrom = Number(from.opening) + Number(from.movement);
+        const outFrom = compra ? legs.mxn : legs.usd;
+        if (cashFrom + 0.009 < outFrom) {
+          throw new Error(`No hay saldo suficiente en ${from.name} (${cashFrom.toFixed(2)} ${from.currency}) para ${outFrom.toFixed(2)} ${from.currency}. Cobra primero o captura saldo inicial.`);
+        }
+        const memoX = data.memo || (compra ? `Compra de ${legs.usd.toFixed(2)} USD a ${data.fxRate}` : `Venta de ${legs.usd.toFixed(2)} USD a ${data.fxRate}`);
+        const legFrom = compra ? legs.pesos : legs.dolares;
+        const legTo = compra ? legs.dolares : legs.pesos;
+        const a = await sql<{ id: number }>`
+          insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by, amount_fx, fx_rate)
+          values (${cid}, ${from.id}, ${data.date}, ${legFrom.amount}, ${memoX}, ${data.kind}, ${context.userId}, ${legFrom.amountFx}, ${Number(data.fxRate)})
+          returning id
+        `;
+        const b = await sql<{ id: number }>`
+          insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by, amount_fx, fx_rate, pair_id)
+          values (${cid}, ${to.id}, ${data.date}, ${legTo.amount}, ${memoX}, ${data.kind}, ${context.userId}, ${legTo.amountFx}, ${Number(data.fxRate)}, ${a[0]!.id})
+          returning id
+        `;
+        await sql`update bank_moves set pair_id = ${b[0]!.id} where id = ${a[0]!.id}`;
+        await writeAudit(sql, {
+          companyId: cid,
+          userId: context.userId,
+          action: data.kind,
+          entity: "bank",
+          entityId: from.id,
+          name: from.name,
+          detail: `${legs.usd.toFixed(2)} USD × TC ${data.fxRate} = ${legs.mxn.toFixed(2)} MXN · ${from.name} → ${to.name}`,
+        });
+        return { ok: true, usd: legs.usd, mxn: legs.mxn };
+      }
+      // Una transferencia es entre cuentas de la MISMA moneda; entre monedas
+      // distintas es una compra o venta de dólares (con TC), nunca el mismo
+      // número acreditado en dos monedas.
+      if (data.kind === "transferencia") {
+        if (!data.bankToId) throw new Error("Elige la cuenta destino");
+        const pair = await sql<{ id: number; name: string; currency: string }>`
+          select id, name, coalesce(currency,'MXN') as currency from banks where id in (${data.bankId}, ${data.bankToId}) and company_id = ${cid}
+        `;
+        const from = pair.find((b) => b.id === data.bankId);
+        const to = pair.find((b) => b.id === data.bankToId);
+        if (!from || !to) throw new Error("Elige las dos cuentas");
+        if (from.currency !== to.currency) {
+          throw new Error(
+            `${from.name} está en ${from.currency} y ${to.name} en ${to.currency}: una transferencia no cambia de moneda. ` +
+              `Usa «${from.currency === "MXN" ? "Compra de dólares" : "Venta de dólares"}», que pide el tipo de cambio.`,
+          );
+        }
+      }
       const signed =
         data.kind === "cobro" || data.kind === "ajuste" ? Math.abs(data.amount) : -Math.abs(data.amount);
       if (data.kind === "pago" || data.kind === "transferencia") {
@@ -2278,17 +2367,21 @@ export const addBankMove = createServerFn({ method: "POST" })
         }
       }
       const memo = data.memo ?? "";
-      await sql`
+      const own = await sql<{ id: number }>`
         insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, so_id, po_id, created_by)
         values (${cid}, ${data.bankId}, ${data.date}, ${signed}, ${memo}, ${data.partnerId ?? null},
           ${data.kind}, ${data.invoiceId ?? null}, ${data.soId ?? null}, ${data.poId ?? null}, ${context.userId})
+        returning id
       `;
       if (data.kind === "transferencia") {
         if (!data.bankToId) throw new Error("Elige la cuenta destino");
-        await sql`
-          insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by)
-          values (${cid}, ${data.bankToId}, ${data.date}, ${Math.abs(data.amount)}, ${memo || "Transferencia"}, 'transferencia', ${context.userId})
+        // Las dos patas quedan ligadas (Decisión 81), igual que en la compra de dólares.
+        const other = await sql<{ id: number }>`
+          insert into bank_moves (company_id, bank_id, date, amount, memo, kind, created_by, pair_id)
+          values (${cid}, ${data.bankToId}, ${data.date}, ${Math.abs(data.amount)}, ${memo || "Transferencia"}, 'transferencia', ${context.userId}, ${own[0]!.id})
+          returning id
         `;
+        await sql`update bank_moves set pair_id = ${other[0]!.id} where id = ${own[0]!.id}`;
       }
       return { ok: true };
     });

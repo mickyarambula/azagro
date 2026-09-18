@@ -69,7 +69,7 @@ type Chain = {
   preview: ReversalPreview;
   companyId: number;
   invoiceId: number;
-  bankMove: { id: number; bank_id: number; bank: string; amount: number; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null; currency: string } | null;
+  bankMove: { id: number; bank_id: number; bank: string; amount: number; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null; currency: string; amount_fx: number | null; fx_rate: number | null } | null;
   discount: { id: number; name: string; amount: number } | null;
   atc: { id: number; name: string; amount: number } | null;
   fxDiff: number;
@@ -199,13 +199,16 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
   }
 
   // El movimiento de banco original (el pronto pago y la devolución no tienen).
-  const bm = await sql<{ id: number; bank_id: number; bank: string; amount: string; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null; currency: string }>`
-    select m.id, m.bank_id, b.name as bank, m.amount::text, m.reconciled, m.partner_id, coalesce(m.kind,'ajuste') as kind, m.invoice_id, coalesce(b.currency,'MXN') as currency
+  const bm = await sql<{ id: number; bank_id: number; bank: string; amount: string; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null; currency: string; amount_fx: string | null; fx_rate: string | null }>`
+    select m.id, m.bank_id, b.name as bank, m.amount::text, m.reconciled, m.partner_id, coalesce(m.kind,'ajuste') as kind, m.invoice_id, coalesce(b.currency,'MXN') as currency,
+      m.amount_fx::text, m.fx_rate::text
     from bank_moves m join banks b on b.id = m.bank_id
     where m.payment_id = ${p.id} and m.reverses_id is null
     order by m.id limit 1
   `;
-  const bankMove = bm[0] ? { ...bm[0], amount: Number(bm[0].amount) } : null;
+  const bankMove = bm[0]
+    ? { ...bm[0], amount: Number(bm[0].amount), amount_fx: bm[0].amount_fx != null ? Number(bm[0].amount_fx) : null, fx_rate: bm[0].fx_rate != null ? Number(bm[0].fx_rate) : null }
+    : null;
 
   // Diferencial cambiario del tramo, derivable exacto: lo que entró (o salió)
   // del banco menos lo que se aplicó a la factura. Solo cuando la factura en
@@ -417,9 +420,9 @@ async function applyReversal(sql: Sql, userId: string, chain: Chain, reason: str
   // 4) El contra-movimiento de banco: importe opuesto, nace sin conciliar, ligado.
   if (chain.bankMove) {
     await sql`
-      insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, created_by, reconciled, reverses_id)
+      insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, amount_fx, fx_rate, created_by, reconciled, reverses_id)
       values (${companyId}, ${chain.bankMove.bank_id}, ${today}, ${-chain.bankMove.amount}, ${`Reversa de ${pv.payment.name}`},
-        ${chain.bankMove.partner_id}, ${chain.bankMove.kind}, ${chain.bankMove.invoice_id}, ${contra[0]!.id}, ${userId}, false, ${chain.bankMove.id})
+        ${chain.bankMove.partner_id}, ${chain.bankMove.kind}, ${chain.bankMove.invoice_id}, ${contra[0]!.id}, ${chain.bankMove.amount_fx != null ? -chain.bankMove.amount_fx : null}, ${chain.bankMove.fx_rate}, ${userId}, false, ${chain.bankMove.id})
     `;
   }
 

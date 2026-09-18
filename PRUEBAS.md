@@ -373,6 +373,25 @@ sesiones.
 
 **Lo que todavía NO se prueba aquí:** comprar dólares (pasar pesos a la cuenta en dólares con su tipo de cambio) y ver el inventario valuado en pesos — A.1c. El P&L del pedido todavía no suma la pérdida o ganancia cambiaria del lado del proveedor.
 
+## ESCENARIO 10 — Comprar dólares, recibir en pesos y ver el inventario cuadrar con la deuda (Decisiones 77 y 81, 18-sep-2026)
+
+**El número que más importa:** una orden de **10 × 1,000 USD a 18.50** recibida tiene que dejar el inventario en **$18,500.00 por unidad y $185,000.00 en total**, y la factura del proveedor en **$185,000.00**: el mismo número en Almacén y en Cartera.
+
+**Antes de empezar:** un tipo de cambio para hoy en "Ajustes" → "Tipo de cambio USD/MXN" (`18.5`, "Agregar"), el proveedor con "Plazo de pago (días)" capturado, y en "Cartera" → "Bancos" un "Saldo inicial" de `50000` en Banorte MXN (Banorte USD en `0`).
+
+1. En "Bancos", en "Tipo de movimiento" pulsa "Compra de dólares". Deja "Cuenta" en `Banorte MXN`; en "Dólares" escribe `1000`; en "Tipo de cambio" debe aparecer el de la tabla (o escríbelo: `18.4`); en "Cuenta destino (dólares)" elige `Banorte USD`. Pulsa "Registrar compra de dólares". Debes ver: Banorte MXN `$31,600.00`; Banorte USD `USD 1,000.00` y debajo "TC promedio 18.4 · $18,400.00 en pesos"; y en la lista dos renglones "Compra de 1000.00 USD a 18.4": `$1,000.00` en Banorte USD y `−$18,400.00` en Banorte MXN.
+2. Candado — transferencia entre monedas: pulsa "Transferencia", "Cuenta" `Banorte MXN`, "Importe" `100`, "Cuenta destino" `Banorte USD`, "Registrar transferencia". Debes ver en rojo: "Banorte MXN está en MXN y Banorte USD en USD: una transferencia no cambia de moneda. Usa «Compra de dólares», que pide el tipo de cambio." El camino es el paso 1.
+3. Candado — sin saldo: "Compra de dólares" de `5000` dólares a `18.4` (91,999 pesos). Debes ver "No hay saldo suficiente en Banorte MXN (31600.00 MXN) para 92000.00 MXN. Cobra primero o captura saldo inicial." No se registra nada.
+4. Ve a "Compras" → "Pedidos de compra" → "Nueva orden". "Moneda" `USD`, "Tipo de cambio" `18.5`, "Cant." `10`, "Costo / UOM" `1000`, "Colocar orden". En "Todas" la orden dice `USD 10,000.00` y `TC 18.5`.
+5. Pulsa "Recibir" → "Recibir todo lo pendiente". La orden queda "Recibida".
+6. Ve a "Almacén" → "Inventario". Arriba, "En proveedor · $185,000.00". En la tabla, el producto con "Cantidad" `10`, "Costo prom." `$18,500.00` y "Valor" `$185,000.00`. En el kardex, el renglón `REC/0001` con "Costo" `$18,500.00`. **Este es el número: 18,500 pesos por unidad, no 1,000.**
+7. Ve a "Cartera" → "Por pagar". La factura del proveedor dice `USD 10,000.00 · TC 18.5 · $185,000.00` y "TOTAL FACTURADO" `$185,000.00`. **Inventario y deuda dicen lo mismo.**
+8. Pulsa "Pago", "Cuenta" `Banorte USD · $1,000.00`, importe `1000`, "Aplicar". Debes ver "Aplicado $18,500.00 en Banorte USD. Saldo factura $166,500.00. Caja $0.00." (salieron los 1,000 dólares que compraste; no hay diferencial). En "Bancos", Banorte USD queda `USD 0.00` y "Sin dólares con TC".
+9. Ve a "Inicio". "Caja" debe decir `$31,600.00` con "Saldos bancarios en pesos" (si quedaran dólares diría "Pesos · US$… en la cuenta en dólares"); "Por pagar" `$166,500.00` con "… · USD 9,000.00 en dólares"; "Inventario Azagro" con "Proveedor $185,000.00".
+10. Si el producto ya tenía inventario en pesos, el "Costo prom." es el promedio ponderado de lo anterior con estos 18,500 — nunca un promedio entre 1,000 "dólares" y pesos.
+
+**Lo que todavía NO se prueba aquí:** vender en dólares — el precio de venta sigue capturándose sin moneda (L4a, lo que sigue); y la posición cambiaria (cuánto se debe y nos deben en dólares por vencimiento, y qué está cubierto).
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

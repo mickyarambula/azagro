@@ -1,3 +1,4 @@
+import { fxAt } from "@/lib/erp/fx";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { AppShell } from "@/components/app-shell";
@@ -8,7 +9,7 @@ import { addBankMove, listBanks, reconcileMove, saveBankOpening } from "@/lib/er
 import { ReversalButton } from "@/components/cancel-doc";
 import { reversalPreview, reversePayment } from "@/lib/erp/reversal";
 import { exportCsv } from "@/lib/export-csv";
-import { cn, money, todayMx } from "@/lib/utils";
+import { cn, money, todayMx, moneyIn } from "@/lib/utils";
 
 export const Route = createFileRoute("/banks")({ component: Page });
 
@@ -17,6 +18,8 @@ const KINDS = [
   { id: "pago", label: "Pago" },
   { id: "transferencia", label: "Transferencia" },
   { id: "ajuste", label: "Ajuste" },
+  { id: "compra-usd", label: "Compra de dólares" },
+  { id: "venta-usd", label: "Venta de dólares" },
 ] as const;
 
 type Kind = (typeof KINDS)[number]["id"];
@@ -32,6 +35,8 @@ function kindLabel(k: string) {
   if (k === "pago") return "Pago";
   if (k === "gasto") return "Gasto";
   if (k === "transferencia") return "Transferencia";
+  if (k === "compra-usd") return "Compra de dólares";
+  if (k === "venta-usd") return "Venta de dólares";
   if (k === "saldo-inicial") return "Saldo inicial";
   return "Ajuste";
 }
@@ -49,6 +54,10 @@ function Page() {
   const [soId, setSoId] = useState("");
   const [fxPaid, setFxPaid] = useState(0);
   const [fxTreatment, setFxTreatment] = useState<"utilidad" | "ajuste">("utilidad");
+  // Decisión 81: TC de la compra/venta de dólares, propuesto de la tabla a la fecha y editable.
+  const [fxRate, setFxRate] = useState(0);
+  const isExchange = kind === "compra-usd" || kind === "venta-usd";
+  const isPair = kind === "transferencia" || isExchange;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -60,6 +69,9 @@ function Page() {
   useEffect(() => {
     void load().catch((e) => setError(e instanceof Error ? e.message : "Error"));
   }, []);
+  useEffect(() => {
+    if (isExchange && data) setFxRate((f) => (f > 0 ? f : (fxAt(data.fxTable, date)?.rate ?? 0)));
+  }, [isExchange, date, data]);
 
   const partners = useMemo(() => {
     const rows = data?.partners ?? [];
@@ -103,6 +115,7 @@ function Page() {
           invoiceId: Number(invoiceId) || undefined,
           soId: Number(soId) || undefined,
           bankToId: Number(bankToId) || undefined,
+          fxRate: isExchange && fxRate > 0 ? fxRate : undefined,
           fxPaid: fxPaid || undefined,
           fxTreatment: fxPaid ? fxTreatment : undefined,
         },
@@ -139,7 +152,13 @@ function Page() {
           <article key={b.id} className="erp-card p-4">
             <p className="text-[11px] uppercase tracking-wide text-muted">{b.currency}</p>
             <p className="font-semibold">{b.name}</p>
-            <p className="mt-2 text-lg tabular-nums">{money(Number(b.opening) + Number(b.movement))}</p>
+            <p className="mt-2 text-lg tabular-nums">{b.currency === "USD" ? moneyIn(Number(b.opening) + Number(b.movement), "USD") : money(Number(b.opening) + Number(b.movement))}</p>
+            {b.currency === "USD" ? (
+              <p className="text-xs text-muted">
+                {b.usd_avg_fx != null ? `TC promedio ${b.usd_avg_fx} · ${money(b.usd_mxn ?? 0)} en pesos` : "Sin dólares con TC"}
+                {b.usd_sin_tc > 0 ? ` · ${moneyIn(b.usd_sin_tc, "USD")} sin TC (saldo inicial)` : ""}
+              </p>
+            ) : null}
             <p className="text-xs text-muted">{b.account || "Sin CLABE capturada"}</p>
             <label className="mt-2 grid gap-1 text-[11px] uppercase tracking-wide text-muted">
               Saldo inicial
@@ -199,11 +218,22 @@ function Page() {
           <Field label="Fecha">
             <input className="erp-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </Field>
-          <Field label={`${kind === "cobro" ? "Importe que entra" : kind === "pago" ? "Importe que sale" : "Importe"}${data?.banks.find((b) => String(b.id) === bankId)?.currency === "USD" ? " (USD)" : ""}`}>
+          <Field label={isExchange ? "Dólares" : `${kind === "cobro" ? "Importe que entra" : kind === "pago" ? "Importe que sale" : "Importe"}${data?.banks.find((b) => String(b.id) === bankId)?.currency === "USD" ? " (USD)" : ""}`}>
             <MoneyField className="w-full" value={amount} onChange={setAmount} />
           </Field>
-          {kind === "transferencia" ? (
-            <Field label="Cuenta destino">
+          {isExchange ? (
+            <Field label="Tipo de cambio">
+              <input className="erp-input" type="number" min={0.0001} step="0.0001" value={fxRate || ""} onChange={(e) => setFxRate(Number(e.target.value))} placeholder="p. ej. 18.40" />
+              <p className="text-[11px] text-muted">
+                {(() => {
+                  const t = fxAt(data?.fxTable ?? [], date);
+                  return t ? `Tabla: ${t.rate} (${t.date}). Corrígelo si el banco dio otro.` : "Sin renglón en la tabla para esta fecha: captúralo en Ajustes → Tipo de cambio.";
+                })()}
+              </p>
+            </Field>
+          ) : null}
+          {isPair ? (
+            <Field label={kind === "compra-usd" ? "Cuenta destino (dólares)" : kind === "venta-usd" ? "Cuenta destino (pesos)" : "Cuenta destino"}>
               <SearchSelect
                 value={bankToId}
                 options={asOpts(
@@ -231,7 +261,7 @@ function Page() {
               />
             </Field>
           )}
-          {kind !== "transferencia" && (
+          {!isPair && (
             <Field label="Aplicar a factura">
               <SearchSelect
                 value={invoiceId}

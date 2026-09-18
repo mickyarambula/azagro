@@ -13,7 +13,7 @@ import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate, NO_MORA_POLICY, requireRate } from "@/lib/erp/credit";
 import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { nextDocFolio } from "@/lib/erp/folios";
-import { costToMxn, fxAt, isUsdFx, loadFxTable, missingFxMessage, supplierInvoiceAmounts } from "@/lib/erp/fx";
+import { costToMxn, fxAt, isUsdFx, loadFxTable, missingFxMessage, receiptUnitCostMxn, supplierInvoiceAmounts } from "@/lib/erp/fx";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { purchaseLineGaps, salesLineGaps } from "@/lib/erp/parciales";
@@ -417,12 +417,26 @@ export const getDashboard = createServerFn({ method: "GET" })
           where i.company_id = ${cid} and i.kind = 'customer' and i.state = 'open' and i.due_date < ${today}::date
             and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)) as overdue_n
     `;
-    const cash = await sql<{ total: string }>`
-      select coalesce(sum(
+    // Cada cuenta lleva SU moneda (A.1b/A.1c): la caja se suma por moneda, nunca pesos con dólares en un número.
+    const cashByCur = await sql<{ currency: string; total: string }>`
+      select coalesce(b.currency,'MXN') as currency, coalesce(sum(
         b.opening + coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id), 0)
       ), 0)::text as total
       from banks b
       where b.company_id = ${cid}
+      group by coalesce(b.currency,'MXN')
+    `;
+    const cash = [{ total: cashByCur.find((c) => c.currency !== "USD")?.total ?? "0" }];
+    const cashUsd = Number(cashByCur.find((c) => c.currency === "USD")?.total ?? 0);
+    // Lo que de eso está en dólares (documentos USD, en su moneda): el residual en pesos entre el TC pactado.
+    const usdDocs = await sql<{ ar_usd: string; ap_usd: string }>`
+      select
+        coalesce(sum(case when i.kind = 'customer' then i.residual / i.fx_agreed else 0 end), 0)::text as ar_usd,
+        coalesce(sum(case when i.kind = 'supplier' then i.residual / i.fx_agreed else 0 end), 0)::text as ap_usd
+      from invoices i
+      join partners p on p.id = i.partner_id
+      where i.company_id = ${cid} and i.state = 'open' and coalesce(i.currency,'MXN') = 'USD' and i.fx_agreed > 1
+        and (i.kind = 'supplier' or ${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;
     // "Cartera propia" deja a un cliente sin vendedor visible para todos los
     // vendedores por diseño (nadie se queda huérfano de nadie) — pero eso
@@ -515,6 +529,9 @@ export const getDashboard = createServerFn({ method: "GET" })
       stockSupplier: seeCosts ? Number(stock[0]?.supplier ?? 0) : 0,
       stockTransit: seeCosts ? Number(stock[0]?.transit ?? 0) : 0,
       cash: seeBanks ? Number(cash[0]?.total ?? 0) : 0,
+      cashUsd: seeBanks ? cashUsd : 0,
+      arUsd: seeCredit ? Number(usdDocs[0]?.ar_usd ?? 0) : 0,
+      apUsd: seeCredit ? Number(usdDocs[0]?.ap_usd ?? 0) : 0,
       payableWeek: seeCredit ? Number(payableWeek[0]?.total ?? 0) : 0,
       lowStock: low[0]?.n ?? 0,
       lowStockList: lowList.map((l) => ({ code: l.code, name: l.name, qty: Number(l.qty), min: Number(l.min) })),
@@ -1466,8 +1483,9 @@ export const receivePurchase = createServerFn({ method: "POST" })
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "purchases", "deliver");
-    const po = await sql<{ id: number; location_id: number; name: string; state: string; fulfill_kind: string }>`
-      select id, location_id, name, state, coalesce(fulfill_kind,'inventory') as fulfill_kind from purchase_orders
+    const po = await sql<{ id: number; location_id: number; name: string; state: string; fulfill_kind: string; currency: string; fx_rate: string }>`
+      select id, location_id, name, state, coalesce(fulfill_kind,'inventory') as fulfill_kind,
+        coalesce(currency,'MXN') as currency, coalesce(fx_rate,1)::text as fx_rate from purchase_orders
       where id = ${data.poId} and company_id = ${m.company_id}
       for update
     `;
@@ -1535,7 +1553,8 @@ export const receivePurchase = createServerFn({ method: "POST" })
         productId: line.product_id,
         quantity: pending,
         locationTo: po[0].location_id,
-        unitCost: Number(line.unit_price),
+        // Decisión 77: el kardex vive en pesos; una OC en dólares entra al TC de la OC.
+        unitCost: receiptUnitCostMxn({ unitPrice: line.unit_price, currency: po[0].currency, fx: po[0].fx_rate, poName: po[0].name }),
       });
       await sql`update purchase_lines set qty_received = qty where id = ${line.id}`;
     }
@@ -1584,6 +1603,12 @@ export async function receivePartial(
     returning last_number
   `;
   const eventRef = `RCP/${String(rows[0]!.last_number).padStart(4, "0")}`;
+  // Decisión 77: el kardex vive en pesos; una OC en dólares entra al TC de la OC.
+  const poFx = await sql<{ currency: string; fx_rate: string }>`
+    select coalesce(currency,'MXN') as currency, coalesce(fx_rate,1)::text as fx_rate from purchase_orders
+    where id = ${opts.poId} and company_id = ${opts.companyId}
+  `;
+  if (!poFx[0]) throw new Error("Orden de compra no encontrada");
 
   const received: Array<{ productId: number; qty: number; unitPrice: number }> = [];
   for (const l of opts.lines) {
@@ -1606,7 +1631,7 @@ export async function receivePartial(
       productId: line[0].product_id,
       quantity: l.qty,
       locationTo: opts.locationId,
-      unitCost: Number(line[0].unit_price),
+      unitCost: receiptUnitCostMxn({ unitPrice: line[0].unit_price, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName }),
       eventRef,
     });
     await sql`update purchase_lines set qty_received = qty_received + ${l.qty} where id = ${l.lineId}`;
