@@ -30,6 +30,7 @@ Tabla movida desde `CLAUDE.md` § Mapa el 16-sep-2026, byte por byte. Se consult
 | Catálogos Compaq (CL/PV/productos/almacenes) | `src/lib/erp/catalog.ts` + `compaq.ts` |
 | Corte / importar / respaldo | `src/lib/erp/cutover.ts` (permisos, transacción, bitácora) + `src/lib/erp/cutover-core.ts` (parseo y loops de saldos, existencias y bancos, sin dependencias de servidor, probado en PGlite por `scripts/erp-corte.test.mjs`), ruta `/importar` |
 | Bitácora | `src/lib/erp/audit.ts`, ruta `/bitacora` |
+| **Mapa funcional del negocio** (qué existe / a medias / no existe por proceso, con archivo:línea; auditoría del plazo «cosecha»; tipo de cambio de punta a punta; orden de lo que falta) | `MODELO-NEGOCIO.md` |
 | Archivos del folio | `src/lib/erp/files.ts` |
 | RFQ sin pedido de cliente | `src/lib/erp/rfq.ts`, `/rfq/nuevo` |
 | Dos márgenes (contado/crédito), **margen sobre el precio**, precio↔margen, **sin margen por omisión** | `src/lib/erp/margins.ts` |

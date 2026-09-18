@@ -15,6 +15,7 @@ No se lee todo. Se lee lo que la tarea toca, y nada más:
 | Borrar datos de prueba | `BORRADO-PRUEBAS.md` |
 | Permisos, quién ve qué | `SEGURIDAD.md` · regla 10 de "No romper" |
 | Encontrar dónde vive una función, pantalla, prueba o documento | `MAPA.md` |
+| Qué necesita el negocio y qué existe, está a medias o falta (mapa por proceso: comprar, almacenar, vender, cobrar y pagar, medir); el plazo «cosecha»; el tipo de cambio | `MODELO-NEGOCIO.md` |
 | Qué agregó cada migración | `migrations/README.md` |
 
 Dos hechos que hay que saber aunque no se lea nada más. Uno: el circuito **lineal** (Santa Rosa financia y factura al cliente) es el PREDETERMINADO desde el 5-sep-2026; el de **doble facturación con ASR NO está abandonado**, sigue elegible y es el que ha operado todo hasta esa fecha — decisión del dueño, `DECISIONES.md`. Dos: todo documento tiene su cancelación o su reversa (`DESHACER.md`, ocho pasos construidos) y **ninguna borra nada**.

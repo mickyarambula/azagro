@@ -18,6 +18,8 @@ Este documento es el mapa de lo que una distribuidora así necesita, capacidad p
 
 Lo que ya está sólido y no hay que volver a tocar: el kardex y su trazabilidad, bodegas múltiples, la cadena SOL→COT→PV→ENV→FV con parciales por evento, la cartera del lado cliente (cobro, mora, pronto pago, TC, estado de cuenta, aging, recordatorios), las cuatro reversas y la cancelación en cascada, el P&L por pedido y consolidado, el inicio, y la importación del corte.
 
+**El tipo de cambio** (§ 11) es lo que más pesa: el TC se congela bien del lado cliente (cotización → pedido → FV → cobro con ATC), pero **el costo no tiene moneda en ningún lado** — un costo en dólares que llega a una cotización en pesos se precia como pesos, el kardex pondera dólares con pesos, la OC desde RFQ nace con TC = 1, y una FP en dólares se paga mezclando pesos contra un saldo en dólares sin diferencial. **El costo del proveedor con vigencia** (§ 10): la vigencia al cliente sí sirve de molde; del lado proveedor hoy no hay nada que fechar.
+
 **El plazo "cosecha"** (§ 6): existe en el sistema y el dueño acaba de decir que no existe en su operación. Está muy poco enredado: es un clon de "fecha" con otra etiqueta; quitarlo de pantalla es una línea, quitarlo del todo son ~6 archivos y un archivo de pruebas.
 
 ---
@@ -61,7 +63,7 @@ Lo que ya está sólido y no hay que volver a tocar: el kardex y su trazabilidad
 
 | # | Capacidad | Estado | Dónde / qué hay | Qué falta |
 |---|---|---|---|---|
-| 3.1 | Listas de precios por cliente, por grupo/zona | ✗ | `products.list_price` único por empresa; `partner_products` kind `sell` solo **registra** el último precio pactado (`links.ts:14-27`) y ningún camino de precio lo lee. `group_name` es texto libre para filtrar. | No hay lista ni precio pactado reutilizable; cada cotización recalcula desde cero. |
+| 3.1 | Listas de precios por cliente, por grupo/zona | ✗ | `products.list_price` único por empresa; `partner_products` kind `sell` solo **registra** el último precio pactado (`links.ts:14-27`) y ningún camino de precio lo lee. `group_name` es texto libre para filtrar. | No hay lista ni precio pactado reutilizable; cada cotización recalcula desde cero. **Corrección del dueño (17-sep): no se construyen listas** — lo que se guarda es el costo del proveedor con vigencia (§ 10). |
 | 3.2 | Escalón de precio por volumen | ✗ | La única "escalera" es de plazos (`ladder.ts`), no de cantidad. | — |
 | 3.3 | Precio pactado / fijo por partida frente a la regla 8 | ◐ | `createQuote` acepta `cashPrice`/`creditPrice` por partida (`ops.ts:865-880`) y despeja el margen hacia atrás (`marginFromPrice`, `margins.ts:153-157`). | Queda como margen implícito de ESA cotización, no como lista. Conviven sin contradicción con la regla 8 porque no hay segundo camino de precio. Si un día hay lista o descuento, la pregunta de diseño es si resta antes del margen (cambia la utilidad real) o después. |
 | 3.4 | Descuento comercial por volumen, línea o cliente (distinto del pronto pago) | ✗ | Sin `discount` en `sales_lines` ni `quote_lines`; todo "descuento" del código es el pronto pago financiero (`ops.ts:2098-2176`). | El único modo de bajar un precio es bajar el margen. |
@@ -149,41 +151,67 @@ El dueño acaba de corregir: en su operación **no existe** el plazo "a cosecha"
 
 ## 7. Hallazgos nuevos del barrido (no estaban en `AUDITORIA.md`)
 
-Candados sin salida y defectos que salieron al levantar el mapa, sin severidad asignada (van a la ronda que les toque):
+Candados sin salida y defectos que salieron al levantar el mapa, sin severidad asignada (van a la ronda que les toque). Los marcados **$** tocan dinero directamente.
 
 1. **Reasignar vendedor a un cliente existente es imposible por pantalla** (3.13) — `savePartner` nunca toca `seller_id`.
-2. **La guía de carga se sobrescribe entre entregas parciales** y no imprime lo del evento (2.11) — incompatible con el bloque de parciales que el propio sistema construyó.
-3. **El flete nunca entra al costo del kardex** (1.6); el costo financiero corre sobre el flete estimado y no el real.
-4. **Gasto ligado solo a `po_id` queda huérfano** del P&L (1.7).
-5. **FP en USD sin diferencial cambiario** (4.5) — ya anotado como nota al margen; ahora con el sitio exacto.
+2. **La guía de carga se sobrescribe entre entregas parciales** y no imprime lo del evento (2.11).
+3. **$ El flete nunca entra al costo del kardex** (1.6); el costo financiero corre sobre el flete estimado y no el real.
+4. **$ Gasto ligado solo a `po_id` queda huérfano** del P&L (1.7).
+5. **$ FP en USD sin diferencial cambiario** (4.5, § 11).
 6. **No se puede crear una cuenta de banco** desde la app (4.7).
 7. **Gastos y movimientos bancarios sueltos sin bitácora**; folio `GAS-` por `count(*)+1` (4.8).
 8. **Kardex en pantalla capado a 200 movimientos de toda la empresa** (2.9).
 9. **Sin bandera activo/inactivo en productos** (2.8).
 10. **`applyRfqWinners` y la creación de OC en `decideQuote` fuera de `withTx`**; folios PV/OC/SC por `count(*)+1` (1.2).
-11. **El sobrante de un cobro se descarta en silencio** (`ops.ts:1994`) — consecuencia directa de que no exista el anticipo (3.5).
+11. **$ El sobrante de un cobro se descarta en silencio** (`ops.ts:1994`) — consecuencia de que no exista el anticipo (3.5).
 12. Comentario obsoleto del #13 en `cpo.ts:57-58`.
+13. **$ El costo no tiene moneda en ningún lado** (§ 11.2): `products.cost`, `ref_cost`, `quote_lines.cost`, `purchase_lines.unit_price` y el promedio del kardex son números sin unidad; `applyRfqWinners` copia el bid ganador crudo a `quote_lines.cost` (`rfq.ts:236-241`) aunque la RFQ sea en USD y la cotización en MXN; `assertCostForCredit` solo exige `cost > 0`.
+14. **$ `applyRfqWinners` crea la OC con `fx_rate = 1` hardcodeado** (`rfq.ts:283-287`) aunque la RFQ sea en USD — viola la regla 9.
+15. **$ `dealPnlCore` resta `po_cost` crudo contra `saleUnit` sin convertir moneda** (`reports.ts:296-326`): el margen de un pedido con moneda mixta no es margen en ninguna de las dos.
+16. **$ Pago a una FP en USD: la pantalla ofrece TC y tratamiento, el servidor los ignora** (`ops.ts:1973-1996`): pesos depositados se aplican 1:1 contra un saldo en dólares.
+17. **FP normal en USD (`amount` crudo en USD, sin `amount_fx`) y FP del corte (`amount` en pesos) conviven en `invoices` sin nada que las distinga** (`azagro.ts:1345-1372, 1606-1609` vs `cutover-core.ts:356-379`).
+18. **El TC de cotización y pedido no se revalida contra `fx_rates` al guardar** (a diferencia de la TIIE, `ops.ts:911-919`): `quotes.tsx:450` y `orders.ts:551-553` aceptan cualquier número; `saveOrder` propone el último renglón de la tabla aunque sea futuro (`orders.ts:113-115`).
+19. **`saveFx` pisa el TC de una fecha ya usada** (`ops.ts:544`, `on conflict do update`) sin versión.
+20. **El bloque «Dólar americano» del estado de cuenta imprime pesos con signo US$** (`statements.tsx:76-78,183-221`, `doc-text.ts:200-217`): `r.cargo`/`r.saldo` son `invoices.amount`, que en una FV USD es el importe en MXN.
+21. **La estimación del diferencial en el estado de cuenta abierto usa `amount_fx` completo y un solo `fx_paid`** (`ops.ts:2491-2494`), no lo abierto ni un promedio ponderado — el cobro sí lo hace bien (`fxPaymentSplit`).
+22. **`rememberTrade` pisa `partner_products.unit_price` sin fecha, origen ni bitácora** (`links.ts:144-156`); `vendor_rfq_bids` no tiene fecha, moneda ni vigencia (migración 0010:9-40).
+23. **Sin reporte de posición en moneda extranjera** ni revaluación de saldos abiertos (§ 11.4).
 
 ---
 
-## 8. Preguntas que el mapa levanta
+## 8. Preguntas: las contestadas contra el código y las que sí son decisión de negocio
 
-Las que ya están abiertas se citan por clave (no se reabren): **H4c** NC/devolución a proveedor · **H5** lotes y caducidad · **H6** UOM · **L8a** costo en ajuste de entrada · **D-C** cuenta con Santa Rosa · **4.2** comisión y FEGA de la mora en el circuito · **4.5** quién absorbe el pronto pago en lineal · **4.13** Reportes como módulo. Decididas y sin construir: **D11-12** anticipo de cliente · **D13** reparto de un cobro.
+Criterio: esto es una distribuidora estándar y el sistema tiene que soportarlo todo. Lo que el estándar contesta solo, se contesta aquí; solo queda para el dueño lo que no se puede resolver leyendo.
 
-Nuevas, para el dueño:
-1. **Cosecha:** ¿se quita de pantalla ya (mínimo) y el motor después, o todo de una vez?
-2. **Anticipo a proveedor:** ¿existe en la operación (se paga antes de recibir)? ¿Se aplica solo contra la FP de esa compra o contra cualquier FP abierta del proveedor?
-3. **Plazo por OC:** ¿se pacta alguna vez un plazo distinto al de la ficha del proveedor para una compra puntual?
-4. **Flete:** confirmar que los proveedores traen precio puesto en destino en todos los casos; cuando Azagro paga un flete aparte, ¿debe entrar al costo del kardex (promedio) o solo al precio?
-5. **Listas de precios y descuento comercial:** ¿existen hoy en la operación (Excel, acuerdos por grupo, precio por volumen)? Si sí, ¿el descuento se aplica antes o después del margen?
-6. **Zona:** ¿los clientes se agrupan por zona para precio, vendedor o reporte?
-7. **Comisión de vendedor:** ¿se paga? ¿sobre venta, sobre cobro, sobre margen?
-8. **Mora de proveedores:** ¿alguno cobra moratorios reales?
-9. **Bancos:** ¿solo las dos cuentas Banorte, o hay más (y caja chica)?
-10. **Lotes:** ¿qué productos lo exigen hoy (agroquímicos regulados) y desde cuándo?
-11. **UOM:** ¿qué productos se compran en una unidad y se venden en otra?
-12. **Mezclas:** ¿cuándo se planea producir en casa o por maquila? (define si BOM entra en este año).
-13. **Producto inactivo:** ¿agregar la bandera, o disciplina de nombre?
+Las que ya estaban abiertas se citan por clave (no se reabren): **H4c** NC/devolución a proveedor · **H5** lotes y caducidad · **H6** UOM · **L8a** costo en ajuste de entrada · **D-C** cuenta con Santa Rosa · **4.2** comisión y FEGA de la mora en el circuito · **4.5** quién absorbe el pronto pago en lineal · **4.13** Reportes como módulo. Decididas y sin construir: **D11-12** anticipo de cliente · **D13** reparto de un cobro.
+
+### 8.1 Contestadas con el criterio de distribución estándar
+
+| Pregunta | Respuesta | Por qué |
+|---|---|---|
+| Cosecha | **Se quita.** De pantalla ya (una línea); del motor cuando se abra `order-terms.ts` por otra razón. Falta asentarlo en `DECISIONES.md`. | El dueño dijo que no existe en su operación (§ 6). |
+| Anticipo a proveedor | **Se soporta**, aplicable contra cualquier FP abierta del proveedor — el espejo de la Decisión 12. | Toda distribuidora paga anticipos a proveedores; el estándar no distingue "la FP que lo originó". |
+| Plazo distinto por OC | **Se soporta**: la ficha propone, la OC puede pactar otro. | Es el mismo patrón que ya tiene el cliente (política en la ficha, el pedido la propone). |
+| Flete que Azagro paga aparte | **Entra al costo del kardex** (landed cost) cuando se liga a la OC; y el costo financiero corre sobre el flete real, no el estimado. Cuando el proveedor trae precio puesto, flete = 0 y nada cambia. | Estándar de valuación de inventario; hoy el flete solo vive en el precio (1.6). |
+| Listas de precios / escalón por volumen | **No se construyen.** | Corrección del dueño: no hay listas formales; lo que se guarda es el **costo del proveedor con vigencia** (§ 10). |
+| Descuento comercial | **Se soporta como renglón aparte del margen** (`discount` en la partida): el precio sale de la fórmula (regla 8) y el descuento lo baja después; el P&L reporta el margen real neto. | Estándar; hoy el único modo de bajar un precio es bajar el margen, y eso esconde la concesión. |
+| Zona | **Un campo en la ficha**, cuando un reporte lo pida. | Barato; no decide dinero. |
+| Mora que cobran proveedores | **Sin motor**: si un proveedor cobra moratorios, se captura como gasto financiero cuando llega. | El estándar no calcula intereses del lado proveedor; los registra. `reports.ts:940` queda correcto. |
+| Bancos | **Alta de cuentas desde la app, incluida caja/efectivo.** | Estándar; hoy solo las dos sembradas (4.7). |
+| UOM con conversión | **Se soporta** (unidad de compra, de venta y de kardex con factor). Qué productos lo necesitan es dato de catálogo, no decisión. | H6 queda como pregunta de dimensionamiento, no de diseño. |
+| Mezclas / BOM | **Después**: cuando se decida producir o maquilar. | El dueño ya dijo "a futuro". |
+| Producto inactivo | **Bandera `is_active`**, fuera de los selectores, conserva historial. | Estándar. |
+| Moneda del costo | **Todo costo lleva moneda; el kardex vive en pesos y convierte al recibir con el TC de la OC**; la cotización convierte el costo a su moneda con su TC congelado. | Estándar (§ 11.5); hoy es el hueco 13. |
+| Diferencial cambiario del lado proveedor | **Simétrico al del cliente**, automático al pagar, sobre lo abierto. | Estándar; hoy no existe (hueco 16). |
+| Vigencia del costo: ¿global, por familia o por producto? | **Por producto, con valor por omisión en Ajustes** (regla 9: el número vive en Ajustes; la excepción vive en el producto). | El dueño dijo que unos cambian mucho y otros poco; "por familia" exige un catálogo de familias que hoy es texto libre. |
+
+### 8.2 Las que sí son decisión de negocio (no se resuelven leyendo)
+
+1. **Comisiones a vendedores.** ¿Se pagan? ¿Sobre venta facturada, sobre cobrado, o sobre margen? Hoy no existe nada (3.14) y el estándar admite las tres bases.
+2. **Lotes y caducidad (H5): cuándo y en qué productos.** El diseño está claro (se soporta); lo que no se sabe es si hace falta en el primer trimestre o después, y para qué familias — eso mueve el orden de § 9.
+3. **Costo vencido al cotizar: ¿avisa o bloquea?** (§ 10.4). Si el costo del proveedor vence antes que la cotización al cliente, el estándar avisa y deja cotizar bajo responsabilidad del vendedor. Bloquear es una política de riesgo tuya.
+4. **Venta en pesos con costo en dólares: ¿quién absorbe el movimiento del TC entre cotizar y pagar la OC?** Hoy queda en Azagro sin que nadie lo vea (§ 11.2). Las salidas estándar son: cotizar en dólares a esos clientes, vigencia corta cuando el costo es en USD, o un aviso con el TC de referencia en el papel. La Decisión 2 ("el cliente asume el riesgo cambiario") cubre la venta en USD, no este caso.
+5. **¿La OC al proveedor en dólares se paga desde la cuenta en dólares o desde la de pesos?** Cambia si hace falta TC al pagar la FP (§ 11.3). Ambas cuentas existen.
 
 ---
 
@@ -192,28 +220,151 @@ Nuevas, para el dueño:
 Criterio: "operar" = correr la semana en paralelo con Compaq (CLAUDE.md § Siguiente 3) sin perder dinero ni datos. Sin proponer cómo construir — solo qué va antes.
 
 **A. Indispensable antes de operar en paralelo** (sin esto, la operación real se atora o pierde dinero):
-1. **Cosecha fuera de pantalla** — una línea; no se captura lo que no existe.
-2. **Anticipo de cliente (D11-12) y reparto de un cobro (D13)** — decididos hace 10 días; hoy el sobrante de un depósito se descarta y cada cobro real de un productor suele cubrir varias facturas. Son la misma pieza (saldo a favor + aplicación a N facturas).
-3. **Reasignar vendedor** — candado sin salida en un dato que filtra media aplicación.
-4. **Guía de carga por evento** — el bloque de parciales quedó cojo del lado del papel que firma el cliente; en operación real es la constancia de entrega.
-5. **Alta de cuentas de banco** — si hay una tercera cuenta o caja, hoy no cabe.
-6. **NC / devolución a proveedor (H4c)** — mercancía equivocada llega; hoy la FP se queda viva sin camino.
-7. Los cierres pendientes de `AUDITORIA.md` § 4 que tocan dinero (GRUPO F #28, J #33) — ya priorizados ahí.
+1. **Moneda del costo y del TC en compras** (§ 11, huecos 13-16): que un costo lleve moneda, que la OC desde RFQ no nazca con TC = 1, que el P&L no reste dólares contra pesos, y que pagar una FP en dólares no mezcle pesos contra dólares. Con "gran parte de la operación en dólares", esto está por encima de todo lo demás: pierde dinero en silencio en cada compra en USD.
+2. **Cosecha fuera de pantalla** — una línea; no se captura lo que no existe.
+3. **Anticipo de cliente (D11-12) y reparto de un cobro (D13)** — decididos hace 10 días; hoy el sobrante de un depósito se descarta y cada cobro real de un productor suele cubrir varias facturas. Son la misma pieza (saldo a favor + aplicación a N facturas). Con el anticipo a proveedor como espejo (8.1).
+4. **Reasignar vendedor** — candado sin salida en un dato que filtra media aplicación.
+5. **Guía de carga por evento** — el bloque de parciales quedó cojo del lado del papel que firma el cliente.
+6. **Alta de cuentas de banco** — si hay una tercera cuenta o caja, hoy no cabe.
+7. **NC / devolución a proveedor (H4c)** — mercancía equivocada llega; hoy la FP se queda viva sin camino.
+8. Los cierres pendientes de `AUDITORIA.md` § 4 que tocan dinero (GRUPO F #28, J #33) — ya priorizados ahí.
 
 **B. Necesario en el primer trimestre de operación** (se puede arrancar sin ello, pero pronto duele):
-8. **Producto inactivo** y **catálogo de producto** con ingrediente activo y presentación.
-9. **Kardex con filtro por producto y fecha en el servidor** (hoy 200 renglones de toda la empresa).
-10. **Anticipo a proveedor** (si la respuesta a la pregunta 2 es sí).
-11. **FP en USD con diferencial cambiario** (si hay compras en dólares con volumen).
-12. **Margen por producto y por familia**; **ventas por vendedor** — para que Reportes conteste lo que hoy contesta el Excel.
-13. **Bitácora en gastos y movimientos bancarios sueltos**; folios PV/OC/SC/GAS por `folio_counters`; OC desde RFQ en transacción.
-14. **Reposición real** (punto de pedido con demanda comprometida y tránsito) — hoy el mínimo avisa, no sugiere.
-15. **Conteo físico** (L8a) — el primer inventario físico contra el sistema lo va a pedir.
+9. **Costo del proveedor con vigencia** (§ 10) y el aviso "costo vence antes que la cotización" — es la pieza que sustituye a las listas de precios y la que protege el margen al cotizar.
+10. **Producto inactivo** y **catálogo de producto** con ingrediente activo y presentación.
+11. **Kardex con filtro por producto y fecha en el servidor** (hoy 200 renglones de toda la empresa).
+12. **Flete real al costo del kardex** y al costo financiero (8.1).
+13. **Descuento comercial** como renglón (8.1).
+14. **Margen por producto y por familia**; **ventas por vendedor**; **posición en moneda extranjera** — para que Reportes conteste lo que hoy contesta el Excel.
+15. **Bitácora en gastos y movimientos bancarios sueltos**; folios PV/OC/SC/GAS por `folio_counters`; OC desde RFQ en transacción; TC revalidado contra la tabla al guardar.
+16. **Reposición real** (punto de pedido con demanda comprometida y tránsito) — hoy el mínimo avisa, no sugiere.
+17. **Conteo físico** (L8a) — el primer inventario físico contra el sistema lo va a pedir.
 
 **C. Puede esperar / depende de respuestas del dueño:**
-16. **Listas de precios, escalón por volumen, descuento comercial** — solo si existen en la operación (pregunta 5); si no, la regla 8 con margen por partida ya lo cubre.
-17. **UOM con conversión (H6)** y **lotes/caducidad (H5)** — estructurales sobre el kardex; se dimensionan con las respuestas 10 y 11. Van separados (son independientes) y UOM probablemente antes que lotes.
-18. **Fórmulas / mezclas (BOM)** — el menos invasivo de los estructurales; entra cuando se decida producir o maquilar (pregunta 12).
-19. **Liquidación con Santa Rosa (D-C)** — Fase 3 del circuito lineal; hoy se lleva fuera del sistema.
-20. **Rotación, DSO, top deudores, concentración, valuación histórica, cierre de periodo, exportar cartera y estado de cuenta** — reportes y candados de madurez.
-21. **Comisiones de vendedor, zona, aprobación de OC por monto, propuesta de pago a proveedores, importar estado de cuenta bancario** — según respuestas 6, 7, 9.
+18. **UOM con conversión (H6)** y **lotes/caducidad (H5)** — estructurales sobre el kardex; van separados y UOM antes que lotes; lotes según la respuesta 8.2-2.
+19. **Fórmulas / mezclas (BOM)** — el menos invasivo de los estructurales; entra cuando se decida producir o maquilar.
+20. **Liquidación con Santa Rosa (D-C)** — Fase 3 del circuito lineal; hoy se lleva fuera del sistema.
+21. **Rotación, DSO, top deudores, concentración, valuación histórica, cierre de periodo, revaluación de saldos en USD, exportar cartera y estado de cuenta** — reportes y candados de madurez.
+22. **Comisiones de vendedor, zona, aprobación de OC por monto, propuesta de pago a proveedores, importar estado de cuenta bancario** — según 8.2-1 y volumen.
+
+---
+
+## 10. Costo del proveedor con vigencia (corrección del dueño, 17-sep-2026)
+
+**Lo que el dueño corrigió:** no hay listas de precios formales y **no se construye** un catálogo de listas con vigencias que nadie mantenga. Lo real: el costo se corrobora con el proveedor, pero si ya se cotizó hace poco se usa el que se tiene; unos productos cambian mucho y otros poco. La propuesta a evaluar: **guardar el costo del proveedor con vigencia** — cada cotización a proveedor deja el costo con su fecha y hasta cuándo vale; la siguiente vez el sistema lo propone y avisa si sigue vigente o ya venció. Se llena solo con el trabajo que ya se hace.
+
+### 10.1 El molde: la vigencia hacia el cliente, como está construida
+
+| Pieza | Dónde | Qué hace |
+|---|---|---|
+| Dato | `quotes.valid_until` (insert en `createQuote`, `ops.ts:948`) | Fecha congelada en el documento al nacer; no hay estado "vencida". |
+| Parámetro | `company_settings.quote_validity_days` (migración 0028:6) | Días en Ajustes, sin default: si no está capturado la pantalla se detiene (regla 9). La pantalla lo propone (`quotes.tsx:250`) y se congela al guardar. |
+| Regla | `quoteStillBlocks(state, validUntil, today)` (`request-lock.ts:33-38`) | Función pura, derivada por fecha en cada lectura: aceptada siempre bloquea, rechazada nunca, draft/sent solo si `validUntil ≥ hoy`. |
+| Candado con salida | `decideQuote` rechaza una vencida (`ops.ts:1583-1587`) | Salida: `duplicateQuote` (`ops.ts:1027`) o `quoteFromRequest` de nuevo (`requests.ts:821`) — tasas de HOY, la vieja se conserva con su folio. |
+| Pantalla y papel | `quotes.tsx:674` (`expired`), `:388` (`Vigencia …` en el papel) | El mismo dato leído, sin duplicarlo. |
+| Prueba | `scripts/erp-recotizar.test.mjs` | Los cuatro casos del candado y los dos caminos de recotizar. |
+
+**Veredicto: sí sirve de molde**, byte a byte en la regla (función pura fecha-vs-hoy), en el candado con salida y en la prueba. Lo que **no** calza tal cual es el parámetro: la vigencia del cliente es un número global en Ajustes; la del costo tiene que ser por producto con un valor por omisión en Ajustes, porque "unos cambian mucho y otros poco" (8.1).
+
+### 10.2 Qué guarda hoy el sistema del costo cotizado por proveedor
+
+- `vendor_rfq_bids` (migración 0010:9-40): `rfq_id, partner_id, product_id, unit_price`. **Sin fecha, sin moneda, sin vigencia.** Ninguna migración posterior le agregó nada.
+- `partner_products` kind `buy` (migración 0009:3-12): `partner_id, product_id, unit_price, notes`, único por par. **Sin fecha, sin moneda.** `rememberTrade` (`links.ts:121-168`) hace `on conflict do update set unit_price` — el último pisa al anterior sin rastro de cuándo ni de dónde vino (bid, OC adjudicada, cotización manual o captura a mano: todos escriben ahí).
+- **¿Se reúsa un costo de una RFQ anterior?** No: `createRfq` (`rfq.ts:136-180`) y `saveRfqBid` (`:182-206`) arrancan de cero; ningún sitio lee un bid anterior para proponerlo. `partner_products` solo se usa para decidir **a quién invitar** (`solicitudes.$solicitudId.tsx:186-188`), nunca para proponer un precio.
+- **¿Se sabe si un costo es de ayer o de hace tres meses?** No. `vendor_rfqs.created_at` existe, pero el `unit_price` que sobrevive en `partner_products` no sabe de qué RFQ, OC o captura salió.
+- **¿La cotización al cliente propone un costo?** Sí, pero sin proveedor: `createQuote` (`ops.ts:965-968`) → `resolveCost` (`cost.ts:20-26`): **kardex → `ref_cost` → nada**. Con RFQ, `quoteFromRequest` usa `customer_request_lines.cost`, llenado por `applyCheapest` (`requests.ts:759-801`, el bid más barato del RFQ vivo) o a mano.
+
+### 10.3 ¿Cabe encima de lo que existe? Tamaño
+
+`partner_products` es "el último precio conocido por par", no un historial: cada escritura pisa. Dos opciones, sin proponer construir:
+
+- **(a) Mínima:** dos columnas en `partner_products` (`quoted_at`, `valid_until`) + `currency`. Un solo renglón vigente por proveedor+producto; sin "cuánto costaba antes". Barata; suficiente para "propón y avisa si venció".
+- **(b) Con historial:** tabla de costos cotizados (proveedor, producto, costo, **moneda**, fecha, vence, origen: bid / OC / manual). Conserva cada captura; permite ver la curva de un producto que "cambia mucho". Es la que resuelve también el hueco 22 (sin rastro de cambios de costo).
+
+En cualquiera de las dos:
+- **Sitios de escritura** (donde el sistema se entera de un costo nuevo — todos ya existen, solo hay que fecharlos): `saveRfqBid` (`rfq.ts:182-206`), `applyRfqWinners` (`:208-311`), la OC confirmada (`createPurchase`, hoy no toca `partner_products`), y el `line.cost` tecleado en `createQuote` (`ops.ts:939,968`, hoy solo va a `quote_lines`).
+- **Sitios de lectura** (donde se propondría): la RFQ nueva (precio + fecha al lado de cada proveedor invitado), `createQuote` (un tercer origen "costo de proveedor vigente" antes de caer a `ref_cost`), la OC manual.
+- **Parámetro:** `products.cost_validity_days` con valor por omisión en Ajustes (mismo patrón que `ref_cost`, migración 0016).
+- **Regla vigente/vencido:** la función pura de 10.1, reusada.
+- **Moneda obligatoria en el costo** — es el mismo hueco del § 11: sin moneda, fechar el costo no basta.
+
+### 10.4 Lo que cuesta dinero: vigencia del costo vs vigencia de la cotización
+
+**¿El sistema lo vigila hoy?** No al cotizar. La única comparación costo-cotizado vs costo-real ocurre **después de la venta**, en `dealPnlCore` (`reports.ts:312-326`): "el costo real manda: OC del proveedor, luego el de la cotización". Si el proveedor subió entre cotizar y comprar, el P&L del pedido ya trae el costo más caro — **en silencio**: no hay aviso, ni columna "diferencia contra lo cotizado", solo una utilidad más baja que la proyectada. `createQuote`, `decideQuote` y `reviseQuote` no comparan nada porque en ese momento el costo real no existe, y el costo con fecha tampoco.
+
+**Cómo avisarlo al cotizar (diseño, sin código):** con el costo fechado de 10.3, al cotizar se compara `costo.vence < cotización.valid_until` y la pantalla dice, con fechas: "El costo de [producto] con [proveedor] vence el [fecha]; la cotización vale hasta el [fecha]: [N] días de margen expuesto". Nunca en el papel (regla 7). Que avise o bloquee es la decisión 8.2-3; el estándar avisa. Complemento natural: al confirmar la OC real, si su costo difiere del cotizado, un renglón en el P&L del pedido que diga cuánto se movió — hoy ese número existe pero no se enseña.
+
+---
+
+## 11. El tipo de cambio
+
+Gran parte de la operación es en dólares y el TC mueve los precios. Esta sección recorre el TC de punta a punta contra el código del 17-sep-2026.
+
+### 11.1 Dónde se congela el TC hoy
+
+| Documento / momento | De dónde sale | Dónde se guarda | ¿Cambia después? |
+|---|---|---|---|
+| Tabla `fx_rates` (migración 0003:87-93) | Admin captura por fecha (`saveFx`, `ops.ts:531-555`) | `fx_rates(date, usd_mxn)`, único por fecha | `on conflict do update` (`ops.ts:544`): se pisa sin versión; bitácora sí. |
+| Cotización nueva (`createQuote`, `ops.ts:843-955`) | La pantalla propone `nearestRate(tabla, hoy)` (`quotes.tsx:247-249`) en un campo **editable** (`:450`) | `quotes.fx_rate` (`ops.ts:948-952`) | El servidor **no revalida** contra la tabla (la TIIE sí, `ops.ts:911-919`); solo exige `> 0`. |
+| `reviseQuote` (`ops.ts:1228-1420`) | No toca `fx_rate` | Congelado desde la original | — |
+| Duplicar vencida/rechazada (`ops.ts:1040-1226`) | `nearestRate` al duplicar (`:1112-1118`); sin tabla se detiene | `quotes.fx_rate` nuevo | — |
+| Pedido desde cotización (`decideQuote`) | **Hereda** `q.fx_rate` (`ops.ts:1672`) | `sales_orders.fx_rate` | No se recalcula. |
+| Pedido directo (`saveOrder`, `orders.ts:537-553`) | La pantalla propone el **último renglón** de la tabla aunque sea futuro (`orders.ts:113-115`), editable | `sales_orders.fx_rate` | Sin revalidación. |
+| OC desde cotización aceptada (`decideQuote`) | `q.fx_rate` — **el TC pactado con el cliente** (`ops.ts:1719-1721`) | `purchase_orders.fx_rate` | El TC del proveedor nunca se captura aparte. |
+| OC desde RFQ de inventario (`applyRfqWinners`) | **`fx_rate = 1` hardcodeado** (`rfq.ts:283-287`) aunque `vendor_rfqs.currency = 'USD'` | `purchase_orders.fx_rate = 1` | Defecto: viola la regla 9. |
+| FV de entrega (`issueDeliveryInvoice`) | `so.fx_rate`, el del **pedido**, no el del día de la entrega (`azagro.ts:2003`) | `amount` en MXN, `amount_fx = mxn / fx`, `fx_agreed` (`:2059`) | No. |
+| FP por OC o por recepción (`bornSupplierDebt*`) | `po.fx_rate` | **`amount` en la moneda de la OC, sin convertir; `amount_fx` nunca se escribe** (`azagro.ts:1345-1372, 1606-1609`) | No. |
+| Cobro de FV en USD (`applyInvoicePayment`) | TC del día del pago, capturado en pantalla (`fxPaid`) | `fx_paid` (el último), `fx_result` o ATC; `fx_agreed` no cambia (`ops.ts:2076`) | Cada pago trae su TC. |
+| Corte Compaq (`cutover-core.ts:228-236, 356-379`) | `fxAtCutover` (último renglón ≤ fecha del corte; sin renglón se rechaza, D70) | `amount`/`residual` en **pesos**, `amount_fx`, `fx_agreed` — **cliente y proveedor por igual** | No. |
+
+Resumen: del lado **cliente** el TC se congela una vez (cotización), viaja al pedido y a la FV, y el cobro captura el del día con su diferencial. Del lado **proveedor** el TC de la OC es el del cliente (vía cotización) o 1 (vía RFQ), la FP nace en dólares crudos sin equivalente en pesos, y el pago no captura nada.
+
+### 11.2 Qué pasa con el margen cuando el TC se mueve
+
+**El hallazgo de fondo:** `priceSale`/`priceSaleLineal` (`pricing.ts`) reciben `cost` como número puro, sin moneda. `products.cost`, `ref_cost` (`cost.ts:39-47`), `quote_lines.cost`, `purchase_lines.unit_price` y el promedio móvil (`stock.ts:163-206`) tampoco tienen moneda. `applyRfqWinners` copia el bid ganador **tal cual** a `quote_lines.cost` (`rfq.ts:236-241`) sin comparar `vendor_rfqs.currency` con `quotes.currency`. `assertCostForCredit` (`cost.ts:55-71`) solo verifica `cost > 0`.
+
+**Caso con el código (costo 1,000 USD, TC 17.50 al cotizar, cliente en MXN, margen 20 %, sin financiamiento para simplificar):**
+
+| Etapa | Lo que hace el sistema | Lo que pasa con el dinero |
+|---|---|---|
+| Cotizar, si el costo entró por RFQ en USD | `quote_lines.cost = 1000` se precia **como pesos**: precio = 1,000 ÷ 0.80 = **1,250 MXN** | El costo real puesto es 17,500 MXN. Se prometió 1,250 por algo que cuesta 17,500. **Ninguna pantalla lo detecta.** |
+| Cotizar, si alguien capturó 17,500 MXN a mano | precio = 17,500 ÷ 0.80 = **21,875 MXN**, margen 4,375 | Correcto al cotizar; el TC 17.50 queda implícito en el precio y **la exposición nace aquí**. |
+| Confirmar | `decideQuote` hereda el TC; la OC hereda el TC del cliente (17.50) | El TC real del proveedor no se captura. |
+| Comprar / pagar la OC a 18.50 | FP en USD crudos (1,000); el pago aplica pesos contra dólares 1:1 (11.3); sin ATC de proveedor | Costo real 18,500 MXN. **Margen real 3,375 (15.4 %), no 4,375 (20 %).** La pérdida de 1,000 MXN no aparece en ningún lado. |
+| Entregar / facturar | FV en MXN al TC del pedido | — |
+| P&L del pedido | `dealPnlCore` usa `po_cost = purchase_lines.unit_price` **crudo** (1,000, en USD) contra `saleUnit` en MXN (`reports.ts:296-326`) | El "margen" mezcla dólares con pesos: no es margen en ninguna moneda. |
+
+**Cliente en USD y Azagro compra en USD** (la cobertura natural): el margen queda en dólares *si* las dos patas quedaron en USD — pero el sistema no lo garantiza: si la OC nació con `fx_rate = 1` (RFQ) o en MXN por descuido, el margen queda expuesto sin que nadie lo haya decidido ni lo vea.
+
+**El caso real del Excel (31-ago, `EXCEL_VS_SISTEMA.md` § 4), del lado cliente:** FV de 10,000 USD a TC pactado 19.00 → `amount = 190,000`, `amount_fx = 10,000`. El cliente deposita 186,000 MXN (TC real 18.60). Hoy `fxPaymentSplit` (`credit.ts:389-405`) escala contra lo abierto: 186,000 ÷ 18.60 = 10,000 USD → la factura queda pagada en dólares; el diferencial 10,000 × (19.00 − 18.60) = **4,000 MXN** se trata según `fxTreatment` (`ops.ts:2054-2089`): pérdida en `fx_result`, o un **ATC por cobrar** de 4,000 que queda abierto. Son exactamente las dos salidas del Excel ("se asume como pérdida" o "quedan $4,000 POR COBRAR"). **Este lado está bien construido.** Lo que el Excel hacía y el sistema no: la vista bimoneda del estado de cuenta (hoy imprime pesos con signo US$, hueco 20) y el cobro de mora en dólares (las FI son siempre en pesos).
+
+### 11.3 ¿FP en USD y FV en USD usan el mismo TC?
+
+**No, y nada los compara.** En un pedido directo/brokeraje (`deliverPartial`, `azagro.ts:1824-1913`): `issueDeliveryInvoice` (`:1881`) usa `so.fx_rate` (pactado con el cliente); `bornSupplierDebtByReceipt` (`:1901-1909`) usa `po.fx_rate` (de esa OC). Pueden diferir libremente — una OC a 18.00 sirviendo una venta pactada a 17.50 — y `dealPnlCore` no tiene una línea "diferencial FP↔FV": resta crudos.
+
+Además, la FP en USD **no se paga bien**: `applyInvoicePayment` solo activa el tratamiento cambiario si `kind === 'customer'` (`ops.ts:1973-1974`); para proveedor cae a `applied = min(amount, residual)` (`:1993-1996`) y `fxPaid` solo sirve para un memo (`:2043`). La pantalla de `/credit` ofrece los mismos controles de TC y tratamiento para pagar a proveedor, así que la persona los usa creyendo que se registran. Como el `residual` está en dólares crudos, **pesos depositados se aplican 1:1 contra dólares**: pagar 18,500 MXN a una FP de 1,000 USD la deja con residual −17,500. Si se paga desde la cuenta Banorte USD el importe cuadra, pero sigue sin diferencial ni equivalente en pesos para el P&L.
+
+### 11.4 El diferencial cambiario: qué captura el ATC y qué se pierde
+
+| Caso | Hoy | Se pierde / se gana sin verse |
+|---|---|---|
+| (a) FP en USD pagada a otro TC | Nada: `isUsdCustomer` excluye proveedor | **Todo** el diferencial del lado compras. Y el saldo de la FP queda mal si el pago fue en pesos. |
+| (b) FV en USD cobrada parcialmente | El abono real está bien (`fxPaymentSplit` contra `residualMxn`, tratamiento por pago) | La **estimación** del estado de cuenta abierto (`ops.ts:2491-2494`) usa `amount_fx` completo y un solo `fx_paid`: con dos pagos a TC distintos, lo que se ve antes de liquidar no es lo pendiente. |
+| (c) Pedido en USD con costo en USD | `dealPnlCore` resta crudos sin conversión | No hay "diferencial" identificable: hay un margen sin unidades. |
+| (d) Reversa de un cobro con ATC | Correcta (`reversal.ts:207-375`): reconstruye `fx_result`, `fx_paid`, marca el ATC | Solo del lado que sí se capturó; del proveedor no hay nada que revertir. |
+| (e) El corte | FP USD del corte entra en **pesos** con `amount_fx` (D70) | Convive con la FP normal en **dólares crudos** en la misma tabla, sin columna que las distinga (hueco 17): cualquier suma por `kind='supplier'` mezcla. |
+| Posición en moneda extranjera / revaluación | No existe | Nadie sabe cuánto se debe y cuánto nos deben en USD hoy, ni cuánto vale eso al TC de hoy. |
+
+### 11.5 Qué hace un ERP de distribución que vende en dos monedas (Odoo, como referencia abierta)
+
+Odoo, con una empresa cuya moneda es MXN, hace esto — y es lo que hace cualquier ERP contable serio:
+
+1. **Una moneda de la empresa; todo documento lleva la suya y su TC a su fecha.** `res.currency.rate` es una tabla por fecha (se puede alimentar sola de Banxico). Cada factura, factura de proveedor y pago guarda el importe en su moneda **y** el equivalente en MXN al TC de **su propia fecha** (fecha de factura, fecha de pago). El TC de una cotización es referencia; **la factura re-convierte a la fecha de factura**.
+2. **La deuda en moneda extranjera es la verdad.** Una factura de 10,000 USD está pagada cuando se recibieron 10,000 USD, punto. Si el cliente paga en MXN, el pago se convierte al TC de la fecha del pago y lo que quede en USD sigue abierto — el "por cobrar" del Excel sale solo, sin documento aparte.
+3. **El diferencial realizado es automático y simétrico.** Al conciliar pago contra factura, la diferencia en MXN entre el TC de la factura y el del pago se asienta sola en el diario de diferencias cambiarias (ganancia o pérdida), **sobre lo que se está liquidando**, del lado cliente **y** del lado proveedor por igual. No hay decisión "por lote"; la utilidad/pérdida cambiaria es un resultado, no una negociación.
+4. **El no realizado se revalúa al cierre.** Reporte de "revaluación de moneda extranjera": los saldos abiertos en USD se valúan al TC de fin de periodo y la diferencia se asienta con reversa automática al día siguiente. Contesta "¿cuánto valen hoy mis cuentas en dólares?".
+5. **El inventario se valúa en la moneda de la empresa, siempre.** Una OC en USD se convierte a MXN al TC de la recepción (o de la factura del proveedor, con ajuste por diferencia de precio); el promedio móvil nunca mezcla monedas. El costo del producto (`standard_price`) es MXN.
+6. **Precios y costos con moneda explícita.** Una lista de precios tiene moneda; un costo de proveedor (`product.supplierinfo`) tiene moneda, fecha y vigencia (`date_start`/`date_end`) — exactamente la pieza de § 10, con historial.
+7. **Cotizar en pesos con costo en dólares no lo protege nadie**: ni Odoo. Es un control de negocio: cotizar en USD, vigencia corta, o cláusula de TC en el papel (8.2-4).
+
+**Dónde diverge Azagro del estándar (los huecos 13-23 en una línea cada uno):** el costo y el kardex no tienen moneda (5, 6); el diferencial solo existe del lado cliente (3); la FP en USD no tiene equivalente en pesos ni se paga con TC (1, 3); no hay revaluación ni posición (4); el TC de cotización y pedido se captura libre sin revalidar (1); la FV toma el TC del pedido, no de la fecha de factura (1 — esto es una decisión de negocio de Azagro, "TC pactado", que el Excel también seguía; conviene dejarla así y decirlo). Lo que Azagro tiene y Odoo no: el **ATC "por cobrar / por devolver"** como documento negociado con el cliente — es una práctica real del negocio (Excel § 4), no un defecto.
