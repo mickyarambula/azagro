@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { exchangeLegs, fxResultDeltaFor, isUsdFx, loadFxTable, missingFxMessage, mxnInvoicePaidInUsd, mxnToCostCurrency, settleMode, usdBankSettlement, usdCashAverage } from "@/lib/erp/fx";
+import { exchangeLegs, fxResultDeltaFor, invoiceShown, isUsdFx, loadFxTable, missingFxMessage, mxnInvoicePaidInUsd, mxnToCostCurrency, saleToMxn, settleMode, snapOrConvert, usdBankSettlement, usdCashAverage } from "@/lib/erp/fx";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
@@ -895,6 +895,16 @@ export const createQuote = createServerFn({ method: "POST" })
     if (data.currency === "USD" && !(data.fxRate > 0)) {
       throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de cotizar en dólares.");
     }
+    // Decisión 82: los precios llegan en la moneda de la cotización; el motor,
+    // el margen que se despeja y la base viven en pesos. Se convierte AQUÍ, antes
+    // de armar `priced`.
+    if (data.currency === "USD") {
+      for (const l of data.lines) {
+        l.unitPrice = saleToMxn({ price: l.unitPrice, currency: "USD", fx: data.fxRate, what: "la cotización en dólares" });
+        if (l.cashPrice != null) l.cashPrice = saleToMxn({ price: l.cashPrice, currency: "USD", fx: data.fxRate, what: "la cotización en dólares" });
+        if (l.creditPrice != null) l.creditPrice = saleToMxn({ price: l.creditPrice, currency: "USD", fx: data.fxRate, what: "la cotización en dólares" });
+      }
+    }
     // A crédito el precio lleva financiamiento; sin costo saldría en cero.
     // De contado (oferta solo contado o plazo 0) no hay nada que financiar.
     const plazo = (data.priceOffer ?? "both") === "cash" ? 0 : data.creditDays;
@@ -1265,13 +1275,28 @@ export const reviseQuote = createServerFn({ method: "POST" })
       spread: string;
       circuit_code: string | null;
       commission_rate: string | null;
+      currency: string;
+      fx_rate: string;
     }>`
       select id, state, name, coalesce(revision,1) as revision, coalesce(price_offer,'both') as price_offer,
         coalesce(credit_days,0)::int as credit_days, coalesce(tiie,0)::text as tiie, coalesce(spread,0)::text as spread, circuit_code,
-        commission_rate::text as commission_rate
+        commission_rate::text as commission_rate, coalesce(currency,'MXN') as currency, coalesce(fx_rate,1)::text as fx_rate
       from quotes where id = ${data.quoteId} and company_id = ${cid}
     `;
     if (!q[0]) throw new Error("Cotización no encontrada");
+    // Decisión 82: la pantalla manda los precios en la moneda de la cotización.
+    // En dólares se convierten a pesos antes de comparar, totalizar y guardar; si
+    // el precio no cambió, se conserva el que ya estaba en pesos.
+    if (q[0].currency === "USD") {
+      const prev = await sql<{ product_id: number; cash_price: string; credit_price: string }>`
+        select product_id, cash_price::text, credit_price::text from quote_lines where quote_id = ${q[0].id}
+      `;
+      for (const l of data.lines) {
+        const p = prev.find((x) => x.product_id === l.productId);
+        l.cashPrice = snapOrConvert({ sent: l.cashPrice, prevMxn: p?.cash_price, currency: "USD", fx: q[0].fx_rate, what: `la revisión de ${q[0].name} en dólares` });
+        l.creditPrice = snapOrConvert({ sent: l.creditPrice, prevMxn: p?.credit_price, currency: "USD", fx: q[0].fx_rate, what: `la revisión de ${q[0].name} en dólares` });
+      }
+    }
     // Una cotización aceptada normalmente ya no se toca. La excepción: su
     // pedido sigue en BORRADOR — ahí sí se revisa (es donde se agrega una
     // partida al pedido, punto C3), y al guardar el pedido se actualiza.
@@ -2628,6 +2653,15 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           : 0;
         const liveFx = Math.max(0, fxDiff - Number(inv.fx_invoiced));
         const dueNow = saldo + liveMora + liveFx;
+        // LA FILA SALE EN LA MONEDA DE LA FACTURA (L4a, Decisión 82). Todo lo
+        // de arriba se calculó en pesos (cargo, abonos, saldo, interés, FEGA,
+        // pronto pago: la línea de crédito es en pesos y el interés corre
+        // sobre pesos). Una FV en dólares se enseña en dólares al TC pactado:
+        // como el interés es lineal en el capital, dividir cada importe por el
+        // TC da exactamente el interés sobre el capital en dólares. El ajuste
+        // por TC (utCambiaria) es pesos por naturaleza y no se divide.
+        const showFx = inv.currency === "USD" && isUsdFx(inv.fx_agreed) && Number(inv.amount_fx) !== 0 ? Number(inv.fx_agreed) : 1;
+        const u = (n: number) => (showFx === 1 ? n : Math.round((n / showFx) * 100) / 100);
         const plazo = inv.credit_days || partner.payment_days || 0;
         const { serie, folio } = splitDocName(inv.name);
         const line = productDoc && !sinTiie
@@ -2680,18 +2714,18 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               ],
             }
           : explainInterest({
-              capital: line?.capital ?? mora.capital,
+              capital: u(line?.capital ?? mora.capital),
               days: line?.daysVencidos ?? mora.daysOverdue,
               tiie: mora.tiie,
               tiieDate: tiiePick?.date,
               spread: mora.spread,
-              interest: line?.interest ?? mora.interest,
-              fega: line?.comisionFega ?? mora.fega,
+              interest: u(line?.interest ?? mora.interest),
+              fega: u(line?.comisionFega ?? mora.fega),
               fegaRate: tasas.fegaRate,
               commissionRate: tasas.commissionRate,
               currency: inv.currency,
               dueDate: inv.due_date,
-              residual: saldo,
+              residual: u(saldo),
             });
         const dueCheck = validateDueDates({
           issue: inv.date,
@@ -2704,8 +2738,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           const tasa = `TIIE de emisión ${rateLabel(tiieIssuePick!)} + spread ASR ${pctRate(pol.asrSpread)} (tasa de costo, no la de cobro) = ${pctRate(bono.rate)}`;
           formula.lines.push(
             bonoEstimado
-              ? `Estimación de pronto pago: si pagara el ${dateDMY(fechaBono)} —día ${bono.lived} de la factura, antes del umbral de ${pol.earlyPayDays} d— se le bonificarían los ${bono.days} d del plazo financiero que no consumió: cargo × (${tasa}) × ${bono.days} d / 360 = ${bono.bonus.toFixed(2)}. Es una estimación, no un cargo: se aplica el día que pague.`
-              : `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays} d). Bonificación = cargo × (${tasa}) × ${bono.days} d no usados / 360 = ${bono.bonus.toFixed(2)}.`,
+              ? `Estimación de pronto pago: si pagara el ${dateDMY(fechaBono)} —día ${bono.lived} de la factura, antes del umbral de ${pol.earlyPayDays} d— se le bonificarían los ${bono.days} d del plazo financiero que no consumió: cargo × (${tasa}) × ${bono.days} d / 360 = ${u(bono.bonus).toFixed(2)}. Es una estimación, no un cargo: se aplica el día que pague.`
+              : `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays} d). Bonificación = cargo × (${tasa}) × ${bono.days} d no usados / 360 = ${u(bono.bonus).toFixed(2)}.`,
           );
         } else if (sinTiieBono) {
           formula.lines.push(`Pronto pago no estimado: ${missingRateMessage(inv.date, `emisión de ${inv.name}`)}`);
@@ -2737,17 +2771,19 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           products: lines.filter((l) => l.invoice_id === inv.id),
           serie,
           folio,
-          cargo,
-          saldo,
+          cargo: u(cargo),
+          saldo: u(saldo),
+          // En pesos siempre, para sumar la cartera del socio sin mezclar monedas.
+          saldoMxn: saldo,
           daysOverdue: mora.daysOverdue,
           daysVence: line?.daysVence ?? 0,
           daysVencidos: line?.daysVencidos ?? mora.daysOverdue,
           annualRate: line?.annualRate ?? mora.annualRate,
-          liveMora,
+          liveMora: u(liveMora),
           liveFx,
           utCambiaria: fxDiff,
-          dueNow,
-          abono,
+          dueNow: u(dueNow),
+          abono: u(abono),
           fechaAbono,
           fechaPago: line?.fechaPago ?? fechaAbono ?? asOf,
           moraDue,
@@ -2756,7 +2792,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           // factura abierta es una estimación al día del corte.
           vencido,
           diasPorVencer: line?.diasPorVencer ?? Math.max(0, -diasVencidos),
-          bonificacion: bono.applies ? bono.bonus : 0,
+          bonificacion: bono.applies ? u(bono.bonus) : 0,
           bonificacionDias: bono.applies ? bono.days : 0,
           bonificacionTasa: bono.applies ? bono.rate : 0,
           bonificacionEstimada: bonoEstimado,
@@ -2770,10 +2806,10 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           cobraFega: cobra?.fega ?? null,
           sinPolitica,
           plazo,
-          interes: line?.interest ?? mora.interest,
-          fega: mora.fega,
-          comisionFega: line?.comisionFega ?? 0,
-          totalFinanciero: line?.totalFinanciero ?? mora.mora,
+          interes: u(line?.interest ?? mora.interest),
+          fega: u(mora.fega),
+          comisionFega: u(line?.comisionFega ?? 0),
+          totalFinanciero: u(line?.totalFinanciero ?? mora.mora),
           tiie: sinTiie ? null : tiie,
           tiieDate: tiiePick?.date ?? null,
           sinTiie,
@@ -2786,8 +2822,8 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       });
 
       const customerRows = rows.filter((r) => r.kind === "customer");
-      const ar = customerRows.reduce((s, r) => s + r.saldo, 0);
-      const ap = rows.filter((r) => r.kind === "supplier").reduce((s, r) => s + r.saldo, 0);
+      const ar = customerRows.reduce((s, r) => s + r.saldoMxn, 0);
+      const ap = rows.filter((r) => r.kind === "supplier").reduce((s, r) => s + r.saldoMxn, 0);
       const byCurrency = ["MXN", "USD"].map((cur) => {
         const set = customerRows.filter((r) => (r.currency || "MXN") === cur && (r.inv_class || "product") === "product");
         return {

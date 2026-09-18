@@ -1,3 +1,4 @@
+import { reshowPrice, salePriceShown } from "@/lib/erp/fx";
 import { Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -192,6 +193,8 @@ export function OrderFields({
     return true;
   });
 
+  // El TC se escribe en un borrador local y entra al pedido al salir del campo (no por tecla).
+  const [fxDraft, setFxDraft] = useState<string | null>(null);
   function setLine(i: number, patch: Partial<OrderLine>) {
     setForm({ ...form, lines: form.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
   }
@@ -200,7 +203,7 @@ export function OrderFields({
     const p = lookups.products[0];
     setForm({
       ...form,
-      lines: [...form.lines, { productId: p?.id ?? 0, qty: 1, unitPrice: num(p?.list_price), uom: p?.uom ?? "TM" }],
+      lines: [...form.lines, { productId: p?.id ?? 0, qty: 1, unitPrice: salePriceShown(p?.list_price ?? 0, form.currency, form.fxRate), uom: p?.uom ?? "TM" }],
     });
   }
 
@@ -336,7 +339,11 @@ export function OrderFields({
               onChange={(e) => {
                 const currency = e.target.value as "MXN" | "USD";
                 // En USD se propone el TC de la tabla; 0 = no hay y el servidor no deja guardar.
-                setForm({ ...form, currency, fxRate: currency === "MXN" ? 1 : form.fxRate || lookups.fx?.rate || 0 });
+                const fxRate = currency === "MXN" ? 1 : form.fxRate || lookups.fx?.rate || 0;
+                // Los precios se capturan en la moneda del pedido (Decisión 82): al cambiarla,
+                // lo ya escrito se lleva a la moneda nueva con los dos TC, no se deja como número suelto.
+                const lines = form.lines.map((l) => ({ ...l, unitPrice: reshowPrice(l.unitPrice, { currency: form.currency, fx: form.fxRate }, { currency, fx: fxRate }) }));
+                setForm({ ...form, currency, fxRate, lines });
               }}
             >
               <option value="USD">USD</option>
@@ -349,8 +356,16 @@ export function OrderFields({
               type="number"
               step="0.0001"
               disabled={locked}
-              value={form.fxRate}
-              onChange={(e) => setForm({ ...form, fxRate: Number(e.target.value) })}
+              value={fxDraft ?? form.fxRate}
+              onChange={(e) => setFxDraft(e.target.value)}
+              onBlur={() => {
+                if (fxDraft == null) return;
+                const fxRate = Number(fxDraft) || 0;
+                // Al terminar de escribir el TC: lo escrito sin TC era pesos; con TC ya son dólares y se quedan.
+                const lines = form.lines.map((l) => ({ ...l, unitPrice: reshowPrice(l.unitPrice, { currency: form.currency, fx: form.fxRate }, { currency: form.currency, fx: fxRate }) }));
+                setForm({ ...form, fxRate, lines });
+                setFxDraft(null);
+              }}
               title="Dólar pactado"
             />
             <span className="self-center text-xs text-[color:var(--erp-muted)]">
@@ -550,7 +565,7 @@ export function OrderFields({
               <th className="px-3 py-2.5 font-medium">Producto</th>
               <th className="px-3 py-2.5 font-medium">UoM</th>
               <th className="px-3 py-2.5 text-right font-medium">Cant.</th>
-              <th className="px-3 py-2.5 text-right font-medium">Precio / UoM</th>
+              <th className="px-3 py-2.5 text-right font-medium">Precio / UoM ({form.currency})</th>
               <th className="px-3 py-2.5 text-right font-medium">Importe</th>
               <th className="w-10" />
             </tr>
@@ -569,7 +584,7 @@ export function OrderFields({
                       onChange={(v) => {
                         const id = Number(v);
                         const prod = lookups.products.find((x) => x.id === id);
-                        setLine(i, { productId: id, uom: prod?.uom ?? line.uom, unitPrice: num(prod?.list_price) || line.unitPrice });
+                        setLine(i, { productId: id, uom: prod?.uom ?? line.uom, unitPrice: salePriceShown(prod?.list_price ?? 0, form.currency, form.fxRate) || line.unitPrice });
                       }}
                     />
                   </td>

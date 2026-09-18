@@ -63,7 +63,7 @@ async function cid(sql: Sql, userId: string) {
 }
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
-type Doc = { id: number; name: string; amount: number; residual: number; inv_class: string };
+type Doc = { id: number; name: string; amount: number; residual: number; inv_class: string; amount_fx?: number; fx_agreed?: number };
 type Chain = {
   preview: DeliveryReversalPreview;
   companyId: number;
@@ -154,8 +154,9 @@ async function chainForDelivery(sql: Sql, companyId: number, soId: number, role:
   }
 
   // La FV viva del pedido.
-  const docs = await sql<{ id: number; name: string; amount: string; residual: string; inv_class: string; origin: string; folio_fiscal: string; uuid_fiscal: string; paid: string; reversed_by: string | null }>`
+  const docs = await sql<{ id: number; name: string; amount: string; residual: string; inv_class: string; origin: string; folio_fiscal: string; uuid_fiscal: string; paid: string; reversed_by: string | null; amount_fx: string; fx_agreed: string }>`
     select i.id, i.name, i.amount::text, i.residual::text, coalesce(i.inv_class,'product') as inv_class, coalesce(i.origin,'') as origin,
+      coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,1)::text as fx_agreed,
       coalesce(i.folio_fiscal,'') as folio_fiscal, coalesce(i.uuid_fiscal,'') as uuid_fiscal,
       coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid,
       (select r.name from invoices r where r.reverses_id = i.id limit 1) as reversed_by
@@ -170,7 +171,7 @@ async function chainForDelivery(sql: Sql, companyId: number, soId: number, role:
     blockers.push(alreadyReversed ? `La entrega de ${s.name} ya está revertida (${alreadyReversed.reversed_by}).` : `${s.name} no tiene factura viva: no hay entrega que revertir.`);
     return empty();
   }
-  const toDoc = (d: typeof fvRow): Doc => ({ id: d.id, name: d.name, amount: Number(d.amount), residual: Number(d.residual), inv_class: d.inv_class });
+  const toDoc = (d: typeof fvRow): Doc => ({ id: d.id, name: d.name, amount: Number(d.amount), residual: Number(d.residual), inv_class: d.inv_class, amount_fx: Number(d.amount_fx), fx_agreed: Number(d.fx_agreed) });
   const fv = toDoc(fvRow);
   if (Number(fvRow.paid) > 0.009) blockers.push(`${fv.name} tiene abonos: revierte ese cobro primero (Cartera → Revertir último abono).`);
   if (fvRow.folio_fiscal || fvRow.uuid_fiscal) preview.fiscal = { name: fv.name, folio: fvRow.folio_fiscal, uuid: fvRow.uuid_fiscal };
@@ -267,8 +268,8 @@ export const deliveryReversalPreview = createServerFn({ method: "POST" })
 async function creditNoteFor(sql: Sql, companyId: number, userId: string, doc: Doc, so: { id: number; name: string; partnerId: number; currency: string; circuit: string | null }, reason: string, today: string) {
   const ncName = await nextDocFolio(sql, companyId, "NC");
   const nc = await sql<{ id: number }>`
-    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, order_id, inv_class, created_by, circuit_code, reverses_id, paid_date)
-    values (${companyId}, 'customer', ${ncName}, ${so.partnerId}, ${today}, ${today}, 'paid', ${-doc.amount}, 0, ${doc.name}, ${so.currency}, ${so.id}, ${doc.inv_class}, ${userId}, ${so.circuit}, ${doc.id}, ${today})
+    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, amount_fx, fx_agreed, currency, order_id, inv_class, created_by, circuit_code, reverses_id, paid_date)
+    values (${companyId}, 'customer', ${ncName}, ${so.partnerId}, ${today}, ${today}, 'paid', ${-doc.amount}, 0, ${doc.name}, ${-(doc.amount_fx ?? 0)}, ${doc.fx_agreed ?? 1}, ${so.currency}, ${so.id}, ${doc.inv_class}, ${userId}, ${so.circuit}, ${doc.id}, ${today})
     returning id
   `;
   const lines = await sql<{ product_id: number | null; qty: string; unit_price: string; amount: string; description: string | null }>`
@@ -408,8 +409,9 @@ async function chainForDeliveryEvent(sql: Sql, companyId: number, soId: number, 
   const liveOuts = outs.filter((m) => !m.reversed_by);
 
   // La FV de ESTE evento (si la hay), con su FI y su ATC.
-  const docs = await sql<{ id: number; name: string; amount: string; residual: string; inv_class: string; origin: string; event_ref: string | null; state: string; folio_fiscal: string; uuid_fiscal: string; paid: string; reversed_by: string | null }>`
+  const docs = await sql<{ id: number; name: string; amount: string; residual: string; inv_class: string; origin: string; event_ref: string | null; state: string; folio_fiscal: string; uuid_fiscal: string; paid: string; reversed_by: string | null; amount_fx: string; fx_agreed: string }>`
     select i.id, i.name, i.amount::text, i.residual::text, coalesce(i.inv_class,'product') as inv_class, coalesce(i.origin,'') as origin,
+      coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,1)::text as fx_agreed,
       i.event_ref, i.state, coalesce(i.folio_fiscal,'') as folio_fiscal, coalesce(i.uuid_fiscal,'') as uuid_fiscal,
       coalesce((select sum(amount) from payment_allocs where invoice_id = i.id), 0)::text as paid,
       (select r.name from invoices r where r.reverses_id = i.id limit 1) as reversed_by
@@ -461,7 +463,7 @@ async function chainForDeliveryEvent(sql: Sql, companyId: number, soId: number, 
     }
   }
 
-  const toDoc = (d: { id: number; name: string; amount: string; residual: string; inv_class: string }): Doc => ({ id: d.id, name: d.name, amount: Number(d.amount), residual: Number(d.residual), inv_class: d.inv_class });
+  const toDoc = (d: { id: number; name: string; amount: string; residual: string; inv_class: string; amount_fx?: string; fx_agreed?: string }): Doc => ({ id: d.id, name: d.name, amount: Number(d.amount), residual: Number(d.residual), inv_class: d.inv_class, amount_fx: Number(d.amount_fx ?? 0), fx_agreed: Number(d.fx_agreed ?? 1) });
   let fv: Doc | null = null;
   const fis: Doc[] = [];
   const atcs: Doc[] = [];

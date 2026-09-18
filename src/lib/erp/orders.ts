@@ -1,3 +1,4 @@
+import { snapOrConvert } from "@/lib/erp/fx";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
@@ -149,9 +150,11 @@ export const listOrders = createServerFn({ method: "GET" })
       invoice_days: number;
       credit_days: number;
       route_kind: string;
+      fx_rate: string;
     }>`
       select so.id, so.name, so.date::text, pt.name as partner, pt.group_name, so.state,
-        so.total::text, so.currency, so.oc_cliente, so.term_kind, so.invoice_days, so.credit_days, so.route_kind
+        so.total::text, so.currency, so.oc_cliente, so.term_kind, so.invoice_days, so.credit_days, so.route_kind,
+        so.fx_rate::text as fx_rate
       from sales_orders so
       join partners pt on pt.id = so.partner_id
       where so.company_id = ${companyId}
@@ -550,6 +553,18 @@ export const saveOrder = createServerFn({ method: "POST" })
     // Un pedido en dólares necesita tipo de cambio real (tabla o capturado).
     if (data.currency === "USD" && !(data.fxRate > 0)) {
       throw new Error("Sin tipo de cambio: la tabla de tipo de cambio está vacía y no se capturó uno. Captúralo en Ajustes → Tipo de cambio antes de guardar un pedido en dólares.");
+    }
+    // Decisión 82: el precio llega en la moneda del pedido (la pantalla lo dice);
+    // se guarda en pesos al TC del pedido. Al editar, un precio que no cambió
+    // conserva el que ya estaba en pesos.
+    if (data.currency === "USD") {
+      const prev = data.id
+        ? await sql<{ product_id: number; unit_price: string }>`select product_id, unit_price::text from sales_lines where so_id = ${data.id}`
+        : [];
+      for (const l of data.lines) {
+        const p = prev.find((x) => x.product_id === l.productId);
+        l.unitPrice = snapOrConvert({ sent: l.unitPrice, prevMxn: p?.unit_price, currency: "USD", fx: data.fxRate, what: "el pedido en dólares" });
+      }
     }
     const dues = computeDues(data);
     assertDueOk(

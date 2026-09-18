@@ -5,7 +5,8 @@ import { getSql } from "@/lib/db";
 import { exactClock } from "@/lib/erp/credit";
 import { activeMember, assertCan } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
-import { money, todayMx } from "@/lib/utils";
+import { moneyIn, todayMx } from "@/lib/utils";
+import { invoiceShown } from "@/lib/erp/fx";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -61,8 +62,13 @@ async function buildDigest(sql: Sql, companyId: number) {
     partner: string;
     due_date: string;
     residual: string;
+    amount: string;
+    currency: string;
+    amount_fx: string;
+    fx_agreed: string;
   }>`
-    select i.name, i.kind, p.name as partner, i.due_date::text, i.residual::text
+    select i.name, i.kind, p.name as partner, i.due_date::text, i.residual::text, i.amount::text,
+      coalesce(i.currency,'MXN') as currency, coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,0)::text as fx_agreed
     from invoices i
     join partners p on p.id = i.partner_id
     where i.company_id = ${companyId} and i.state not in ('paid','reversed') and i.residual > 0.009
@@ -73,12 +79,15 @@ async function buildDigest(sql: Sql, companyId: number) {
       const clock = exactClock(r.due_date, asOf);
       const warn = r.kind === "supplier" ? warnCxp : warnCxc;
       const alert = clock.status === "overdue" || clock.status === "today" || clock.days <= warn;
+      // El saldo se dice en la moneda de la factura (dólares al TC pactado).
+      const shown = invoiceShown({ amount: r.amount, residual: r.residual, currency: r.currency, amountFx: r.amount_fx, fxAgreed: r.fx_agreed });
       return {
         name: r.name,
         kind: r.kind as "customer" | "supplier",
         partner: r.partner,
         due: r.due_date,
-        residual: Number(r.residual),
+        residual: shown.residual,
+        currency: shown.currency,
         label: clock.label,
         alert,
         overdue: clock.status === "overdue",
@@ -89,8 +98,8 @@ async function buildDigest(sql: Sql, companyId: number) {
   const cxp = items.filter((i) => i.kind === "supplier");
   const payload = {
     asOf,
-    cxc: cxc.map((i) => ({ folio: i.name, partner: i.partner, due: i.due, residual: i.residual, clock: i.label })),
-    cxp: cxp.map((i) => ({ folio: i.name, partner: i.partner, due: i.due, residual: i.residual, clock: i.label })),
+    cxc: cxc.map((i) => ({ folio: i.name, partner: i.partner, due: i.due, residual: i.residual, currency: i.currency, clock: i.label })),
+    cxp: cxp.map((i) => ({ folio: i.name, partner: i.partner, due: i.due, residual: i.residual, currency: i.currency, clock: i.label })),
   };
   const subject = `Azagro · ${cxc.length} por cobrar y ${cxp.length} por pagar en alerta`;
   const body = [
@@ -98,9 +107,9 @@ async function buildDigest(sql: Sql, companyId: number) {
     `Alertas de vencimiento · corte ${asOf}`,
     "",
     cxc.length ? "POR COBRAR" : "",
-    ...cxc.map((i) => `• ${i.name}  ${i.partner}  vence ${i.due}  ${i.label}  ${money(i.residual)}`),
+    ...cxc.map((i) => `• ${i.name}  ${i.partner}  vence ${i.due}  ${i.label}  ${moneyIn(i.residual, i.currency)}`),
     cxp.length ? "POR PAGAR" : "",
-    ...cxp.map((i) => `• ${i.name}  ${i.partner}  vence ${i.due}  ${i.label}  ${money(i.residual)}`),
+    ...cxp.map((i) => `• ${i.name}  ${i.partner}  vence ${i.due}  ${i.label}  ${moneyIn(i.residual, i.currency)}`),
   ]
     .filter(Boolean)
     .join("\n");
@@ -283,12 +292,17 @@ export const sendPaymentReminder = createServerFn({ method: "POST" })
       due_date: string;
       partner: string;
       email: string;
+      currency: string;
+      amount_fx: string;
+      fx_agreed: string;
     }>`
-      select i.name, i.kind, i.residual::text, i.amount::text, i.due_date::text, p.name as partner, coalesce(p.email,'') as email
+      select i.name, i.kind, i.residual::text, i.amount::text, i.due_date::text, p.name as partner, coalesce(p.email,'') as email,
+        coalesce(i.currency,'MXN') as currency, coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,0)::text as fx_agreed
       from invoices i join partners p on p.id = i.partner_id
       where i.id = ${data.invoiceId} and i.company_id = ${companyId}
     `;
     if (!inv[0]) throw new Error("Factura no encontrada");
+    const shown = invoiceShown({ amount: inv[0].amount, residual: inv[0].residual, currency: inv[0].currency, amountFx: inv[0].amount_fx, fxAgreed: inv[0].fx_agreed });
     const clock = exactClock(inv[0].due_date);
     const subject =
       inv[0].kind === "customer"
@@ -302,8 +316,8 @@ export const sendPaymentReminder = createServerFn({ method: "POST" })
         : `Recordatorio interno de pago a ${inv[0].partner}:`,
       "",
       `Folio ${inv[0].name}`,
-      `Importe ${money(Number(inv[0].amount))}`,
-      `Saldo ${money(Number(inv[0].residual))}`,
+      `Importe ${moneyIn(shown.amount, shown.currency)}`,
+      `Saldo ${moneyIn(shown.residual, shown.currency)}`,
       `Vencimiento ${inv[0].due_date} · ${clock.label}`,
       "",
       inv[0].kind === "customer"
@@ -364,8 +378,9 @@ export const sendPartnerReminders = createServerFn({ method: "POST" })
     let sentN = 0;
     const failed: string[] = [];
     if (acc.ready) {
-      const rows = await sql<{ name: string; email: string; residual: string; due_date: string; partner: string }>`
-        select i.name, coalesce(p.email,'') as email, i.residual::text, i.due_date::text, p.name as partner
+      const rows = await sql<{ name: string; email: string; residual: string; amount: string; due_date: string; partner: string; currency: string; amount_fx: string; fx_agreed: string }>`
+        select i.name, coalesce(p.email,'') as email, i.residual::text, i.amount::text, i.due_date::text, p.name as partner,
+          coalesce(i.currency,'MXN') as currency, coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,0)::text as fx_agreed
         from invoices i join partners p on p.id = i.partner_id
         where i.company_id = ${companyId} and i.kind = 'customer' and i.state not in ('paid','reversed') and i.residual > 0.009
       `;
@@ -376,7 +391,8 @@ export const sendPartnerReminders = createServerFn({ method: "POST" })
           continue;
         }
         const clock = exactClock(r.due_date);
-        const text = `${acc.legal}\n\nEstimados ${r.partner}:\nFolio ${r.name}\nSaldo ${money(Number(r.residual))}\nVence ${r.due_date} · ${clock.label}\n\nAgradecemos su pronto pago.`;
+        const sh = invoiceShown({ amount: r.amount, residual: r.residual, currency: r.currency, amountFx: r.amount_fx, fxAgreed: r.fx_agreed });
+        const text = `${acc.legal}\n\nEstimados ${r.partner}:\nFolio ${r.name}\nSaldo ${moneyIn(sh.residual, sh.currency)}\nVence ${r.due_date} · ${clock.label}\n\nAgradecemos su pronto pago.`;
         const sent = await sendResend({
           key: acc.key,
           from: acc.from,

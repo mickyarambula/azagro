@@ -1,3 +1,4 @@
+import { salePriceShown } from "@/lib/erp/fx";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -140,7 +141,7 @@ function List() {
                       {stateLabel(r.state)}
                     </StatusPill>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">{moneyIn(r.total, r.currency)}</td>
+                  <td className="px-4 py-3 text-right tabular-nums">{moneyIn(salePriceShown(r.total, r.currency, r.fx_rate), r.currency)}</td>
                 </tr>
               ))}
             </tbody>

@@ -13,12 +13,13 @@ import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate, NO_MORA_POLICY, requireRate } from "@/lib/erp/credit";
 import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { nextDocFolio } from "@/lib/erp/folios";
-import { costToMxn, fxAt, isUsdFx, loadFxTable, missingFxMessage, receiptUnitCostMxn, supplierInvoiceAmounts } from "@/lib/erp/fx";
+import { costToMxn, fxAt, isUsdFx, loadFxTable, missingFxMessage, receiptUnitCostMxn, saleToMxn, supplierInvoiceAmounts } from "@/lib/erp/fx";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { purchaseLineGaps, salesLineGaps } from "@/lib/erp/parciales";
 import { todayMx } from "@/lib/utils";
 import { circuitTerms, inheritCircuit } from "@/lib/erp/circuits";
+import { seedCircuits } from "@/lib/erp/circuits-seed";
 import { computeDues, TERM_KINDS, type TermKind } from "@/lib/erp/order-terms";
 import { guardSaleTerms } from "@/lib/erp/sale-terms";
 
@@ -98,6 +99,8 @@ export async function seedCompany(sql: Sql, companyId: number) {
 
   await syncCompaqCatalogs(sql, companyId);
   await linkSeedDestinos(sql, companyId);
+  // Antes del "ya sembrada": una empresa que nació sin catálogo lo recibe al siguiente inicio de sesión.
+  await seedCircuits(sql, companyId);
 
   if (already[0]?.seeded_at) return;
   await sql`
@@ -1803,6 +1806,12 @@ export const createSale = createServerFn({ method: "POST" })
     const sql = await getSql();
     const m = await requireCompany(sql, context.userId);
     const member = await assertCan(sql, context.userId, "sales", "edit");
+    // Decisión 82 (y el candado de TC que este camino no tenía): en dólares el
+    // precio llega en dólares y se guarda en pesos; sin TC real no nace.
+    if (data.currency === "USD") {
+      if (!isUsdFx(data.fxRate)) throw new Error(missingFxMessage("la venta en dólares"));
+      for (const l of data.lines) l.unitPrice = saleToMxn({ price: l.unitPrice, currency: "USD", fx: data.fxRate, what: "la venta en dólares" });
+    }
     const total = data.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
     // Paso 6 (Decisión 51): la misma regla que saveOrder, del mismo lugar —
     // este camino no tiene pantalla hoy, pero no se deja una segunda copia.
@@ -2501,13 +2510,13 @@ export const returnSale = createServerFn({ method: "POST" })
     // `reversed` y el pedido vuelve a `confirmed`; aquí se excluye explícito,
     // no por flujo).
     const fv = data.fvId != null
-      ? await sql<{ id: number; residual: string; name: string }>`
-          select id, residual::text, name from invoices
+      ? await sql<{ id: number; residual: string; name: string; currency: string; fx_agreed: string }>`
+          select id, residual::text, name, coalesce(currency,'MXN') as currency, coalesce(fx_agreed,1)::text as fx_agreed from invoices
           where company_id = ${m.company_id} and id = ${data.fvId} and order_id = ${so[0].id}
             and kind = 'customer' and name like 'FV-%' and state <> 'reversed' and reverses_id is null
         `
-      : await sql<{ id: number; residual: string; name: string }>`
-          select id, residual::text, name from invoices
+      : await sql<{ id: number; residual: string; name: string; currency: string; fx_agreed: string }>`
+          select id, residual::text, name, coalesce(currency,'MXN') as currency, coalesce(fx_agreed,1)::text as fx_agreed from invoices
           where company_id = ${m.company_id} and order_id = ${so[0].id} and kind = 'customer' and name like 'FV-%'
             and state <> 'reversed' and reverses_id is null
           order by id desc limit 1
@@ -2591,14 +2600,19 @@ export const returnSale = createServerFn({ method: "POST" })
     if (credit <= 0.009) throw new Error("La devolución no tiene importe");
 
     const note = (data.reason || "").trim() || `Devolución de ${so[0].name}`;
+    // Decisión 82: la NC de una FV en dólares lleva su equivalente en dólares al
+    // TC de ESA factura (molde FV/FP), para que ningún lector por amount_fx la cuente en cero.
+    const ncFx = fv[0] && fv[0].currency === "USD" && isUsdFx(fv[0].fx_agreed)
+      ? { amountFx: -Math.round((credit / Number(fv[0].fx_agreed)) * 100) / 100, fxAgreed: Number(fv[0].fx_agreed) }
+      : { amountFx: 0, fxAgreed: 1 };
     const nc = await sql<{ id: number }>`
       insert into invoices (
-        company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin,
+        company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, amount_fx, fx_agreed,
         currency, order_id, inv_class, applies_to_id, created_by, circuit_code
       )
       values (
         ${m.company_id}, 'customer', ${ncName}, ${so[0].partner_id}, ${today}, ${today},
-        'open', ${-credit}, ${-credit}, ${so[0].name}, ${so[0].currency}, ${so[0].id}, 'product', ${fv[0]?.id ?? null}, ${context.userId}, ${so[0].circuit_code}
+        'open', ${-credit}, ${-credit}, ${so[0].name}, ${ncFx.amountFx}, ${ncFx.fxAgreed}, ${so[0].currency}, ${so[0].id}, 'product', ${fv[0]?.id ?? null}, ${context.userId}, ${so[0].circuit_code}
       )
       returning id
     `;

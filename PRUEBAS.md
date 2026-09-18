@@ -390,7 +390,27 @@ sesiones.
 9. Ve a "Inicio". "Caja" debe decir `$31,600.00` con "Saldos bancarios en pesos" (si quedaran dólares diría "Pesos · US$… en la cuenta en dólares"); "Por pagar" `$166,500.00` con "… · USD 9,000.00 en dólares"; "Inventario Azagro" con "Proveedor $185,000.00".
 10. Si el producto ya tenía inventario en pesos, el "Costo prom." es el promedio ponderado de lo anterior con estos 18,500 — nunca un promedio entre 1,000 "dólares" y pesos.
 
-**Lo que todavía NO se prueba aquí:** vender en dólares — el precio de venta sigue capturándose sin moneda (L4a, lo que sigue); y la posición cambiaria (cuánto se debe y nos deben en dólares por vencimiento, y qué está cubierto).
+**Lo que todavía NO se prueba aquí:** la posición cambiaria (cuánto se debe y nos deben en dólares por vencimiento, y qué está cubierto). Vender en dólares es el Escenario 11.
+
+## ESCENARIO 11 — Vender en dólares: el precio se captura en dólares y todo lo enseña en dólares (Decisión 82, 18-sep-2026)
+
+**El número que más importa:** una cotización de **10 × 1,000 USD a 18.50** tiene que dejar el pedido en **USD 10,000.00** (y por dentro 185,000 pesos), la factura en **USD 10,000.00 · TC 18.5 · $185,000.00**, y al devolver 5 la nota de crédito en **−USD 5,000.00** con la factura en **USD 5,000.00** de saldo. Nunca 18,500 dólares, nunca 54.05.
+
+**Antes de empezar:** un producto con "Precio de lista" `18500` y "Costo de referencia" `9250` (pesos), existencia de ese producto en "Bodega Central Azagro" (una orden de compra recibida: 20 a `9250`, el proveedor con "Plazo de pago (días)" capturado), el cliente con "Plazo de pago (días)" en `0` (contado), y en "Ajustes" la "Política de crédito" completa y en "Circuitos de financiamiento" la comisión de apertura del "Circuito ASR" capturada (`0.01`, "Guardar").
+
+1. Ve a "Ventas" → "Cotizaciones" y abre "Alta manual (sin solicitud)". "Moneda" queda en `USD`. En "Dólar pactado" escribe `18.5` y sal del campo con Tab. Debes ver que el precio de la partida, que decía `18500`, cambia solo a `1000`, la columna dice "P. contado (USD)" y el importe "USD 1,000.00". **Ese es el primer número: el precio de lista en pesos se propone en dólares.**
+2. En "Precios" elige "Contado". En "Cliente" escribe `BERSE` y elige "AGRICOLA BERSE". En "Cant." escribe `10`. "Totales" dice "Contado USD 10,000.00". Pulsa "Guardar cotización". En la lista: "COT-0001 · AGRICOLA BERSE · Contado · USD · dólar pactado 18.5 · Vigente · USD 10,000.00".
+3. Pulsa "Ver". En la tabla: "Costo puesto" `USD 500.00`, "Precio" `1000`, "Utilidad /u" `500`, "Margen %" `50`, "Importe" `USD 10,000.00`, y abajo "Sin cambios de precio." (nada de "Cambiaste precios" sin haber tocado nada, y nada de "Utilidad negativa").
+4. Candado — sin tipo de cambio: en "Alta manual", con "Moneda" `USD`, borra el "Dólar pactado" (déjalo en `0`) y pulsa "Guardar cotización". Debes ver en rojo "Sin tipo de cambio: la tabla está vacía. Captúralo en Ajustes → Tipo de cambio o escribe el pactado." El camino legítimo es el paso 1.
+5. De vuelta en "Ver" de COT-0001, en "Bodega de recepción" elige `Bodega Central Azagro` y pulsa "Cliente aceptó → pedido". Se abre "PV-0001 · Borrador" con "TOTAL USD 10,000.00", "PRECIO / UOM (USD)" `1000` e "IMPORTE" `USD 10,000.00`. Pulsa "Confirmar".
+6. Pulsa "Entregar" → "Entregar todo lo pendiente". Aparece "ENTREGAS · ENV/0001 · ALB01 10 LTS" con "Facturar esta entrega". Púlsalo. Debes ver "FV-0001 emitida por la entrega ENV/0001". Abajo, en "Facturas de este pedido": "FV-0001 · USD 10,000.00 · open". En la tarjeta "VENTA" del pedido: `$185,000.00` (el P&L es en pesos, a propósito) y "MARGEN OPERACIÓN" `$92,500.00 · 50.0% sobre venta`.
+7. En "Devolución del cliente", junto a "COFACTOR" debe decir `USD 1,000.00`. En "A DEVOLVER" escribe `5`, en "Motivo" `No ocupó`, pulsa "Registrar devolución". Debes ver "Se abonó USD 5,000.00 a FV-0001", y en "Facturas de este pedido": "FV-0001 · USD 5,000.00 · open" y "NC-0001 · USD 0.00 · paid".
+8. Ve a "Ventas" → "Pedidos de venta". La lista dice "PV-0001 · Contado USD · Entregado · USD 10,000.00" (no US$185,000.00).
+9. Ve a "Cartera" → "Por cobrar". "FV-0001": TOTAL `USD 10,000.00` y debajo `TC 18.5 · $185,000.00`, PAGADO `USD 5,000.00`, SALDO `USD 5,000.00`. "NC-0001": TOTAL `−USD 5,000.00`, PAGADO `−USD 5,000.00`, SALDO `USD 0.00`, "Pagada".
+10. Ve a "Cartera" → "Estados de cuenta" y pulsa "Ver" en AGRICOLA BERSE. En el bloque "MONEDA: DÓLAR AMERICANO": la FV con CARGO `USD 10,000.00`, ABONOS `USD 5,000.00`, SALDO `USD 5,000.00`; la NC con CARGO `−USD 5,000.00`; el "Total" con SALDO `USD 5,000.00`; y en "Por producto — saldo pendiente": "COFACTOR USD 5,000.00". Arriba a la derecha, "Saldo $92,500.00" es la cartera del cliente en pesos (así se suma la línea de crédito), y el texto de "Enviar" lo dice: "total en pesos; los renglones en dólares van al tipo de cambio pactado".
+11. Pulsa "Documento" en la cotización o en el pedido: el papel lleva "USD 1,000.00" por unidad y "USD 10,000.00" de total, "USD · dólar pactado 18.5". Ni un peso con signo US$.
+
+**Lo que todavía NO se prueba aquí:** la posición cambiaria (A.2); y una factura en dólares que se haya capturado ANTES del 18-sep-2026 con el precio tecleado como pesos: esa no se corrige sola, se revisa a mano.
 
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 

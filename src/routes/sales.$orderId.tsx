@@ -1,3 +1,4 @@
+import { salePriceShown } from "@/lib/erp/fx";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { OrderFields, stateLabel, type OrderDraft, type OrderLookups } from "@/components/order-form";
@@ -107,6 +108,10 @@ function Ficha() {
     setClosedShort({ at: o.closed_short_at ?? null, reason: o.closed_short_reason || "" });
     setInvoices(d.invoices);
     setPurchases(d.purchases ?? []);
+    // Precio de la partida en la moneda del pedido (guardado en pesos, Decisión 82): así la tabla
+    // de devolución enseña dólares con el mismo `moneyIn(num(l.unit_price), form.currency)` de siempre.
+    const curO = o.currency === "USD" ? "USD" : "MXN";
+    d.lines = d.lines.map((ln) => ({ ...ln, unit_price: String(salePriceShown(ln.unit_price, curO, o.fx_rate)) }));
     setSold(d.lines);
     setEvents(ev);
     setOrigin(d.origin);
@@ -156,6 +161,7 @@ function Ficha() {
       lines: d.lines.map((ln) => ({
         productId: ln.product_id,
         qty: num(ln.qty),
+        // Ya en la moneda del pedido: d.lines se convirtió arriba, una sola vez (Decisión 82).
         unitPrice: num(ln.unit_price),
         uom: ln.uom,
       })),
@@ -603,28 +609,34 @@ function Ficha() {
               {originLines.map((l) => {
                 const o = l.origin;
                 if (!o) return null;
+                // Precio, costo puesto y financiamiento en la moneda del pedido (guardados en pesos).
+                const shO = (n: number | string) => salePriceShown(n, form.currency, form.fxRate);
+                // l.unit_price ya viene convertido (d.lines, arriba); lo del origen (cotización) sigue en pesos.
                 const unit = num(l.unit_price);
-                const util = o.landed != null ? unit - o.landed - o.fin_unit : null;
+                const quoted = shO(o.quoted_price);
+                const landedO = o.landed != null ? shO(o.landed) : null;
+                const finO = shO(o.fin_unit);
+                const util = landedO != null ? unit - landedO - finO : null;
                 return (
                   <tr key={l.product_id} className="border-t border-line">
                     <td className="px-3 py-2">
                       <span className="font-medium">{l.name}</span>
                       <span className="ml-2 font-mono text-[11px] text-muted">{l.code}</span>
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{moneyIn(o.quoted_price, form.currency)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{moneyIn(quoted, form.currency)}</td>
                     <td className="px-3 py-2 text-right tabular-nums">
                       {moneyIn(unit, form.currency)}
-                      {Math.abs(unit - o.quoted_price) > 0.009 ? <span className="ml-1 text-[11px] text-warn">≠ cotizado</span> : null}
+                      {Math.abs(unit - quoted) > 0.009 ? <span className="ml-1 text-[11px] text-warn">≠ cotizado</span> : null}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{o.landed != null ? moneyIn(o.landed, form.currency) : "—"}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{o.which === "credit" ? moneyIn(o.fin_unit, form.currency) : "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{landedO != null ? moneyIn(landedO, form.currency) : "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{o.which === "credit" ? moneyIn(finO, form.currency) : "—"}</td>
                     <td className={`px-3 py-2 text-right tabular-nums ${util != null && util < 0 ? "text-danger" : ""}`}>
                       {util != null ? moneyIn(util, form.currency) : "—"}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">
                       {o.margin ? (
                         <>
-                          {marginText(o.margin)}
+                          {o.margin.mode === "nominal" ? `${moneyIn(shO(o.margin.nominal), form.currency)} fijo` : marginText(o.margin)}
                           {o.margin.source === "migracion" ? <span className="block text-[11px] text-muted">de la migración</span> : null}
                         </>
                       ) : (
@@ -822,7 +834,7 @@ function Ficha() {
                   {inv.name} · vence {fmtDate(inv.due_date)}
                 </span>
                 <span className="flex items-center gap-2 tabular-nums">
-                  {moneyIn(inv.residual, form.currency)} · {inv.state}
+                  {moneyIn(salePriceShown(inv.residual, form.currency, form.fxRate), form.currency)} · {inv.state}
                   {canEdit && inv.name.startsWith("NC-") && !inv.reverses_id && inv.state !== "reversed" ? (
                     <ReturnReversalButton
                       ncName={inv.name}
@@ -886,7 +898,7 @@ function Ficha() {
                   <option key={i.id} value={i.id}>
                     {i.name}
                     {i.eventRef ? ` · ${i.eventRef}` : ""}
-                    {` · ${i.residual > 0.009 ? `saldo ${moneyIn(i.residual, form.currency)}` : "pagada: el crédito quedaría abierto, no bajaría saldo"}`}
+                    {` · ${i.residual > 0.009 ? `saldo ${moneyIn(salePriceShown(i.residual, form.currency, form.fxRate), form.currency)}` : "pagada: el crédito quedaría abierto, no bajaría saldo"}`}
                     {retProposal ? ` · por devolver ${i.lines.map((l) => { const p = sold.find((x) => x.product_id === l.productId); return `${p?.code ?? l.productId} ${l.available}`; }).join(", ") || "nada"}` : ""}
                     {retProposal?.proposedId === i.id ? " · propuesta: aquí viajó lo que se devuelve" : ""}
                   </option>
@@ -928,9 +940,9 @@ function Ficha() {
                   const r = await returnSale({ data: { soId: id, reason: retReason, lines, fvId: liveFvs.length > 1 ? (retFv ?? undefined) : undefined } });
                   const stock = r.direct ? "Sin movimiento de kardex (pedido directo)." : `Kardex ${r.refs.join(", ")}.`;
                   const cobro = r.applied
-                    ? `Se abonó ${moneyIn(r.applied, form.currency)} a ${r.fv ?? "la factura"}.`
+                    ? `Se abonó ${moneyIn(salePriceShown(r.applied, form.currency, form.fxRate), form.currency)} a ${r.fv ?? "la factura"}.`
                     : r.leftover
-                      ? `${r.fv ? `${r.fv} ya estaba pagada` : "No hay factura viva a la que abonar"}. Queda crédito ${r.nc} por ${moneyIn(r.leftover, form.currency)}.`
+                      ? `${r.fv ? `${r.fv} ya estaba pagada` : "No hay factura viva a la que abonar"}. Queda crédito ${r.nc} por ${moneyIn(salePriceShown(r.leftover, form.currency, form.fxRate), form.currency)}.`
                       : "";
                   // Decisión 9 + Decisión 20: con qué costo entró cada partida
                   // y cómo quedó el promedio, con el número. Y si no se

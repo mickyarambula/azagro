@@ -21,6 +21,7 @@ import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
 import { dateDMY, humanError, moneyIn, num, qty, todayMx } from "@/lib/utils";
 import { circuitForTerm, circuitLabel, inheritCircuit, isSelectableCircuit, type CircuitCode } from "@/lib/erp/circuits";
+import { finShown, reshowPrice, salePriceShown } from "@/lib/erp/fx";
 import { CircuitSelect } from "@/components/circuit-select";
 import { AccessGate } from "@/components/access-gate";
 
@@ -176,14 +177,28 @@ function Page() {
   // comisión + Capa 1 sobre el costo. Lineal: contado (= costo + margen = lo
   // desembolsado) × (1 + k) a la tasa de cobro; sin renglón de tasa no hay
   // crédito (queda igual al contado y el candado no deja guardar).
-  const creditPriceOf = (l: Pick<Line, "cashPrice" | "fin" | "finLineal">, days: number) =>
-    circuitCode === "SANTA_ROSA"
+  // La base viene en pesos; el precio se captura en la moneda del documento, así que
+  // la base baja a esa moneda antes de sumarse (Decisión 82).
+  const creditPriceOf = (l0: Pick<Line, "cashPrice" | "fin" | "finLineal">, days: number, money: { currency: string; fx: number } = { currency, fx: fxRate }) => {
+    const l = { ...l0, fin: finShown(l0.fin, money.currency, money.fx) };
+    return circuitCode === "SANTA_ROSA"
       ? l.finLineal
         ? creditFromCashLineal({ cash: l.cashPrice, rate: l.finLineal.rate, days })
         : l.cashPrice
       : creditFromCash({ cash: l.cashPrice, fin: l.fin, days });
+  };
+  /** Precio de lista del catálogo (pesos) en la moneda que se está capturando (Decisión 82). */
+  const listShown = (p: { list_price: string } | undefined) => salePriceShown(p?.list_price ?? 0, currency, fxRate);
   function syncCredit(ls: Line[], days = creditDays) {
     return ls.map((l) => ({ ...l, creditPrice: creditPriceOf(l, days) }));
+  }
+  /** Cambió la moneda o apareció el TC: lo ya escrito se re-enseña en la moneda nueva y el crédito se rehace con la base en esa moneda. */
+  function reshowLines(next: { currency: "USD" | "MXN"; fx: number }) {
+    const prev = { currency, fx: fxRate };
+    setLines((ls) => ls.map((l) => {
+      const cashPrice = reshowPrice(l.cashPrice, prev, next);
+      return { ...l, cashPrice, creditPrice: creditPriceOf({ ...l, cashPrice }, creditDays, next) };
+    }));
   }
 
   /**
@@ -194,9 +209,12 @@ function Page() {
    * todas las columnas a plazo). Sin costo visible se muestra la escalera que
    * calculó el servidor con los márgenes guardados (se pone al día al guardar).
    */
-  function ladderOfLine(l: NonNullable<typeof data>["lines"][number], rp: { cash: number; credit: number }, agreed: number): LadderStep[] {
-    const landed = num(l.cost) + num(l.freight);
-    const finAt = (d: number) => l.ladder.find((st) => st.days === d)?.finance ?? 0;
+  function ladderOfLine(l: NonNullable<typeof data>["lines"][number], rp: { cash: number; credit: number }, agreed: number, fxQ = 1): LadderStep[] {
+    // Costo y financiamiento vienen en pesos; el precio capturado (rp) ya está en la moneda
+    // de la cotización, así que todo se lleva a esa moneda antes de despejar (Decisión 82).
+    const sh = (n: number | string) => salePriceShown(n, fxQ > 1 ? "USD" : "MXN", fxQ);
+    const landed = sh(num(l.cost) + num(l.freight));
+    const finAt = (d: number) => sh(l.ladder.find((st) => st.days === d)?.finance ?? 0);
     if (landed > 0.009) {
       const cashMode: MarginMode = l.margin_cash_mode === "nominal" ? "nominal" : "pct";
       const creditMode: MarginMode = l.margin_credit_mode === "nominal" ? "nominal" : "pct";
@@ -224,15 +242,18 @@ function Page() {
     }
     return l.ladder.map((st) => ({
       ...st,
+      finance: sh(st.finance),
+      utility: st.utility != null ? sh(st.utility) : st.utility,
       agreed: st.days === agreed,
       price: st.days === 0 ? rp.cash : st.days === agreed ? rp.credit : st.price,
-    }));
+    })).map((st) => ({ ...st, price: st.days === 0 || st.days === agreed || st.price == null ? st.price : sh(st.price) }));
   }
 
   async function load() {
     const d = await listQuotes();
     setData(d);
     setPartnerId(d.customers[0]?.id ?? 0);
+    let fxFresh = fxRate;
     // Ajustes incompletos = no se cotiza a mano; el error se muestra tal cual.
     const s = await getSettings().catch((e: unknown) => {
       setSettingsError(humanError(e));
@@ -247,6 +268,7 @@ function Page() {
       const fx = nearestRate(s.fx.map((r) => ({ date: r.date, rate: Number(r.usd_mxn) })), todayMx());
       setFxRate(fx?.rate ?? 0);
       setFxFrom(fx?.date ?? null);
+      fxFresh = fx?.rate ?? 0;
       // Vigencia propuesta de Ajustes; se pisa sola solo si nadie la tocó todavía.
       setValidUntil((v) => (v ? v : s.quoteValidityDays > 0 ? addDays(todayMx(), s.quoteValidityDays) : ""));
     }
@@ -257,7 +279,8 @@ function Page() {
     setLocationId((id) => id || inv.locations.find((l) => l.loc_type === "internal")?.id || inv.locations[0]?.id || 0);
     if (lines.length === 0 && d.products[0] && s) {
       const p = d.products[0];
-      const cash = Number(p.list_price);
+      // El TC recién leído de la tabla, no el del render anterior (estado viejo = precio en pesos con etiqueta USD).
+      const cash = salePriceShown(p.list_price, currency, fxFresh);
       const days = s.creditDays;
       const f = p.fin ?? SIN_FIN;
       const fl = p.fin_lineal ?? null;
@@ -277,9 +300,12 @@ function Page() {
     if (!id) return;
     const next: Record<number, number> = {};
     const prices: Record<number, { cash: number; credit: number; qty: number }> = {};
+    // Los precios guardados están en pesos; el panel los enseña y edita en la moneda de la cotización (Decisión 82).
+    const q = data?.quotes.find((x) => x.id === id);
+    const shO = (n: string | number) => salePriceShown(n, q?.currency ?? "MXN", q?.fx_rate);
     for (const l of qlines) {
       next[l.product_id] = Number(l.qty);
-      prices[l.product_id] = { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
+      prices[l.product_id] = { cash: shO(l.cash_price), credit: shO(l.credit_price), qty: Number(l.qty) };
     }
     setTake(next);
     setRevPrices(prices);
@@ -337,7 +363,7 @@ function Page() {
         },
       });
       const p = data?.products[0];
-      const cash = Number(p?.list_price ?? 0);
+      const cash = listShown(p);
       const f = p?.fin ?? SIN_FIN;
       const fl = p?.fin_lineal ?? null;
       setLines(p ? [{ productId: p.id, qty: 1, cashPrice: cash, fin: f, finLineal: fl, creditPrice: creditPriceOf({ cashPrice: cash, fin: f, finLineal: fl }, creditDays), uom: p.uom || "TM" }] : []);
@@ -372,8 +398,9 @@ function Page() {
     const trail = await getDealTrail({ data: { kind: "quote", id: qrow.id } })
       .then((d) => d.line)
       .catch(() => "");
-    const cashTot = qlines.reduce((s, l) => s + Number(l.qty) * Number(l.cash_price), 0);
-    const credTot = qlines.reduce((s, l) => s + Number(l.qty) * Number(l.credit_price), 0);
+    const shQ = (n: number | string) => salePriceShown(n, cur, qrow.fx_rate);
+    const cashTot = qlines.reduce((s, l) => s + Number(l.qty) * shQ(l.cash_price), 0);
+    const credTot = qlines.reduce((s, l) => s + Number(l.qty) * shQ(l.credit_price), 0);
     printHtml(
       qrow.name,
       letterhead({
@@ -393,7 +420,7 @@ function Page() {
         ],
         headers: ["Producto", "Cant.", "P. unitario", "Importe"],
         rows: qlines.map((l) => {
-          const unit = offer === "cash" ? Number(l.cash_price) : Number(l.credit_price);
+          const unit = shQ(offer === "cash" ? Number(l.cash_price) : Number(l.credit_price));
           return {
             left: l.product,
             qty: `${qty(l.qty)} ${l.uom}`,
@@ -440,14 +467,30 @@ function Page() {
             />
           </HeadBox>
           <HeadBox label="Moneda">
-            <select className="erp-input w-full border-0 bg-transparent px-0" value={currency} onChange={(e) => setCurrency(e.target.value as "USD" | "MXN")}>
+            <select
+              className="erp-input w-full border-0 bg-transparent px-0"
+              value={currency}
+              onChange={(e) => {
+                const next = e.target.value as "USD" | "MXN";
+                reshowLines({ currency: next, fx: fxRate });
+                setCurrency(next);
+              }}
+            >
               <option value="USD">USD</option>
               <option value="MXN">MXN</option>
             </select>
           </HeadBox>
           {currency === "USD" ? (
           <HeadBox label={fxFrom ? `Dólar pactado (tabla ${fxFrom})` : "Dólar pactado (sin tabla)"}>
-            <MoneyField className="w-full border-0 bg-transparent px-0" value={fxRate} onChange={setFxRate} />
+            {/* Al terminar de escribir (no por tecla): lo capturado sin TC era pesos; con TC, dólares. */}
+            <MoneyField
+              className="w-full border-0 bg-transparent px-0"
+              value={fxRate}
+              onCommit={(fx) => {
+                reshowLines({ currency, fx });
+                setFxRate(fx);
+              }}
+            />
             {!fxFrom ? <p className="text-[11px] text-danger">Sin tipo de cambio en la tabla: captúralo en Ajustes o escribe el pactado.</p> : null}
           </HeadBox>
           ) : null}
@@ -535,7 +578,7 @@ function Page() {
           className="erp-btn-primary mt-3"
           onClick={() => {
             const p = data?.products[0];
-            const cash = Number(p?.list_price ?? 0);
+            const cash = listShown(p);
             const f = p?.fin ?? SIN_FIN;
             const fl = p?.fin_lineal ?? null;
             setLines((ls) => [...ls, { productId: p?.id ?? 0, qty: 1, cashPrice: cash, fin: f, finLineal: fl, creditPrice: creditPriceOf({ cashPrice: cash, fin: f, finLineal: fl }, creditDays), uom: p?.uom || "TM" }]);
@@ -552,8 +595,8 @@ function Page() {
                 <th className="px-3 py-2.5 font-medium">Producto</th>
                 <th className="px-3 py-2.5 font-medium">UoM</th>
                 <th className="px-3 py-2.5 text-right font-medium">Cant.</th>
-                {priceOffer !== "credit" ? <th className="px-3 py-2.5 text-right font-medium">P. contado</th> : null}
-                {priceOffer !== "cash" ? <th className="px-3 py-2.5 text-right font-medium">P. crédito</th> : null}
+                {priceOffer !== "credit" ? <th className="px-3 py-2.5 text-right font-medium">P. contado ({currency})</th> : null}
+                {priceOffer !== "cash" ? <th className="px-3 py-2.5 text-right font-medium">P. crédito ({currency})</th> : null}
                 <th className="px-3 py-2.5 text-right font-medium">Importe</th>
                 <th className="w-10" />
               </tr>
@@ -572,7 +615,7 @@ function Page() {
                         onChange={(v) => {
                           const id = Number(v);
                           const prod = data?.products.find((x) => x.id === id);
-                          const cash = Number(prod?.list_price ?? line.cashPrice);
+                          const cash = prod ? listShown(prod) : line.cashPrice;
                           const f = prod?.fin ?? SIN_FIN;
                           const fl = prod?.fin_lineal ?? null;
                           setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, cashPrice: cash, fin: f, finLineal: fl, creditPrice: creditPriceOf({ cashPrice: cash, fin: f, finLineal: fl }, creditDays) } : x)));
@@ -635,7 +678,7 @@ function Page() {
             exportCsv(
               "cotizaciones-azagro",
               ["Folio", "Rev", "Cliente", "Oferta", "Moneda", "TC", "Estado", "Total"],
-              (data?.quotes ?? []).map((q) => [q.name, q.revision, q.partner, offerLabel(q.price_offer), q.currency, q.fx_rate, q.state, q.total]),
+              (data?.quotes ?? []).map((q) => [q.name, q.revision, q.partner, offerLabel(q.price_offer), q.currency, q.fx_rate, q.state, salePriceShown(q.total, q.currency, q.fx_rate)]),
             )
           }
         >
@@ -670,7 +713,8 @@ function Page() {
               const cur = qrow.currency;
               const both = (qrow.price_offer || "both") === "both";
               const paperOffer = paperOfferOf(qrow);
-              const paperUnit = (l: (typeof qlines)[number]) => (paperOffer === "cash" ? Number(l.cash_price) : Number(l.credit_price));
+              const shQ = (n: number | string) => salePriceShown(n, cur, qrow.fx_rate);
+              const paperUnit = (l: (typeof qlines)[number]) => shQ(paperOffer === "cash" ? Number(l.cash_price) : Number(l.credit_price));
               const expired = !closed && qrow.valid_until < todayMx();
               return (
                 <Fragment key={qrow.id}>
@@ -709,7 +753,7 @@ function Page() {
                                 : "Vigente"}
                     </StatusPill>
                   </td>
-                  <td className="px-3 py-3 text-right tabular-nums">{moneyIn(qrow.total, cur)}</td>
+                  <td className="px-3 py-3 text-right tabular-nums">{moneyIn(shQ(qrow.total), cur)}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">
                       <button type="button" className="erp-btn h-8 text-[12px]" onClick={() => void printQuote(qrow, qlines)}>
@@ -750,7 +794,7 @@ function Page() {
                           number={qrow.name}
                           summary={[
                             `Cliente: ${qrow.partner}`,
-                            `Total: ${moneyIn(qrow.total, cur)}`,
+                            `Total: ${moneyIn(shQ(qrow.total), cur)}`,
                             ...qlines.map((l) => `${l.product} ×${l.qty} ${l.uom}`),
                           ]}
                           onConfirm={(reason) => cancelQuote({ data: { quoteId: qrow.id, reason } })}
@@ -778,15 +822,18 @@ function Page() {
                   // Plazo acordado en edición: manda sobre el de la cotización hasta guardar.
                   const agreedDays = revDays ?? qrow.credit_days;
                   const ladderDays = (qlines[0]?.ladder ?? []).map((st) => st.days).filter((d) => d > 0);
-                  const finAt = (l: (typeof qlines)[number], d: number) => l.ladder.find((st) => st.days === d)?.finance ?? 0;
-                  const rpOf = (l: (typeof qlines)[number]) => revPrices[l.product_id] ?? { cash: Number(l.cash_price), credit: Number(l.credit_price), qty: Number(l.qty) };
+                  // Precios, costo y financiamiento en la moneda de la cotización (guardados en pesos, Decisión 82).
+                  // Solo en dólares: una cotización en pesos también guarda el TC de la tabla y NO se divide.
+                  const fxQ = cur === "USD" ? Number(qrow.fx_rate) : 1;
+                  const finAt = (l: (typeof qlines)[number], d: number) => shQ(l.ladder.find((st) => st.days === d)?.finance ?? 0);
+                  const rpOf = (l: (typeof qlines)[number]) => revPrices[l.product_id] ?? { cash: shQ(l.cash_price), credit: shQ(l.credit_price), qty: Number(l.qty) };
                   /** Cambiar el plazo acordado: el precio a crédito de cada partida pasa a la columna de la escalera de ese plazo. */
                   const changeDays = (d: number) => {
                     setRevPrices((prev) => {
                       const next = { ...prev };
                       for (const l of qlines) {
                         const rp = prev[l.product_id] ?? rpOf(l);
-                        const st = ladderOfLine(l, rp, agreedDays).find((x) => x.days === d);
+                        const st = ladderOfLine(l, rp, agreedDays, fxQ).find((x) => x.days === d);
                         if (st?.price != null) next[l.product_id] = { ...rp, credit: st.price };
                       }
                       return next;
@@ -886,8 +933,8 @@ function Page() {
                           <tbody>
                             {qlines.map((l) => {
                               const rp = rpOf(l);
-                              const cost = num(l.cost);
-                              const freight = num(l.freight);
+                              const cost = shQ(l.cost);
+                              const freight = shQ(l.freight);
                               const landed = cost + freight;
                               // Financiamiento de la columna del plazo acordado (el guardado si es el de la COT).
                               const fin = agreedDays > 0 ? finAt(l, agreedDays) : 0;
@@ -935,7 +982,9 @@ function Page() {
                                 captura el precio (el de crédito se arma con la base que mandó el servidor). */}
                             {open
                               ? addLines.map((al, i) => {
-                                  const prod = data.products.find((p) => p.id === al.productId);
+                                  const prod0 = data.products.find((p) => p.id === al.productId);
+                                  // La base del financiamiento en la moneda de la cotización (Decisión 82).
+                                  const prod = prod0 ? { ...prod0, fin: finShown(prod0.fin ?? SIN_FIN, cur, fxQ) } : prod0;
                                   const rp = revPrices[al.productId] ?? { cash: 0, credit: 0, qty: al.qty };
                                   const setPrice = (which: "cash" | "credit", p: number) =>
                                     setRevPrices((prev) => {
@@ -1029,7 +1078,7 @@ function Page() {
                               <thead className="text-[11px] uppercase tracking-wide text-muted">
                                 <tr>
                                   <th className="py-1 font-medium">Producto</th>
-                                  {ladderOfLine(qlines[0]!, rpOf(qlines[0]!), agreedDays).map((st) => (
+                                  {ladderOfLine(qlines[0]!, rpOf(qlines[0]!), agreedDays, fxQ).map((st) => (
                                     <th key={st.days} className={`py-1 text-right font-medium ${st.agreed || st.days === 0 ? "text-ink" : ""}`}>
                                       {termLabel(st.days)}
                                       {st.agreed ? <span className="block text-[10px] normal-case tracking-normal text-accent">acordado</span> : null}
@@ -1041,7 +1090,7 @@ function Page() {
                                 {qlines.map((l) => (
                                   <tr key={`ladder-${l.id}`} className="border-t border-line/60">
                                     <td className="py-1.5">{l.product}</td>
-                                    {ladderOfLine(l, rpOf(l), agreedDays).map((st) => (
+                                    {ladderOfLine(l, rpOf(l), agreedDays, fxQ).map((st) => (
                                       <td key={st.days} className={`py-1.5 text-right tabular-nums ${st.agreed ? "bg-brand-soft/40" : ""}`}>
                                         {st.price != null ? (
                                           <>
@@ -1086,7 +1135,8 @@ function Page() {
                         const rojas = qlines
                           .map((l) => {
                             const rp = rpOf(l);
-                            const landed = num(l.cost) + num(l.freight);
+                            // Costo puesto en la moneda de la cotización: rp ya está en esa moneda.
+                            const landed = shQ(num(l.cost) + num(l.freight));
                             if (landed <= 0.009) return null;
                             const cashNeg = (both || qrow.price_offer === "cash") && rp.cash - landed < -0.009;
                             const creditNeg = (both || qrow.price_offer === "credit") && rp.credit - landed - (agreedDays > 0 ? finAt(l, agreedDays) : 0) < -0.009;
@@ -1105,7 +1155,7 @@ function Page() {
                         const priceDirty = qlines.some((l) => {
                           const rp = revPrices[l.product_id];
                           if (!rp) return false;
-                          return Math.abs(rp.cash - Number(l.cash_price)) > 0.009 || Math.abs(rp.credit - Number(l.credit_price)) > 0.009;
+                          return Math.abs(rp.cash - shQ(l.cash_price)) > 0.009 || Math.abs(rp.credit - shQ(l.credit_price)) > 0.009;
                         });
                         // Una partida nueva cuenta como cambio en cuanto tiene producto y cantidad.
                         const nuevas = addLines.filter((a) => a.productId && a.qty > 0 && !qlines.some((l) => l.product_id === a.productId));
@@ -1149,8 +1199,8 @@ function Page() {
                                         return {
                                           productId: l.product_id,
                                           qty: rp?.qty ?? Number(l.qty),
-                                          cashPrice: rp?.cash ?? Number(l.cash_price),
-                                          creditPrice: rp?.credit ?? Number(l.credit_price),
+                                          cashPrice: rp?.cash ?? shQ(l.cash_price),
+                                          creditPrice: rp?.credit ?? shQ(l.credit_price),
                                         };
                                       }),
                                       ...nuevas.map((a) => ({

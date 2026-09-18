@@ -294,7 +294,8 @@ function Page() {
       `Corte ${asOfDate} · ${legal}`,
       `Comisión ${rates.commission} · Tasa anual ${rates.annual} · FEGA ${rates.fega} · Total ${rates.total}`,
       ``,
-      `Saldo: ${money(block.ar)}`,
+      // La cartera del socio se suma en pesos (saldoMxn); si hay renglones en dólares se dice.
+      `Saldo: ${money(block.ar)}${block.rows.some((r) => (r.currency || "MXN") === "USD") ? " (total en pesos; los renglones en dólares van al tipo de cambio pactado)" : ""}`,
       ``,
       STATEMENT_PAPER_HEADERS.join(" | "),
       ...productRows(block, hidePaid).map((r) => statementPaperRow(r, r.currency || "MXN", false).join(" | ")),

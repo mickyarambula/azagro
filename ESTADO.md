@@ -72,7 +72,7 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 |---|---|
 | **ABIERTA** (8) | L8a (ajuste de inventario: ¿pide costo?) · H3 (Sesión D) · H4c (devolución a proveedor) · H4f (candado sin salida en la reversa de devolución) · H5 (lotes y caducidad) · H6 (unidades de medida) · D-B (tasa del pronto pago) · D-C (plazo de Santa Rosa a Azagro) |
 | Resuelta en documento, no construida | L3a (Decisión 9) · L3b (10) · L3c (11) · L5 (12 y 13) · L6 (14) · H2 · H4a (16) · H4b (15) · H7 · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) |
-| Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
+| Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2; captura: Decisión 82) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
 | En construcción / construida | H4d (Decisiones 46 a 54; pasos 0-3 de `PARCIALES.md` hechos) · H4e (Decisión 48; construida el 15-sep-2026) |
 | No es pregunta | N2 (requisito verificado el 5-sep-2026) |
 
@@ -454,6 +454,7 @@ entre los INCOMPLETOS "sin tocar" — sigue sin construirse: hoy la NC sobre una
 factura pagada queda atrapada, sin aplicarse a nada (LOGICA h.10, Sesión D).
 
 ### L4a. En un pedido en dólares, ¿el precio se captura en dólares o en pesos? (LOGICA h.14)
+**Cerrada el 18-sep-2026, Decisión 82:** el precio se captura en la moneda del pedido (campo con etiqueta «USD») y se guarda en pesos al TC del documento; pantalla y papel enseñan dólares. Construcción: bloque L4a (`MODELO-NEGOCIO.md` § 13.7).
 **La parte de MODELO quedó RESUELTA por la Decisión 2 del dueño (5-sep-2026,
 `DECISIONES.md`): la moneda y el tipo de cambio pertenecen a la OPERACIÓN, no
 al cliente.** Un mismo cliente puede tener un pedido en pesos y otro en

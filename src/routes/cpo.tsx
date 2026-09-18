@@ -8,7 +8,7 @@ import { SearchSelect, asOpts } from "@/components/search-select";
 import { convertCustomerPO, createCustomerPO, listCustomerPOs } from "@/lib/erp/cpo";
 import { listInventory } from "@/lib/azagro";
 import { exportCsv } from "@/lib/export-csv";
-import { money, num, todayMx } from "@/lib/utils";
+import { moneyIn, num, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/cpo")({ component: Page });
 
@@ -28,6 +28,10 @@ function Page() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Los precios de la OC del cliente van en SU moneda (Decisión 82): el precio de lista del
+  // catálogo está en pesos, así que solo se propone en pesos; en dólares se captura lo que
+  // dice la orden del cliente (el TC lo pone la tabla al convertirla en pedido).
+  const listIn = (p: { list_price: string } | undefined) => (currency === "MXN" ? num(p?.list_price) : 0);
   async function load() {
     const d = await listCustomerPOs();
     setData(d);
@@ -36,7 +40,7 @@ function Page() {
     setLocs(inv.locations.filter((l) => l.loc_type === "internal" || l.loc_type === "supplier"));
     if (lines.length === 0 && d.products[0]) {
       const p = d.products[0];
-      setLines([{ productId: p.id, qty: 1, unitPrice: Number(p.list_price), uom: p.uom || "TM" }]);
+      setLines([{ productId: p.id, qty: 1, unitPrice: listIn(p), uom: p.uom || "TM" }]);
     }
   }
   useEffect(() => {
@@ -122,7 +126,7 @@ function Page() {
             </select>
           </HeadBox>
           <HeadBox label="Total">
-            <p className="text-xl font-semibold tabular-nums">{money(total)}</p>
+            <p className="text-xl font-semibold tabular-nums">{moneyIn(total, currency)}</p>
           </HeadBox>
         </div>
 
@@ -131,7 +135,7 @@ function Page() {
           className="erp-btn-primary mt-3"
           onClick={() => {
             const p = data?.products[0];
-            setLines((ls) => [...ls, { productId: p?.id ?? 0, qty: 1, unitPrice: num(p?.list_price), uom: p?.uom || "TM" }]);
+            setLines((ls) => [...ls, { productId: p?.id ?? 0, qty: 1, unitPrice: listIn(p), uom: p?.uom || "TM" }]);
           }}
         >
           <Plus className="mr-1 inline size-3.5" />
@@ -163,7 +167,7 @@ function Page() {
                         onChange={(v) => {
                           const id = Number(v);
                           const prod = data?.products.find((x) => x.id === id);
-                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, unitPrice: Number(prod?.list_price ?? x.unitPrice) } : x)));
+                          setLines((ls) => ls.map((x, j) => (j === i ? { ...x, productId: id, uom: prod?.uom || x.uom, unitPrice: prod ? listIn(prod) || x.unitPrice : x.unitPrice } : x)));
                         }}
                       />
                     </td>
@@ -176,7 +180,7 @@ function Page() {
                     <td className="px-3 py-2">
                       <MoneyField value={line.unitPrice} onChange={(unitPrice) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, unitPrice } : x)))} />
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{money(line.qty * line.unitPrice)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{moneyIn(line.qty * line.unitPrice, currency)}</td>
                     <td className="px-2 py-2">
                       {lines.length > 1 && (
                         <button type="button" className="grid size-8 place-items-center text-muted hover:text-danger" onClick={() => setLines((ls) => ls.filter((_, j) => j !== i))}>
@@ -224,7 +228,7 @@ function Page() {
                     </Link>
                   ) : "—"}
                 </td>
-                <td className="px-3 py-3 text-right tabular-nums">{money(row.total)}</td>
+                <td className="px-3 py-3 text-right tabular-nums">{moneyIn(row.total, row.currency)}</td>
                 <td className="px-4 py-3 text-right">
                   {row.status !== "converted" && locs[0] && (
                     <div className="flex items-center justify-end gap-2">

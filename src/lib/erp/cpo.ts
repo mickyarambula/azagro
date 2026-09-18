@@ -1,3 +1,4 @@
+import { saleToMxn } from "@/lib/erp/fx";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
@@ -182,7 +183,6 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
     `;
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${companyId}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-    const total = lines.reduce((s, l) => s + Number(l.qty) * Number(l.unit_price), 0);
     const today = todayMx();
     // Tipo de cambio: en dólares se propone el renglón más reciente de la
     // tabla; tabla vacía = no se convierte. En pesos es 1 por definición.
@@ -197,6 +197,9 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
       }
       fxRate = pick.rate;
     }
+    // Decisión 82: el precio de la OC del cliente está en su moneda; el pedido lo guarda en pesos.
+    const priceMxn = (p: string | number) => saleToMxn({ price: p, currency: cpo[0].currency, fx: fxRate, what: `la OC del cliente ${cpo[0].customer_po_number} en dólares` });
+    const total = lines.reduce((s, l) => s + Number(l.qty) * priceMxn(l.unit_price), 0);
     // Plazo: el capturado en la ficha del cliente (0 = contado). No hay plazo
     // escrito en el código; el pedido nace en borrador y se revisa antes de confirmar.
     const partner = await sql<{ payment_days: number | null }>`
@@ -221,7 +224,7 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
     `;
     for (const line of lines) {
       const qty = Number(line.qty);
-      const price = Number(line.unit_price);
+      const price = priceMxn(line.unit_price);
       const uom = line.uom;
       await sql`
         insert into sales_lines (so_id, product_id, qty, unit_price, uom)
