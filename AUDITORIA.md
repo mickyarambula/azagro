@@ -1994,3 +1994,126 @@ Los tres usan un dato como sustituto de otro que ya no representa: `credit_days 
 
 La FP en dólares guarda `amount` en la moneda de la OC (`src/lib/azagro.ts:1595`, total sin convertir), así que del lado proveedor sí podría haber mezcla de monedas en "Por pagar" y en la proyección — no verificado, va a la ronda de los 56.
 
+
+## 4. Análisis de diseño de los Altos #27–#36 (17-sep-2026)
+
+Pasada con el lente de METODOLOGIA-TRABAJO.md § 4 sobre los diez hallazgos, con una sola pregunta encima de cada uno: ¿es un bug, o el síntoma de algo mal diseñado? Cuatro pasadas de solo lectura verificaron cada uno contra el código de HOY (después de los cierres de los grupos A–E y las Decisiones 69–75), no contra lo que decía la fase 1 del 16-sep. Veredicto corto: **dos son bugs mecánicos (#36, y la mitad visible de #34); los otros ocho son síntomas de seis piezas de diseño**, y tres pares se resuelven juntos.
+
+### Tabla de veredictos
+
+| # | Hallazgo | Veredicto | Pieza |
+|---|---|---|---|
+| 27 | Devolución dispara falsa alarma del cuadre | **Diseño** | GRUPO G (invoices sin clase de documento) |
+| 28 | Venta directa se factura sin OC que la respalde | **Diseño** — flujo mal modelado | GRUPO F (el pedido directo nace cojo) |
+| 29 | "Dólares" no se reconoce como USD | **Diseño** — mismo hueco del "lado" ya corregido | GRUPO H (el importador que adivina) |
+| 30 | "Cargar saldos" no exige preview | **Diseño** — aplicar nunca consume lo previsualizado | GRUPO H |
+| 31 | Resync con caché global en serverless | **Diseño** — junto con #54 son una sola pieza | GRUPO I (el resync fantasma) |
+| 32 | "Recibir" OC desde el pedido sin diálogo | **Diseño** — principio ya construido, botón que se lo saltó | GRUPO J (acción de dinero sin objeto confirmado) |
+| 33 | "Registrar cobro" aplica a la primera factura filtrada | **Diseño** | GRUPO J |
+| 34 | Guía de carga falla en silencio y se imprime | **Mixto**: bug (el catch) + diseño (el permiso) | suelto + pregunta Decisión 74 |
+| 35 | El estado de cuenta dice "TIIE" al cliente | **Diseño** — el texto se arma fuera del embudo | GRUPO K (doc-text con dos contratos) |
+| 36 | NC titulada "Factura" | **Bug** — switch incompleto; la convención ya existe en 15 sitios | suelto (con #72) |
+
+### GRUPO F — el pedido directo nace cojo (#28): el ejemplo canónico de flujo mal modelado
+
+**Lo verificado (ya no es "sospecha" como decía la fase 1: está confirmado de punta a punta).** No existe ningún candado, en ningún lugar, que amarre un pedido `route_kind = 'supplier'` a una OC directa — y el camino para llegar ahí no es el caso raro que describía la auditoría (una OC cancelada después), sino **el camino por default**:
+
+- `saveOrder` (`src/lib/erp/orders.ts:537-731`) acepta `routeKind: "supplier"` sin validar nada y **nunca inserta en `purchase_orders`**. El selector "Entrega proveedor" está en el formulario normal (`src/components/order-form.tsx:230-242`), sin aviso alguno.
+- `decideQuote` (`src/lib/erp/ops.ts:1611-1730`) solo crea OC ligadas si la cotización vino de una RFQ con ganadores elegidos (`if (req[0])`, `ops.ts:1695`); la pantalla (`src/routes/quotes.tsx:1210-1320`) ofrece "Directo / brokeraje" a **cualquier** cotización — sin RFQ, el `for` no corre y el pedido nace directo con cero OC, sin error.
+- La pantalla de compras no permite ligar a mano una OC directa a un pedido (`createPurchase` no acepta `soId`); la única inserción con `so_id` en todo el código es la del camino RFQ.
+- `deliverPartial` (`src/lib/azagro.ts:1880-1910`) factura al cliente incondicionalmente; si la consulta de OC directas regresa vacía, el `for` no itera y nadie avisa: FV real, deuda al proveedor jamás.
+
+Las Decisiones 14/28/29/30 dicen cuándo nace la deuda, pero todas **asumen que la OC ya existe**; ninguna contesta "¿y si nunca existió?". `ESTADO.md` § 1.9 ya anotaba la tensión hermana (`route_kind` es un campo demasiado liviano para lo que decide). Agravante: el pedido directo sin OC sí aparta línea de crédito del cliente (Decisión 51) — compromete al cliente por una compra que el sistema nunca supo a quién hacerle.
+
+**(a) El parche.** Candado en `deliverPartial`: si `direct` y no hay OC directa viva ligada, detenerse con mensaje (y bitácora). Costo: unas líneas. Qué deja sin resolver: se siguen capturando y confirmando pedidos directos sin proveedor; el error solo se muda del silencio al momento de entregar — cuando el precio ya se prometió y el camión quizá ya salió. Es exactamente el candado tardío que la metodología llama "peor que el bug que tapa" si no tiene salida nombrada.
+
+**(b) El rediseño.** Un pedido directo/brokeraje **nace con su OC en el mismo acto**, atómicamente: al capturar con `routeKind = "supplier"`, el formulario pide proveedor y costo por partida y la transacción crea la(s) `purchase_orders` con `so_id` — la misma pieza que ya hace `decideQuote` por el camino RFQ, movida a una función compartida que llamen los dos nacimientos; el selector "Directo / brokeraje" al decidir cotización se condiciona a que exista ganador por partida (o lo pide ahí mismo); `deliverPartial` ya no necesita candado porque el invariante se garantizó al confirmar. Qué implica: extender `order-form.tsx` (bloque proveedor+costo por partida), compartir la creación de OC de `ops.ts:1698-1729`, tocar `quotes.tsx`. Es un bloque de tamaño real, no una tarde. Qué gana: la cuenta por pagar del brokeraje deja de depender de que dos pantallas capturadas por dos personas en dos momentos coincidan — cierra por diseño la familia entera, incluida la variante del GRUPO E ("OC cancelada antes de entregar").
+
+**Pregunta de negocio (dueño):** cuando un pedido se marca directo a mano, ¿SIEMPRE debe existir ya proveedor y costo acordado antes de poder confirmarlo (como hoy se exige política de cobro o plazo del proveedor)? Si sí → rediseño (b). Si no ("se captura rápido y el proveedor se consigue después") → hace falta la otra regla: qué detiene la factura al cliente mientras no haya proveedor amarrado (el parche (a) como transición, con salida nombrada).
+**Pregunta anexa:** `routeKind = 'asr'` hoy no crea OC por ningún camino. ¿El circuito ASR necesita el mismo amarre (OC/deuda a Santa Rosa como proveedor físico) o su contraparte es solo financiera? No se pudo determinar leyendo; lo contesta el dueño.
+
+### GRUPO G — invoices no tiene clase de documento (#27, y el hueco de fondo detrás de #36)
+
+**Lo verificado.** La subconsulta de `invoiced_qty` en `salesLineGaps` (`src/lib/erp/parciales.ts:138-143`) suma `invoice_lines.qty` sin distinguir FV de NC; `returnSale` inserta la NC con `qty` positivo → toda devolución normal marca `overInvoiced` en falso, erosionando al único vigilante de la Decisión 47. **Hallazgo adicional de esta pasada:** la NC espejo de la reversa de entrega (`src/lib/erp/delivery-reversal.ts:266-282`) tiene el mismo patrón — cualquier reversa del paso 4/7 dispara la misma falsa alarma. Y el pendiente que dejó anotado el GRUPO D queda determinado: la subconsulta correlaciona por `product_id`, no por partida — con el mismo producto en dos renglones, ambos ven el `invoiced_qty` completo (doble conteo cruzado), con o sin NC.
+
+**El porqué de diseño.** `invoices.kind` es el lado de la cuenta (customer/supplier), no la clase de papel. La clase (FV/NC/FI/ATC/FP/PAG) vive **solo en el prefijo del folio**, un string: 17 lugares en 6 archivos filtran con `name like 'FV-%'` / `'NC-%'` a mano, y la vez 18 (`parciales.ts`) se les olvidó. Es el mismo patrón que cerraron los grupos D y E: un dato sustituto haciendo el trabajo de un campo que no existe. El #36 es su síntoma en el papel (ver abajo): `invoicePaperTitle` no puede dar el título correcto porque nadie le pasa la clase.
+
+**(a) El parche.** `and i.name like 'FV-%'` en la subconsulta (y el gemelo de `delivery-reversal.ts` si se quiere cerrar completo). Una línea, sin migración. Deja sin resolver: el sitio 19 del olvido futuro, y el doble conteo por producto-vs-partida en el mismo renglón.
+
+**(b) El rediseño.** Columna `invoices.doc_class` ('FV'|'NC'|'FI'|'ATC'|'FP'|'PAG'), migración aditiva con backfill por prefijo (patrón 0038-0043), poblada en los 8 sitios de inserción localizados (`azagro.ts:1370,1606,2052,2484`, `cutover-core.ts:374`, `ops.ts:2064,2838`, `delivery-reversal.ts:270`); los 17 lectores se simplifican. Extensión natural (alcance mayor, se puede partir): poblar `invoice_lines.line_id` también en la FV (hoy solo la NC lo lleva desde 0042) para que el cuadre trabaje partida por partida en los dos sentidos. Qué gana: cierra de una vez la familia "documento equivocado contado donde no debía" y el prefijo del folio deja de ser regla de negocio implícita.
+
+**Pregunta (técnica, con consecuencia):** ¿parche de una línea ahora y la columna después, o la columna de una vez dado que ya son 17 repeticiones y el cuadre por partida la va a necesitar? No reabre ninguna decisión.
+
+### GRUPO H — el importador que adivina y el aplicar que no vio el preview (#29, #30)
+
+**#29 verificado.** `cutover-core.ts:112`: `currency: /usd|dll/i.test(c[7]) ? "USD" : "MXN"`. No hay tercer estado: "Dólares", "Dolares", "US$" caen a MXN **en silencio** — la fila entra con la deuda subvaluada ~18×, y ni el candado de "USD sin TC" (Decisiones 70-71) la alcanza porque nunca se supo que era USD. Es letra por letra el mismo hueco que el "lado" antes del cierre del grupo B: adivinar en vez de rechazar. La regla ya existe (Decisión 66: lo que el CSV no trae claro, se rechaza con motivo); solo falta aplicarla a moneda: lista cerrada de valores + `unknown` → rechazo visible en preview y apply. Parche y diseño coinciden aquí — la pieza correcta ES la extensión del grupo B. El vocabulario final se afina cuando llegue el archivo real de Compaq (mismo trade-off ya aceptado para "lado").
+
+**#30 verificado.** `previewOpenInvoices` y `applyOpenInvoices` son dos server functions independientes que **re-parsean el textarea cada una por su lado** (`cutover.ts:97-160`); el botón "Cargar saldos" no exige preview (`importar.tsx:176-199`) y el apply ante un folio existente hace `skipped += 1` sin comparar importes (`cutover-core.ts:328-337`) — la comparación de la Decisión 65 vive solo en el preview. Una corrección editada entre preview y apply, o un apply directo, entra o se pierde sin que nadie la haya visto.
+
+**(a) El parche.** Que `apply` también calcule y reporte `differing` en su resultado. Barato; pero sigue siendo posible aplicar un texto que nadie previsualizó — tapa el síntoma, no la estructura.
+**(b) El rediseño.** "Aplicar" **consume exactamente el lote que "previsualizar" congeló**: el preview guarda el lote parseado (id/hash del contenido), el botón de aplicar se habilita solo con un preview vigente y manda el id, y el servidor aplica ESE lote — si el textarea cambió, el preview se invalida y se vuelve a previsualizar. Hace el desfase **imposible**, no improbable. Costo: moderado (estado del lote congelado + los dos endpoints); es la misma filosofía del "preview compara contra lo congelado" de la Decisión 65, llevada a su conclusión. Importa hacerlo **antes** de cargar el corte real (CLAUDE.md § Siguiente 1).
+
+### GRUPO I — el resync fantasma (#31 + #54: una sola pieza)
+
+**Lo verificado.** `syncCompaqCatalogs` corre implícitamente en cada `seedCompany` (`azagro.ts:96-101`, ANTES del `return` de "ya sembrada"), que corre en cada `getAccessState` (`users.ts:59-63`), que corre en cada carga del shell (~90s por pestaña). El único freno es un global de módulo con TTL de 6 h (`compaq.ts:14-21`) que **en Vercel serverless vive por instancia**: cada cold start resetea el contador. Y cuando corre, el upsert pisa `name`, `legal_name`, `rfc`, `group_name`, `partner_kind` en cada corrida (`compaq.ts:101-118`) — solo límite/plazo/banderas están protegidos (Decisión 67). El botón manual (`resyncCompaq`, `catalogs.ts:71-79`) tampoco deja bitácora. #31 es "corre sin que nadie lo pida"; #54 es "y cuando corre, pisa sin rastro". Parchar uno solo deja al otro vivo.
+
+**(a) El parche.** Persistir la marca de última corrida en la base (patrón `company_settings` ya existe) y/o proteger más columnas en el upsert. Deja sin resolver: el resync sigue siendo "algo que pasa solo" e invisible en bitácora.
+**(b) El rediseño.** El resync es **una acción explícita, no un efecto del tráfico**: se quita la llamada implícita de `seedCompany`; los catálogos se cargan una sola vez al sembrar la empresa (con `force`, un solo momento definido) y de ahí en adelante solo el botón "Cargar / actualizar catálogos" (que ya existe, con `settings:edit`) — con `writeAudit` de qué corrió y qué pisó (anterior→nuevo, patrón `savePartner`). Qué gana: el dueño controla exactamente cuándo se tocan los catálogos y lo ve en bitácora; desaparece el vector de "mi corrección de RFC se revirtió sola un martes".
+
+**Preguntas (dueño):** (1) ¿el resync solo corre a mano (con la siembra inicial como única excepción)? (2) De `name`/`legal_name`/`rfc`/`group_name`: ¿cuáles siguen viniendo de Compaq en cada resync y cuáles pasan a "solo al crear" como ya son límite y plazo? Nota: `list_price` de producto ya es "solo si está en 0" (`compaq.ts:157`) — el criterio ya existe dentro del mismo archivo, solo que aplicado a medias.
+
+### GRUPO J — acciones que escriben dinero/kardex sin objeto confirmado (#32, #33)
+
+**El principio ausente — que el propio sistema ya construyó en cuatro sitios:** ninguna acción que escribe dinero o mueve kardex fija su documento por omisión o por posición en una lista; el documento lo señala la persona y se enseña qué va a pasar antes del clic definitivo. Así trabajan hoy recibir/entregar parcial (`PartialQtyDialog`) y las reversas/cancelaciones (`cancel-doc.tsx`: vista previa + motivo + segundo clic). #32 y #33 son dos botones que nacieron antes o al margen de ese patrón.
+
+**#32 verificado.** `sales.$orderId.tsx:792-808` llama `receivePurchase` directo en `onClick` — el MISMO servidor que en `/purchases` va envuelto en `PartialQtyDialog` con cantidades precargadas y segundo clic. No es "envolver el JSX": `getOrder` no trae las líneas de la OC (`orders.ts:356-369`), hay que extender esa consulta. Es la pieza de paridad que el paso 1.4 de parciales dejó fuera.
+
+**#33 verificado.** `credit.tsx:125`: el botón de cabecera hace `setPay({ id: filtered[0].id, amount: residual completo })` — la "primera" es la más vencida del filtro, no la que el usuario tenía en mente; el diálogo ni pone el folio en el título. El botón correcto por fila **ya existe** (`credit.tsx:254`). Dato que la fase 1 no tenía: la **Decisión 13** (7-sep, cerrada, pendiente de construir — `ESTADO.md` L5) ya contestó que el cobro de varias facturas existe como **reparto explícito con propuesta del sistema y confirmación de la persona**. El botón de cabecera no es una implementación parcial de eso: no reparte ni propone nada. Es huérfano.
+
+**(a) El parche.** #32: extender `getOrder` con líneas y reusar `PartialQtyDialog`. #33: quitar el botón de cabecera (o habilitarlo solo con exactamente una factura filtrada) — queda el de fila, que es correcto. Costo bajo los dos.
+**(b) El rediseño (solo #33).** Construir la Decisión 13: `registerPayment` acepta un monto y lo reparte con propuesta de la más vieja a la más nueva, la persona confirma o cambia. El botón de cabecera se convierte en la entrada de ESE flujo — deja de adivinar y pasa a proponer. Alcance mayor (motor + pantalla); cierra una decisión de negocio que lleva 10 días decidida y sin construir.
+
+**Pregunta (dueño):** ¿la Decisión 13 se construye en esta ronda (y el botón de cabecera se vuelve su entrada) o se aparta y por ahora solo se quita el botón? Cualquiera de las dos cierra el riesgo de hoy.
+
+### GRUPO K — el papel se arma fuera del embudo y la prueba no lo ve (#35 + #61, toca #72)
+
+**#35 verificado.** El texto "TIIE a la fecha de interés + X%" se construye en la **pantalla** (`ratesOf`, `src/routes/statements.tsx:125-134`), no en `doc-text.ts`, y de ahí fluye a cuatro salidas reales: papel impreso, notas, encabezado de envío y correo/WhatsApp masivo. `doc-text.ts` no puede impedirlo porque `statementNotes`/`statementSendHeader` reciben **strings ya armados** por el llamador — mientras `interestInvoiceClientCalc` (la FI, el patrón correcto en el mismo archivo) recibe la tasa **numérica** cruda y arma el texto adentro. Dos contratos conviviendo; el comentario "los papeles solo leen de aquí" ya no se cumple.
+
+**Por qué la malla no lo atrapó (#61 determinado con precisión):** `erp-documento-limpio.test.mjs` (1) no tiene "TIIE" en `PROHIBIDAS` y (2) su mecanismo es grep de **franjas de código fuente**, y `ratesOf` y `sendMailto` viven fuera de toda franja. Aunque se agregara la palabra, no lo vería.
+
+**(a) El parche.** Quitar "TIIE" de `ratesOf` (calcular un solo número, como la FI) y agregar TIIE/margen/circuito/Santa Rosa a `PROHIBIDAS`. Horas. Deja sin resolver: el próximo texto armado fuera del embudo vuelve a colarse sin que `npm test` lo vea.
+**(b) El rediseño.** Dos movimientos: (i) **contrato único** — toda función de `doc-text.ts` recibe valores crudos (números, fechas, códigos), nunca strings pre-armados; `ratesOf` se muda adentro; (ii) **la prueba ejecuta, no grepea** — `erp-documento-limpio` llama las funciones de papel/envío con datos de ejemplo y corre `limpio()` sobre el HTML/texto **resultante**, cubriendo el 100% de lo generado sin importar en qué archivo se ensambló. El precedente de que el embudo con flag funciona ya existe: el cierre de #37 (Decisión 75) puso la marca "REVERTIDA" en `letterhead()`, un único punto de render. Qué gana: la regla 7 deja de depender de que nadie olvide una franja.
+
+### Los dos bugs mecánicos
+
+**#36 (con #72).** `invoicePaperTitle` (`doc-text.ts:281-286`) es la ÚNICA función de ~16 que no aplica la convención de clase por prefijo de folio: le falta la rama NC → "Nota de crédito". Y `credit.tsx:373` hardcodea "Cuenta por pagar" para proveedor en vez de llamar a la misma función (#72) — el envío de una NC también dice "Factura" por ahí. Parche: la rama por folio (el criterio de las otras 15) + un solo título para FP. No amerita tocar esquema por sí solo; si el GRUPO G construye `doc_class`, esta función lo lee y la convención por prefijo muere sola. **Micro-decisión:** ¿"Factura de proveedor" o "Cuenta por pagar"? Una sola, la que diga el dueño.
+
+**#34 (dos mitades).** La mitad bug: `saveGuia(...).catch(() => null)` seguido de imprimir incondicional (`sales.$orderId.tsx:1088-1145`) — se propaga el error y no se imprime si no guardó; es el único "guardar y seguir aunque falle" sobre una ESCRITURA en todo `src/routes/` (los demás `.catch(() => null)` son lecturas con degradación aceptable). La mitad diseño: el fallo no es raro, es **garantizado por permisos** — `saveGuia` exige `sales:edit` (`orders.ts:855`) y el rol de almacén (el que está en el andén con el chofer) tiene `sales:deliver`; el botón que abre el diálogo ni siquiera tiene gate, así que almacén llena todo, captura la firma, y el guardado muere en silencio siempre. **Pregunta (dueño), con el criterio que él mismo aplicó en la Decisión 74:** la guía de carga (chofer, placas, firma) ¿es "mover mercancía" (→ `deliver`, almacén la guarda) o "editar el documento" (→ `edit`, y entonces almacén necesita otra salida nombrada)? No reabre la 74; le aplica su criterio a un camino que no se revisó.
+
+### Hallazgos nuevos de esta pasada (no estaban en la fase 1)
+
+1. La NC espejo de la reversa de entrega (`delivery-reversal.ts:266-282`) dispara la misma falsa alarma que #27 y tampoco pobla `invoice_lines.line_id` (0042).
+2. El doble conteo por producto-vs-partida en `salesLineGaps` (lo que GRUPO D dejó como "no determinado") está confirmado: pasa siempre que un pedido repite producto en dos renglones.
+3. `saveOrder`/`decideQuote` numeran PV/OC con `count(*)+1` (`ops.ts:1632,1715`) — el patrón del GRUPO C, fuera de las seis series que ese cierre cubrió (la nota del propio cierre ya lo anotaba para otras series; aquí el sitio exacto).
+4. El botón "Guía de carga" no tiene gate de permiso al abrirse (`sales.$orderId.tsx:391`).
+5. Comentario obsoleto en `sales.$orderId.tsx:40-42` ("exige purchases:edit"; el código pide `deliver`).
+
+### Preguntas para el dueño (las que abren o cierran caminos)
+
+1. **#28:** ¿un pedido directo puede confirmarse sin proveedor y costo amarrados? (No → nacimiento atómico pedido+OC; Sí → regla de qué detiene la FV mientras tanto.) Y ¿el circuito ASR necesita OC propia o su contraparte es solo financiera?
+2. **#27:** ¿parche de una línea o columna `doc_class` de una vez (17 sitios ya la piden a gritos)?
+3. **#29:** confirmar que moneda sigue la regla del "lado": no reconocida → fila rechazada con motivo (no ampliar la adivinanza).
+4. **#31/#54:** ¿el resync solo a mano (+ siembra inicial única)? ¿Qué campos pasan a "solo al crear"?
+5. **#33:** ¿se construye la Decisión 13 (reparto con propuesta) en esta ronda, o se quita el botón y la 13 espera?
+6. **#34:** la guía de carga ¿es `deliver` o `edit`?
+7. **#36/#72:** título único para FP: ¿"Factura de proveedor" o "Cuenta por pagar"?
+
+### Orden propuesto (por riesgo real, respetando "la salida va primero")
+
+1. **GRUPO J, #33** — quitar/acotar el botón de cabecera: es dinero cobrado a la factura equivocada con un clic, y el arreglo mínimo es de una tarde (la Decisión 13, si el dueño la quiere ahora, es bloque aparte).
+2. **GRUPO F (#28)** — primero la decisión del dueño; según ella, el rediseño del nacimiento o el candado con salida. Es el más grave en dinero (FV sin deuda al proveedor) y hoy es el camino por default.
+3. **GRUPO G (#27)** — el parche del filtro (una línea + gemelo) de inmediato para recuperar el vigilante de la Decisión 47; la columna `doc_class` según la respuesta 2, idealmente junto con #36/#72 que la aprovechan.
+4. **GRUPO H (#29, #30)** — antes de cargar el corte real de Compaq, que es el siguiente paso del producto. #29 es chico; #30 con el lote congelado.
+5. **#34 + #36/#72** — mecánicos una vez contestadas las preguntas 6 y 7.
+6. **GRUPO K (#35 + #61)** — el parche de `ratesOf` de inmediato (hoy sale "TIIE" en papel real); el rediseño del test (ejecutar y barrer el resultado) como cierre, porque es la malla que protege todo lo anterior.
+7. **GRUPO I (#31/#54)** — última porque no toca dinero del cliente, pero antes de producción real: es la que puede pisar capturas manuales.
