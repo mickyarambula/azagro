@@ -122,7 +122,7 @@ export const createCustomerPO = createServerFn({ method: "POST" })
             productId: z.number(),
             qty: z.number().positive(),
             uom: z.string(),
-            unitPrice: z.number().nonnegative(),
+            unitPrice: z.number().positive(),
           }),
         )
         .min(1),

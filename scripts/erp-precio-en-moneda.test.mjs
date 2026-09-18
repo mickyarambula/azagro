@@ -223,3 +223,36 @@ test("recordatorios y alertas: el saldo se dice en la moneda de la factura", () 
   assert.ok(a.includes("Saldo ${moneyIn(sh.residual, sh.currency)}"), "los recordatorios por socio");
   assert.ok(a.includes("${moneyIn(i.residual, i.currency)}"), "el digesto");
 });
+
+// ---------------------------------------------------------------------------
+// Avisos cerrados (18-sep-2026, tras el revisor de dinero): el ajuste
+// cambiario del estado de cuenta imprimía pesos con signo US$; una OC del
+// cliente en dólares dejaba pasar un precio en 0.
+// ---------------------------------------------------------------------------
+test("estado de cuenta (pantalla): la columna «Ut. cambiaria» siempre en pesos, aunque la fila esté en el bloque de dólares", () => {
+  const st = src("src/routes/statements.tsx");
+  assert.ok(st.includes('if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? money(r.utCambiaria) : "—");'), "la fila");
+  assert.ok(st.includes("if (withFx) cells.push(money(fx));"), "el total");
+  assert.ok(!/utCambiaria.*moneyIn\(/.test(st) && !/moneyIn\(fx,/.test(st), "ningún camino la enseña en la moneda del bloque");
+});
+
+test("OC del cliente en dólares: el servidor exige precio positivo por partida, y la pantalla lo dice antes de mandarlo", () => {
+  const cpoLib = src("src/lib/erp/cpo.ts");
+  assert.ok(cpoLib.includes("unitPrice: z.number().positive(),"), "0 ya no es un precio válido");
+  const cpoPage = src("src/routes/cpo.tsx");
+  assert.ok(cpoPage.includes("const sinPrecio = lines.find((l) => l.productId && l.qty > 0 && !(l.unitPrice > 0));"), "detecta la partida sin precio antes de guardar");
+  assert.ok(cpoPage.includes("Falta el precio de ${p?.code ?? sinPrecio.productId}: escríbelo en ${currency}."), "y dice en qué moneda capturarlo");
+});
+
+// ---------------------------------------------------------------------------
+// El revisor lo encontró en la segunda pasada: la pantalla ya quedó en
+// pesos, pero el papel (statementPaperRow/Totals de doc-text.ts) tenía el
+// mismo bug — un alias local "money" que en realidad llamaba moneyIn(n, cur).
+// ---------------------------------------------------------------------------
+test("el papel del estado de cuenta (doc-text.ts): la columna «Ut. cambiaria» también siempre en pesos", () => {
+  const dt = src("src/lib/erp/doc-text.ts");
+  assert.ok(dt.includes('if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, "MXN") : "—");'), "la fila del papel");
+  assert.ok(dt.includes('if (withFx) cells.push(moneyIn(rows.reduce((s, r) => s + r.utCambiaria, 0), "MXN"));'), "el total del papel");
+  const fn = dt.slice(dt.indexOf("export function statementPaperRow"), dt.indexOf("export function quoteNotes"));
+  assert.ok(!/utCambiaria.*\bmoney\(/.test(fn.replace(/moneyIn/g, "MONEYIN")), "ningún camino la enseña con el alias local (moneyIn con cur)");
+});

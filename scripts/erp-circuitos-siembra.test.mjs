@@ -20,7 +20,7 @@ test("seedCircuits (circuits-seed.ts: ni circuits.ts inserta, ni azagro.ts nombr
   assert.ok(fn.includes("export async function seedCircuits("));
   for (const row of [
     "'CONTADO', 'Contado', null, null, 'azagro', null, true, 1",
-    "'ASR', 'Circuito ASR', null, 'costo_comision', 'azagro', 'santa_rosa', true, 2",
+    "'ASR', 'Circuito ASR', null, 'costo_comision', 'azagro', 'santa_rosa', false, 2",
     "'SANTA_ROSA', 'Línea Santa Rosa', null, 'costo_margen', 'santa_rosa', 'santa_rosa', false, 3",
     "'PROPIA', 'Línea propia', null, null, 'azagro', 'azagro', false, 4",
   ]) {
@@ -41,4 +41,26 @@ test("corre dentro de seedCompany, ANTES del candado «ya sembrada»: una empres
   const gate = body.indexOf("if (already[0]?.seeded_at) return;");
   assert.ok(seed !== -1 && gate !== -1 && seed < gate, "la siembra va antes del return de «ya sembrada»");
   assert.ok(body.indexOf("insert into company_settings") < seed, "y después de que exista company_settings (el insert hace join con ella)");
+});
+
+// ---------------------------------------------------------------------------
+// Aviso cerrado (18-sep-2026): una empresa nueva nacía con el ASR "elegible"
+// (enabled = true) sin que nadie hubiera capturado su comisión de apertura.
+// El ASR nace sin elegir; saveCircuitCommission lo activa al capturarla, y
+// solo si su base ya está construida (nunca un circuito "por construir").
+// ---------------------------------------------------------------------------
+test("el ASR nace sin elegir (enabled = false); Contado no necesita nada capturado y sí nace elegible", () => {
+  const fn = src("src/lib/erp/circuits-seed.ts");
+  assert.ok(fn.includes("select cs.company_id, 'CONTADO', 'Contado', null, null, 'azagro', null, true, 1"), "Contado elegible desde el nacimiento");
+  assert.ok(fn.includes("select cs.company_id, 'ASR', 'Circuito ASR', null, 'costo_comision', 'azagro', 'santa_rosa', false, 2"), "ASR nace sin elegir");
+});
+
+test("saveCircuitCommission activa el circuito al capturar su comisión, solo si la base ya está construida", () => {
+  const c = src("src/lib/erp/circuits.ts");
+  const fn = c.slice(c.indexOf("export const saveCircuitCommission"), c.length);
+  assert.ok(fn.includes('const construido = prev[0].financing_base === "costo_comision" || prev[0].financing_base === "costo_margen";'), "la base decide, no la comisión");
+  assert.ok(fn.includes("update credit_circuits set commission_rate = ${data.commissionRate}, enabled = ${construido} where"), "una sola escritura: comisión y elegibilidad juntas");
+  // PROPIA (financing_base null, "por construir") sigue eligible por el validador pero
+  // nunca se activa por aquí: su base no es de las dos construidas.
+  assert.ok(fn.includes('z.enum(["ASR", "PROPIA"])'), "el validador sigue aceptando los dos");
 });

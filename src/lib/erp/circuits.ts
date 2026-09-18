@@ -353,6 +353,11 @@ export const saveFundingRate = createServerFn({ method: "POST" })
  * Captura de la comisión de apertura de un circuito (paso 3): "Comisión ASR"
  * salió de Ajustes y este es el único lugar donde vive. Solo administrador,
  * con bitácora. Solo circuitos que financian con comisión (hoy, el ASR).
+ * Además lo vuelve elegible: nace sin elegir (`circuits-seed.ts`) y esta es
+ * la única puerta por la que se activa — solo si su base ya está construida
+ * (`costo_comision`/`costo_margen`); capturarle una comisión a un circuito
+ * "por construir" (PROPIA) no lo activa, porque circuitTerms lo sigue
+ * deteniendo por la base, no por la comisión.
  */
 export const saveCircuitCommission = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
@@ -361,12 +366,13 @@ export const saveCircuitCommission = createServerFn({ method: "POST" })
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
     await assertAdmin(sql, context.userId);
-    const prev = await sql<{ name: string; commission_rate: string | null }>`
-      select name, commission_rate::text from credit_circuits where company_id = ${companyId} and code = ${data.code}
+    const prev = await sql<{ name: string; commission_rate: string | null; financing_base: string | null }>`
+      select name, commission_rate::text, financing_base from credit_circuits where company_id = ${companyId} and code = ${data.code}
     `;
     if (!prev[0]) throw new Error("El circuito no está en el catálogo.");
+    const construido = prev[0].financing_base === "costo_comision" || prev[0].financing_base === "costo_margen";
     await sql`
-      update credit_circuits set commission_rate = ${data.commissionRate} where company_id = ${companyId} and code = ${data.code}
+      update credit_circuits set commission_rate = ${data.commissionRate}, enabled = ${construido} where company_id = ${companyId} and code = ${data.code}
     `;
     await writeAudit(sql, {
       companyId,

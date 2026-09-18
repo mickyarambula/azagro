@@ -221,7 +221,9 @@ export function statementPaperRow(r: StatementPaperRow, cur: string, withFx: boo
     comision,
     total,
   ];
-  if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? money(r.utCambiaria) : "—");
+  // El ajuste cambiario es pesos por naturaleza (no se divide entre monedas); el resto
+  // de la fila sí va en la moneda del bloque (`money` de aquí arriba), esta columna nunca.
+  if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, "MXN") : "—");
   return cells;
 }
 
@@ -243,7 +245,7 @@ export function statementPaperTotals(rows: StatementPaperRow[], cur: string, wit
     sum((r) => r.comisionFega),
     sum((r) => r.totalFinanciero),
   ];
-  if (withFx) cells.push(sum((r) => r.utCambiaria));
+  if (withFx) cells.push(moneyIn(rows.reduce((s, r) => s + r.utCambiaria, 0), "MXN"));
   return cells;
 }
 

@@ -83,7 +83,9 @@ function rowCells(r: Row, cur: string, withFx: boolean) {
     r.sinMora ? "sin mora" : r.sinTiie ? "sin TIIE" : !r.vencido ? "—" : r.sinPolitica ? "sin política" : Math.abs(r.totalFinanciero) > 0.009 ? moneyIn(r.totalFinanciero, cur) : "—",
     r.sinTiieBono ? "sin TIIE" : r.bonificacion > 0.009 ? moneyIn(r.bonificacion, cur) : "—",
   ];
-  if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, cur) : "—");
+  // El ajuste cambiario es pesos por naturaleza (se calcula sobre el TC pactado del documento);
+  // el resto de la fila sí va en la moneda del bloque, esta columna nunca.
+  if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? money(r.utCambiaria) : "—");
   return cells;
 }
 
@@ -114,7 +116,7 @@ function totalsCells(rows: Row[], cur: string, withFx: boolean) {
     moneyIn(tot, cur),
     moneyIn(bono, cur),
   ];
-  if (withFx) cells.push(moneyIn(fx, cur));
+  if (withFx) cells.push(money(fx));
   return cells;
 }
 

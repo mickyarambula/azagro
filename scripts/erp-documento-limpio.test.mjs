@@ -251,13 +251,14 @@ function statementPaperRow(r, cur, withFx) {
     r.sinMora ? PAPER_DASH : r.vencido ? String(r.daysVencidos) : `faltan ${r.diasPorVencer}`,
     interes, comision, total,
   ];
-  if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? money(r.utCambiaria) : "—");
+  // El ajuste cambiario es pesos por naturaleza; el resto de la fila va en la moneda del bloque.
+  if (withFx) cells.push(Math.abs(r.utCambiaria) > 0.009 ? moneyIn(r.utCambiaria, "MXN") : "—");
   return cells;
 }
 function statementPaperTotals(rows, cur, withFx) {
   const sum = (f) => moneyIn(rows.reduce((s, r) => s + f(r), 0), cur);
   const cells = ["", "Total", "", "", "", "", sum((r) => r.cargo), sum((r) => r.abono), sum((r) => r.saldo), "", "", sum((r) => r.interes), sum((r) => r.comisionFega), sum((r) => r.totalFinanciero)];
-  if (withFx) cells.push(sum((r) => r.utCambiaria));
+  if (withFx) cells.push(moneyIn(rows.reduce((s, r) => s + r.utCambiaria, 0), "MXN"));
   return cells;
 }
 

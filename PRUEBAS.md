@@ -412,6 +412,20 @@ sesiones.
 
 **Lo que todavía NO se prueba aquí:** la posición cambiaria (A.2); y una factura en dólares que se haya capturado ANTES del 18-sep-2026 con el precio tecleado como pesos: esa no se corrige sola, se revisa a mano.
 
+## ESCENARIO 12 — Tres avisos cerrados de L4a: el ajuste cambiario en pesos, el precio en 0 de la OC del cliente, el circuito sin elegir (18-sep-2026)
+
+**El número que más importa:** una OC del cliente en dólares sin precio capturado en una partida ya NO se registra — antes se guardaba con precio `0` sin avisar.
+
+**Antes de empezar:** esto se prueba en una empresa **nueva** (o en cualquiera donde el "Circuito ASR" de "Ajustes" → "Circuitos de financiamiento" todavía diga "Por construir" en "¿Elegible hoy?"). Si tu empresa ya tiene el ASR en "Sí", el paso 3 no aplica — pasa directo al paso 4.
+
+1. Ve a "Ajustes" → "Circuitos de financiamiento". En el renglón "Circuito ASR", la columna "¿Elegible hoy?" debe decir **"Por construir"** (antes decía "Sí" sin que nadie hubiera capturado nada). El renglón "Contado" sigue en "Sí": no necesita nada capturado.
+2. Candado — cotizar a crédito por ASR sin comisión: en "Ventas" → "Cotizaciones", "Alta manual", elige "Crédito" (o "Contado y crédito") y guarda. Debes ver en rojo un aviso de que falta la comisión de apertura del circuito, con la instrucción de capturarla en "Ajustes" → "Circuitos de financiamiento". El camino legítimo es el paso siguiente.
+3. En "Ajustes" → "Circuitos de financiamiento", en el renglón "Circuito ASR", escribe `0.01` en "Comisión de apertura" y pulsa "Guardar". La columna "¿Elegible hoy?" de ESE renglón cambia sola a **"Sí"**. Los renglones "Línea Santa Rosa" y "Línea propia" siguen en "Por construir": capturarles algo ahí no los activa, porque su base todavía no está construida.
+4. Ve a "Ventas" → "OC del cliente". Con "Moneda" en `USD`, agrega una partida y **no** toques "Precio / UOM": debe quedar en `0.00`. Escribe un número de OC del cliente y pulsa "Registrar OC". Debes ver en rojo "Falta el precio de \<código del producto\>: escríbelo en USD." y la OC no se registra (la lista de abajo sigue vacía o sin el renglón nuevo).
+5. En la misma partida, escribe un precio (por ejemplo `1000`) y pulsa "Registrar OC" otra vez. Ahora sí se registra: aparece en la lista con "TOTAL" `USD 1,000.00` (o el importe que hayas capturado).
+6. Ve a "Cartera" → "Estados de cuenta", abre el de un cliente con saldo en dólares y con columna "Ut. cambiaria" visible (aparece cuando hay algún ajuste por tipo de cambio). Esa columna, tanto en la fila como en "Total", debe verse con signo `$` (pesos) — nunca con `US$`, ni en el bloque de dólares ni en el de pesos. Es un número chico y pre-existente: si en tu cartera no hay ningún ajuste cambiario todavía, no hay nada que ver en este paso; el número correcto es que **nunca** diga `US$` en esa columna.
+7. Con ese mismo cliente abierto, pulsa "Documento" (el papel que se manda). En la columna "Ut. cambiaria" del papel pasa exactamente lo mismo: siempre signo `$`, nunca `US$` — el papel tenía el mismo error que la pantalla y se corrigió junto.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

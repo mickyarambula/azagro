@@ -53,6 +53,13 @@ function Page() {
       setError("Captura el número de OC del cliente");
       return;
     }
+    // Sin precio no se guarda nada (regla 9): en USD el precio de lista no se propone solo.
+    const sinPrecio = lines.find((l) => l.productId && l.qty > 0 && !(l.unitPrice > 0));
+    if (sinPrecio) {
+      const p = data?.products.find((x) => x.id === sinPrecio.productId);
+      setError(`Falta el precio de ${p?.code ?? sinPrecio.productId}: escríbelo en ${currency}.`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
