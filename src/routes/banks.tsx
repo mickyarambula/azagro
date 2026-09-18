@@ -199,7 +199,7 @@ function Page() {
           <Field label="Fecha">
             <input className="erp-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </Field>
-          <Field label={kind === "cobro" ? "Importe que entra" : kind === "pago" ? "Importe que sale" : "Importe"}>
+          <Field label={`${kind === "cobro" ? "Importe que entra" : kind === "pago" ? "Importe que sale" : "Importe"}${data?.banks.find((b) => String(b.id) === bankId)?.currency === "USD" ? " (USD)" : ""}`}>
             <MoneyField className="w-full" value={amount} onChange={setAmount} />
           </Field>
           {kind === "transferencia" ? (
@@ -243,7 +243,12 @@ function Page() {
               />
             </Field>
           )}
-          {invoices.find((i) => String(i.id) === invoiceId)?.currency === "USD" && (
+          {invoiceId && invoices.find((i) => String(i.id) === invoiceId)?.currency !== "USD" && data?.banks.find((b) => String(b.id) === bankId)?.currency === "USD" && (
+            <Field label="TC del pago (factura en pesos pagada con dólares)">
+              <input className="erp-input" type="number" min={0.0001} step="0.0001" value={fxPaid || ""} onChange={(e) => setFxPaid(Number(e.target.value))} placeholder="p. ej. 18.60" />
+            </Field>
+          )}
+          {invoices.find((i) => String(i.id) === invoiceId)?.currency === "USD" && data?.banks.find((b) => String(b.id) === bankId)?.currency !== "USD" && (
             <>
               <Field label="TC del pago (factura en dólares)">
                 <input

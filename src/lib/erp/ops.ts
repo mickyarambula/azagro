@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { isUsdFx, missingFxMessage, mxnToCostCurrency } from "@/lib/erp/fx";
+import { fxResultDeltaFor, isUsdFx, missingFxMessage, mxnInvoicePaidInUsd, mxnToCostCurrency, settleMode, usdBankSettlement } from "@/lib/erp/fx";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
@@ -1981,16 +1981,28 @@ export async function applyInvoicePayment(
   if (inv[0].state === "reversed") throw new Error(`${inv[0].name} está revertida: ya no es deuda, no se le puede abonar.`);
   const residual = Number(inv[0].residual);
   if (residual <= 0.009) throw new Error("Esta factura ya está saldada");
-  // Factura de cliente en dólares: el libro está en pesos al TC pactado; el
-  // depósito real se convierte con el TC del día y la diferencia es el
-  // diferencial cambiario del tramo.
-  const isUsdCustomer =
-    inv[0].kind === "customer" && inv[0].currency === "USD" && Number(inv[0].fx_agreed) > 0 && Number(inv[0].amount_fx) > 0;
+  await sql`select id from banks where id = ${opts.bankId} and company_id = ${opts.companyId} for update`;
+  const bank = await sql<{ id: number; name: string; opening: string; movement: string; currency: string }>`
+    select b.id, b.name, b.opening::text, coalesce(b.currency,'MXN') as currency,
+      coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement
+    from banks b where b.id = ${opts.bankId} and b.company_id = ${opts.companyId}
+  `;
+  if (!bank[0]) throw new Error("Elige una cuenta de banco");
+  const bankUsd = bank[0].currency === "USD";
+  // Factura en dólares (FV o FP): el libro está en pesos al TC pactado. Pagada
+  // con pesos, el depósito real se convierte con el TC del día y la diferencia
+  // es el diferencial cambiario del tramo — en los DOS lados (Decisión 80).
+  // Desde la cuenta en dólares no hay diferencial: dólares contra dólares, y
+  // el banco lleva dólares.
+  const usdInvoice = inv[0].currency === "USD" && Number(inv[0].fx_agreed) > 0 && Number(inv[0].amount_fx) > 0;
+  const mode = settleMode({ usdInvoice, bankUsd });
+  const isUsdCustomer = inv[0].kind === "customer" && mode === "usd-con-pesos";
+  const isUsdSupplier = inv[0].kind === "supplier" && mode === "usd-con-pesos";
   let applied: number;
   let bankAmount: number;
   let fxDiff = 0;
   let usdApplied = 0;
-  if (isUsdCustomer) {
+  if (isUsdCustomer || isUsdSupplier) {
     if (!opts.fxPaid || opts.fxPaid <= 0) {
       throw new Error("Es factura en dólares: captura el tipo de cambio del pago.");
     }
@@ -2004,23 +2016,29 @@ export async function applyInvoicePayment(
     bankAmount = split.bankMxn;
     fxDiff = split.diff;
     usdApplied = split.usdApplied;
+  } else if (mode === "usd-con-dolares") {
+    const s = usdBankSettlement({ amountUsd: opts.amount, fxAgreed: Number(inv[0].fx_agreed), residualMxn: residual });
+    applied = s.appliedMxn;
+    bankAmount = s.bankUsd;
+    usdApplied = s.usdApplied;
+  } else if (mode === "mxn-con-dolares") {
+    const s = mxnInvoicePaidInUsd({ amountUsd: opts.amount, fxPaid: Number(opts.fxPaid), residualMxn: residual });
+    applied = s.appliedMxn;
+    bankAmount = s.bankUsd;
+    usdApplied = s.bankUsd;
   } else {
     applied = Math.min(opts.amount, residual);
     bankAmount = applied;
   }
-  await sql`select id from banks where id = ${opts.bankId} and company_id = ${opts.companyId} for update`;
-  const bank = await sql<{ id: number; name: string; opening: string; movement: string }>`
-    select b.id, b.name, b.opening::text,
-      coalesce((select sum(amount) from bank_moves m where m.bank_id = b.id),0)::text as movement
-    from banks b where b.id = ${opts.bankId} and b.company_id = ${opts.companyId}
-  `;
-  if (!bank[0]) throw new Error("Elige una cuenta de banco");
+  // El saldo de la cuenta está en SU moneda: se compara con lo que sale de ella.
   const cash = Number(bank[0].opening) + Number(bank[0].movement);
-  if (inv[0].kind === "supplier" && cash + 0.009 < applied) {
+  if (inv[0].kind === "supplier" && cash + 0.009 < bankAmount) {
     throw new Error(
-      `No hay saldo en ${bank[0].name} (${cash.toFixed(2)}). Primero cobra o captura un saldo inicial en Bancos.`,
+      `No hay saldo en ${bank[0].name} (${cash.toFixed(2)} ${bank[0].currency}). Primero cobra o captura un saldo inicial en Bancos.`,
     );
   }
+  // TC con el que se valuó el movimiento de banco (para el rastro y la posición cambiaria).
+  const moveFx = mode === "usd-con-pesos" || mode === "mxn-con-dolares" ? Number(opts.fxPaid) : mode === "usd-con-dolares" ? Number(inv[0].fx_agreed) : null;
 
   const today = todayMx();
   const payDate = (opts.date || today).slice(0, 10);
@@ -2040,8 +2058,8 @@ export async function applyInvoicePayment(
   const name = await nextDocFolio(sql, opts.companyId, "PAG");
   const kind = inv[0].kind === "customer" ? "inbound" : "outbound";
   const pay = await sql<{ id: number }>`
-    insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
-    values (${opts.companyId}, ${kind}, ${name}, ${inv[0].partner_id}, ${applied}, ${opts.memo ?? ""}, ${opts.userId}, ${payDate})
+    insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date, currency, fx_rate)
+    values (${opts.companyId}, ${kind}, ${name}, ${inv[0].partner_id}, ${applied}, ${opts.memo ?? ""}, ${opts.userId}, ${payDate}, 'MXN', ${moveFx ?? 1})
     returning id
   `;
   await sql`
@@ -2054,41 +2072,49 @@ export async function applyInvoicePayment(
   // diferencial cambiario, que se decide abajo.
   const signed = inv[0].kind === "customer" ? bankAmount : -bankAmount;
   const moveKind = inv[0].kind === "customer" ? "cobro" : "pago";
-  const usdNote = opts.fxPaid && !isUsdCustomer ? ` (pago en USD, TC ${opts.fxPaid})` : "";
+  const usdNote = opts.fxPaid && mode === "mxn" ? ` (pago en USD, TC ${opts.fxPaid})` : "";
+  // En la cuenta en dólares el movimiento va en dólares (amount = amount_fx); el TC deja el rastro en pesos.
   await sql`
-    insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, created_by)
+    insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, created_by, amount_fx, fx_rate)
     values (
       ${opts.companyId}, ${opts.bankId}, ${payDate}, ${signed},
       ${(opts.memo || `${moveKind} ${inv[0].name}`) + usdNote},
-      ${inv[0].partner_id}, ${moveKind}, ${inv[0].id}, ${pay[0]!.id}, ${opts.userId}
+      ${inv[0].partner_id}, ${moveKind}, ${inv[0].id}, ${pay[0]!.id}, ${opts.userId}, ${bankUsd ? signed : null}, ${moveFx}
     )
   `;
 
   // Diferencial cambiario del tramo: se decide pago por pago (como el Excel).
   let fxDoc: string | null = null;
   let fxNote = "";
-  if (isUsdCustomer && Math.abs(fxDiff) >= 0.01 && opts.fxPaid) {
+  if ((isUsdCustomer || isUsdSupplier) && Math.abs(fxDiff) >= 0.01 && opts.fxPaid) {
     const treatment = opts.fxTreatment ?? "utilidad";
     const calc = `${usdApplied.toFixed(2)} USD × (TC pagado ${opts.fxPaid} − pactado ${Number(inv[0].fx_agreed)}) = ${fxDiff.toFixed(2)}`;
+    // Decisión 80: el mismo número es utilidad si el cliente pagó de más y
+    // pérdida si Azagro le pagó de más al proveedor.
+    const fxResultDelta = fxResultDeltaFor(inv[0].kind, fxDiff);
     if (treatment === "ajuste") {
-      // Pagó de menos → documento POR COBRAR; de más → POR DEVOLVER (a favor).
-      // Documento ATC-NNNN, folio por serie (grupo C: ya no count(*) de inv_class fx).
+      // Cliente: pagó de menos → documento POR COBRAR; de más → POR DEVOLVER (a favor).
+      // Proveedor: se le pagó de menos → POR PAGAR; de más → POR COBRAR AL PROVEEDOR.
+      // Documento ATC-NNNN, folio por serie (grupo C: ya no count(*) de inv_class fx), del lado de la factura.
       fxDoc = await nextDocFolio(sql, opts.companyId, "ATC");
       await sql`
         insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, inv_class, currency, order_id, created_by, calc, circuit_code)
         values (
-          ${opts.companyId}, 'customer', ${fxDoc}, ${inv[0].partner_id}, ${payDate}, ${payDate}, 'open',
+          ${opts.companyId}, ${inv[0].kind}, ${fxDoc}, ${inv[0].partner_id}, ${payDate}, ${payDate}, 'open',
           ${-fxDiff}, ${-fxDiff}, ${"Ajuste TC " + inv[0].name}, 'fx', 'MXN', ${inv[0].order_id}, ${opts.userId}, ${calc}, ${inv[0].circuit_code}
         )
       `;
-      fxNote = `${fxDiff < 0 ? "POR COBRAR" : "POR DEVOLVER"} ${fxDoc}: ${Math.abs(fxDiff).toFixed(2)}`;
+      fxNote =
+        inv[0].kind === "supplier"
+          ? `${fxDiff < 0 ? "POR PAGAR" : "POR COBRAR AL PROVEEDOR"} ${fxDoc}: ${Math.abs(fxDiff).toFixed(2)}`
+          : `${fxDiff < 0 ? "POR COBRAR" : "POR DEVOLVER"} ${fxDoc}: ${Math.abs(fxDiff).toFixed(2)}`;
     } else {
-      await sql`update invoices set fx_result = fx_result + ${fxDiff} where id = ${inv[0].id}`;
-      fxNote = `${fxDiff >= 0 ? "utilidad" : "pérdida"} cambiaria ${Math.abs(fxDiff).toFixed(2)}`;
+      await sql`update invoices set fx_result = fx_result + ${fxResultDelta} where id = ${inv[0].id}`;
+      fxNote = `${fxResultDelta >= 0 ? "utilidad" : "pérdida"} cambiaria ${Math.abs(fxResultDelta).toFixed(2)}`;
     }
     await sql`
       update invoices set fx_paid = ${opts.fxPaid}, fx_treatment = ${treatment},
-        fx_invoiced = fx_invoiced + ${Math.max(0, -fxDiff)}
+        fx_invoiced = fx_invoiced + ${inv[0].kind === "customer" ? Math.max(0, -fxDiff) : 0}
       where id = ${inv[0].id}
     `;
     await writeAudit(sql, {
@@ -2192,6 +2218,8 @@ export async function applyInvoicePayment(
     fxDoc,
     fxNote,
     bank: bank[0].name,
+    bankCurrency: bank[0].currency,
+    bankAmount,
     cashAfter,
   };
 }

@@ -554,7 +554,7 @@ function Page() {
               </select>
             </label>
             <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
-              Importe (pesos depositados)
+              {banks.find((b) => b.id === pay.bankId)?.currency === "USD" ? "Importe (dólares que entran o salen de la cuenta)" : "Importe (pesos depositados)"}
               <input
                 type="number"
                 min={0.01}
@@ -564,7 +564,24 @@ function Page() {
                 onChange={(e) => setPay({ ...pay, amount: Number(e.target.value) })}
               />
             </label>
-            {rows.find((r) => r.id === pay.id)?.currency === "USD" && (
+            {rows.find((r) => r.id === pay.id)?.currency !== "USD" && banks.find((b) => b.id === pay.bankId)?.currency === "USD" && (
+              <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+                TC del pago (factura en pesos pagada con dólares)
+                <input
+                  type="number"
+                  min={0.0001}
+                  step="0.0001"
+                  className="erp-input w-full"
+                  value={pay.fxPaid ?? ""}
+                  onChange={(e) => setPay({ ...pay, fxPaid: Number(e.target.value) })}
+                  placeholder="p. ej. 18.60"
+                />
+              </label>
+            )}
+            {rows.find((r) => r.id === pay.id)?.currency === "USD" && banks.find((b) => b.id === pay.bankId)?.currency === "USD" && (
+              <p className="mt-2 text-[12px] text-muted">Factura en dólares contra la cuenta en dólares: sin diferencial cambiario; el importe se aplica al TC pactado.</p>
+            )}
+            {rows.find((r) => r.id === pay.id)?.currency === "USD" && banks.find((b) => b.id === pay.bankId)?.currency !== "USD" && (
               <>
                 <label className="mt-3 grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted">
                   TC del pago (obligatorio: factura en dólares)
@@ -597,7 +614,7 @@ function Page() {
                         checked={pay.fxTreatment === "ajuste"}
                         onChange={() => setPay({ ...pay, fxTreatment: "ajuste" })}
                       />
-                      Ajustar al pactado (por cobrar / devolver)
+                      {lado === "pagar" ? "Ajustar al pactado (por pagar / por cobrar al proveedor)" : "Ajustar al pactado (por cobrar / devolver)"}
                     </label>
                   </div>
                 </div>

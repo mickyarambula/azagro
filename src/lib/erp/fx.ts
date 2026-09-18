@@ -118,3 +118,43 @@ export function invoiceShown(i: {
   }
   return { amount, residual, paid: r2(amount - residual), currency: (i.currency === "USD" ? "USD" : "MXN") as Currency, fx: null as number | null };
 }
+
+/**
+ * Decisión 80: cómo se liquida un abono según la moneda de la factura y la de
+ * la cuenta de banco.
+ *   - "usd-con-pesos":   factura en dólares pagada/cobrada con pesos → fxPaymentSplit
+ *                        (credit.ts) y diferencial cambiario, en los dos lados.
+ *   - "usd-con-dolares": factura en dólares contra la cuenta en dólares → sin
+ *                        diferencial; el banco lleva dólares.
+ *   - "mxn-con-dolares": factura en pesos pagada desde la cuenta en dólares →
+ *                        se convierte al TC del pago; sin diferencial (la deuda es en pesos).
+ *   - "mxn":             como siempre.
+ */
+export type SettleMode = "mxn" | "usd-con-pesos" | "usd-con-dolares" | "mxn-con-dolares";
+export function settleMode(i: { usdInvoice: boolean; bankUsd: boolean }): SettleMode {
+  if (i.usdInvoice) return i.bankUsd ? "usd-con-dolares" : "usd-con-pesos";
+  return i.bankUsd ? "mxn-con-dolares" : "mxn";
+}
+
+/** Factura en dólares liquidada desde la cuenta en dólares: dólares contra dólares, el libro en pesos al TC pactado. */
+export function usdBankSettlement(i: { amountUsd: number; fxAgreed: number; residualMxn: number }) {
+  const residualUsd = i.residualMxn / i.fxAgreed;
+  const usdApplied = r2(Math.min(i.amountUsd, residualUsd));
+  return { usdApplied, appliedMxn: r2(usdApplied * i.fxAgreed), bankUsd: usdApplied };
+}
+
+/** Factura en pesos pagada con dólares: los dólares que salen valen pesos al TC del pago. */
+export function mxnInvoicePaidInUsd(i: { amountUsd: number; fxPaid: number; residualMxn: number }) {
+  if (!isUsdFx(i.fxPaid)) throw new Error("Pagar una factura en pesos desde la cuenta en dólares: captura el tipo de cambio del pago.");
+  const appliedMxn = r2(Math.min(r2(i.amountUsd * i.fxPaid), i.residualMxn));
+  return { appliedMxn, bankUsd: r2(appliedMxn / i.fxPaid) };
+}
+
+/**
+ * El diferencial (pesos del banco − pesos al pactado) es utilidad para Azagro
+ * cuando el CLIENTE pagó de más, y pérdida cuando Azagro le pagó de más al
+ * PROVEEDOR: mismo número, signo contrario.
+ */
+export function fxResultDeltaFor(kind: string, fxDiff: number) {
+  return kind === "supplier" ? r2(-fxDiff) : r2(fxDiff);
+}

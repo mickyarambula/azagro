@@ -69,12 +69,15 @@ type Chain = {
   preview: ReversalPreview;
   companyId: number;
   invoiceId: number;
-  bankMove: { id: number; bank_id: number; bank: string; amount: number; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null } | null;
+  bankMove: { id: number; bank_id: number; bank: string; amount: number; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null; currency: string } | null;
   discount: { id: number; name: string; amount: number } | null;
   atc: { id: number; name: string; amount: number } | null;
   fxDiff: number;
   fxPrev: { paid: number | null; treatment: string | null } | null;
   isUsdCustomer: boolean;
+  /** Decisión 80: también la FP en dólares pagada con pesos tiene diferencial (signo contrario). */
+  isUsd: boolean;
+  fxResultDelta: number;
 };
 
 /** La cadena completa de un PAG: qué se contraría, qué se queda, qué lo detiene. No escribe nada. */
@@ -123,6 +126,8 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
     fxDiff: 0,
     fxPrev: null,
     isUsdCustomer: false,
+    isUsd: false,
+    fxResultDelta: 0,
   });
 
   if (p.reverses_id) {
@@ -194,22 +199,32 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
   }
 
   // El movimiento de banco original (el pronto pago y la devolución no tienen).
-  const bm = await sql<{ id: number; bank_id: number; bank: string; amount: string; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null }>`
-    select m.id, m.bank_id, b.name as bank, m.amount::text, m.reconciled, m.partner_id, coalesce(m.kind,'ajuste') as kind, m.invoice_id
+  const bm = await sql<{ id: number; bank_id: number; bank: string; amount: string; reconciled: boolean; partner_id: number | null; kind: string; invoice_id: number | null; currency: string }>`
+    select m.id, m.bank_id, b.name as bank, m.amount::text, m.reconciled, m.partner_id, coalesce(m.kind,'ajuste') as kind, m.invoice_id, coalesce(b.currency,'MXN') as currency
     from bank_moves m join banks b on b.id = m.bank_id
     where m.payment_id = ${p.id} and m.reverses_id is null
     order by m.id limit 1
   `;
   const bankMove = bm[0] ? { ...bm[0], amount: Number(bm[0].amount) } : null;
 
-  // Diferencial cambiario del tramo, derivable exacto: lo que entró al banco
-  // menos lo que se aplicó a la factura (solo FV de cliente en dólares).
-  const isUsdCustomer = i.kind === "customer" && i.currency === "USD" && Number(i.fx_agreed) > 0;
+  // Diferencial cambiario del tramo, derivable exacto: lo que entró (o salió)
+  // del banco menos lo que se aplicó a la factura. Solo cuando la factura en
+  // dólares se pagó con PESOS: desde la cuenta en dólares el banco lleva
+  // dólares y no hay diferencial. Decisión 80: en los dos lados.
+  const usdInvoice = i.currency === "USD" && Number(i.fx_agreed) > 0;
+  const paidInMxn = !bankMove || bankMove.currency !== "USD";
+  const isUsdCustomer = i.kind === "customer" && usdInvoice && paidInMxn;
+  const isUsdSupplier = i.kind === "supplier" && usdInvoice && paidInMxn;
+  const isUsd = isUsdCustomer || isUsdSupplier;
   const fxDiff = isUsdCustomer && bankMove ? r2(Math.abs(bankMove.amount) - amount) : 0;
+  const fxDiffSupplier = isUsdSupplier && bankMove ? r2(Math.abs(bankMove.amount) - amount) : 0;
+  const fxDelta = isUsdSupplier ? fxDiffSupplier : fxDiff;
+  // Lo que se registró en fx_result: utilidad para el cliente que pagó de más, pérdida si se le pagó de más al proveedor.
+  const fxResultDelta = isUsdSupplier ? r2(-fxDiffSupplier) : fxDiff;
 
   // El ATC que nació con este cobro (tratamiento "ajuste").
   let atc: Chain["atc"] = null;
-  if (isUsdCustomer && Math.abs(fxDiff) >= 0.01) {
+  if (isUsd && Math.abs(fxDelta) >= 0.01) {
     const atcs = await sql<{ id: number; name: string; amount: string; state: string; paid: string }>`
       select a.id, a.name, a.amount::text, a.state,
         coalesce((select sum(amount) from payment_allocs where invoice_id = a.id), 0)::text as paid
@@ -231,12 +246,22 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
   // Con el último abono fuera, los campos de TC de la factura regresan al
   // abono anterior (derivable de sus propios importes) o a vacío.
   let fxPrev: Chain["fxPrev"] = null;
-  if (isUsdCustomer) {
+  if (isUsd) {
     const prev = [...live].reverse().find((l) => l.id < p.id && l.has_bank);
     if (prev) {
-      const prevBank = await sql<{ amount: string }>`select amount::text from bank_moves where payment_id = ${prev.id} and reverses_id is null limit 1`;
+      const prevBank = await sql<{ amount: string; fx_rate: string | null; currency: string }>`
+        select m.amount::text, m.fx_rate::text, coalesce(b.currency,'MXN') as currency
+        from bank_moves m join banks b on b.id = m.bank_id where m.payment_id = ${prev.id} and m.reverses_id is null limit 1
+      `;
       const usd = Number(prev.amount) / Number(i.fx_agreed);
-      const paid = prevBank[0] && usd > 0 ? Math.round((Math.abs(Number(prevBank[0].amount)) / usd) * 10000) / 10000 : null;
+      // Si el abono anterior salió de la cuenta en dólares, el banco lleva dólares y
+      // |banco| ÷ USD daría 1: ahí no hubo TC del día (se toma el guardado, o nada).
+      const paid =
+        prevBank[0] && prevBank[0].currency === "USD"
+          ? (prevBank[0].fx_rate != null && Number(prevBank[0].fx_rate) > 1 ? Number(prevBank[0].fx_rate) : null)
+          : prevBank[0] && usd > 0
+            ? Math.round((Math.abs(Number(prevBank[0].amount)) / usd) * 10000) / 10000
+            : null;
       const prevAtc = await sql<{ n: number }>`
         select count(*)::int as n from invoices where company_id = ${companyId} and inv_class = 'fx' and origin = ${"Ajuste TC " + i.name} and date = ${prev.date}
       `;
@@ -282,8 +307,8 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
   }
   if (discount) reverts.push({ name: discount.name, detail: "pronto pago que dependía de este cobro → contra-abono, sin banco", amount: -discount.amount, currency: i.currency });
   if (atc) reverts.push({ name: atc.name, detail: `ajuste de tipo de cambio de este cobro (${atc.amount < 0 ? "por devolver" : "por cobrar"}), sin abonos → se marca revertido`, amount: atc.amount, currency: "MXN" });
-  if (isUsdCustomer && Math.abs(fxDiff) >= 0.01 && !atc && !blockers.some((b) => b.includes("ajuste"))) {
-    reverts.push({ name: i.name, detail: `${fxDiff >= 0 ? "utilidad" : "pérdida"} cambiaria de este cobro registrada en la factura → se regresa`, amount: -fxDiff, currency: "MXN" });
+  if (isUsd && Math.abs(fxDelta) >= 0.01 && !atc && !blockers.some((b) => b.includes("ajuste"))) {
+    reverts.push({ name: i.name, detail: `${fxResultDelta >= 0 ? "utilidad" : "pérdida"} cambiaria de este ${i.kind === "supplier" ? "pago" : "cobro"} registrada en la factura → se regresa`, amount: -fxResultDelta, currency: "MXN" });
   }
   for (const f of fis) keeps.push({ name: f.name, detail: `mora facturada con este cobro: ese interés sí corrió (Decisión 21). Lo que se facture después empieza donde ésta se detuvo`, amount: Number(f.amount), currency: "MXN" });
 
@@ -307,6 +332,8 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
     fxDiff,
     fxPrev,
     isUsdCustomer,
+    isUsd,
+    fxResultDelta,
   };
 }
 
@@ -365,8 +392,8 @@ async function applyReversal(sql: Sql, userId: string, chain: Chain, reason: str
     await writeAudit(sql, { companyId, userId, action: "revertir-atc", entity: "invoice", entityId: chain.atc.id, name: chain.atc.name, detail: `Revertido con ${pv.payment.name} · ${chain.atc.amount.toFixed(2)} · sin abonos · ${reason}` });
     written.push(`${chain.atc.name} revertida`);
   }
-  if (chain.isUsdCustomer) {
-    const fxBack = chain.atc ? 0 : chain.fxDiff;
+  if (chain.isUsd) {
+    const fxBack = chain.atc ? 0 : chain.fxResultDelta;
     await sql`
       update invoices set
         fx_result = fx_result - ${fxBack},

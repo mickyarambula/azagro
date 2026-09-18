@@ -705,6 +705,7 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
       where company_id = ${companyId} and kind = 'supplier'
         and state <> 'reversed'
         and date between ${from} and ${to}
+        and coalesce(inv_class,'product') <> 'fx'
     `;
     let expOp = 0;
     let expPedido = 0;
@@ -878,7 +879,7 @@ export const getPanorama = createServerFn({ method: "GET" })
         coalesce(sum(case when residual > 0 then residual else 0 end),0)::text as por_cobrar,
         coalesce(sum(case when residual < 0 then -residual else 0 end),0)::text as por_devolver
       from invoices
-      where company_id = ${companyId} and inv_class = 'fx' and state = 'open'
+      where company_id = ${companyId} and kind = 'customer' and inv_class = 'fx' and state = 'open'
     `;
     const capitalFacturado = Number(cap[0]?.facturado ?? 0);
     const capitalPendiente = Number(cap[0]?.pendiente ?? 0);

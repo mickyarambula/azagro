@@ -356,6 +356,23 @@ sesiones.
 
 **Lo que todavía NO se prueba aquí (piezas siguientes):** pagar esa factura en dólares con su tipo de cambio y su diferencial (A.1b); comprar dólares como movimiento con tipo de cambio (A.1c); que el inventario valúe esa entrada en pesos — hoy el movimiento de inventario sigue en `1,000` por unidad mientras la deuda ya está en `18,500` (A.1c, Decisión 77).
 
+## ESCENARIO 9 — Pagar en dólares: con pesos y desde la cuenta en dólares (Decisión 80, 17-sep-2026)
+
+**El número que más importa:** la factura del proveedor de **10,000 USD a 18.50** (la del Escenario 8) pagada con **11,400 pesos a 19.00** tiene que aplicar **$11,100.00** al saldo, sacar **11,400** del banco y decir **"Diferencial TC: pérdida cambiaria 300.00"**. Los 300 son pesos que Azagro pagó de más por el movimiento del dólar; en un cliente serían utilidad.
+
+**Antes de empezar:** la factura FP-0001 del Escenario 8 viva, y saldo en las dos cuentas: "Cartera" → "Bancos", en "Saldo inicial" de Banorte MXN escribe `50000` y de Banorte USD `2000` (se guarda al salir del campo). Debes ver `$50,000.00` y `$2,000.00`.
+
+1. Ve a "Cartera" → "Por pagar" y pulsa "Pago" en el renglón de FP-0001. En "Cuenta" elige `Banorte USD · $2,000.00`. Debes ver que la etiqueta del importe cambia a "Importe (dólares que entran o salen de la cuenta)", que desaparecen "TC del pago" y "Diferencial contra el TC pactado", y que abajo dice "Factura en dólares contra la cuenta en dólares: sin diferencial cambiario; el importe se aplica al TC pactado."
+2. En el importe escribe `400` y pulsa "Aplicar". Debes ver en verde: "Aplicado $7,400.00 en Banorte USD. Saldo factura $177,600.00. Caja $1,600.00." (400 × 18.50 = 7,400; la caja en dólares bajó de 2,000 a 1,600). El renglón dice "Pagado" `USD 400.00` y "Saldo" `USD 9,600.00`.
+3. Pulsa "Pago" otra vez. Deja "Cuenta" en `Banorte MXN`. Ahora sí aparecen "Importe (pesos depositados)", "TC del pago (obligatorio: factura en dólares)" y el diferencial con dos opciones: "Dejarlo como utilidad/pérdida" y "Ajustar al pactado (por pagar / por cobrar al proveedor)".
+4. Candado — sin tipo de cambio: deja "TC del pago" vacío, escribe `11400` en el importe y pulsa "Aplicar". Debes ver en rojo "Es factura en dólares: captura el tipo de cambio del pago." El camino: escribir el TC.
+5. Escribe `19` en "TC del pago", deja "Dejarlo como utilidad/pérdida" y pulsa "Aplicar". Debes ver: "Aplicado $11,100.00 en Banorte MXN. Saldo factura $166,500.00. Caja $38,600.00. Diferencial TC: pérdida cambiaria 300.00." **Este es el número.** El renglón dice "Pagado" `USD 1,000.00` y "Saldo" `USD 9,000.00`.
+6. Pulsa "Revertir último abono" en ese renglón. El resumen debe listar: el contra-pago por `−$11,100.00`, el contra-movimiento de Banorte MXN por `$11,400.00 MXN` sin conciliar, y "FP-0001 · pérdida cambiaria de este pago registrada en la factura → se regresa · $300.00 MXN"; y en "Vuelve a deber": `$166,500.00 → $177,600.00`. Pulsa "Cerrar" (no hace falta confirmarla; si la confirmas, escribe el motivo y verifica que la caja regresa a `$50,000.00`).
+7. La otra opción del diferencial: pulsa "Pago", cuenta `Banorte MXN`, importe `18000`, TC `18`, elige "Ajustar al pactado (por pagar / por cobrar al proveedor)" y pulsa "Aplicar". Debes ver "Diferencial TC: POR PAGAR ATC-0001: 500.00": se le pagaron 18,000 pesos por 1,000 dólares que al pactado valen 18,500, así que quedan 500 pesos por pagarle, en su propio documento. En la lista aparece `ATC-0001` con saldo `$500.00`. (Si en vez de eso pagas a `19`, el documento dice "POR COBRAR AL PROVEEDOR": se le pagó de más.)
+8. Cobrar a un cliente en dólares no cambió: en "Por cobrar", una factura en dólares cobrada con pesos sigue pidiendo TC y las dos opciones "Dejarlo como utilidad/pérdida" / "Ajustar al pactado (por cobrar / devolver)"; cobrada en `Banorte USD`, el importe es en dólares y no hay diferencial.
+
+**Lo que todavía NO se prueba aquí:** comprar dólares (pasar pesos a la cuenta en dólares con su tipo de cambio) y ver el inventario valuado en pesos — A.1c. El P&L del pedido todavía no suma la pérdida o ganancia cambiaria del lado del proveedor.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no
