@@ -436,3 +436,48 @@ Con esto, "cubierto" y "abierto" (11.6) se derivan solos, y las decisiones 8.2-4
 **Lo que un ERP de distribución NO da de serie, y que el dueño está pidiendo:** la **posición cambiaria neta por vencimiento con cobertura** — "cuánto está abierto, cuánto cubierto, y cuánto cambia si el dólar se mueve un peso". Eso es un reporte de **tesorería**, no de contabilidad: en la práctica se llama *FX exposure report* / *net open position by maturity* / *currency exposure by bucket* (SAP Treasury "Exposure Management", Kyriba, o un Excel de tesorería), y su lógica es la de 11.6: activos en USD menos pasivos en USD, por cubeta, separando lo cubierto (*natural hedge*: cuentas por cobrar en USD contra cuentas por pagar en USD, o dólares ya comprados) de lo abierto. Las coberturas con forwards (contabilidad de coberturas, IFRS 9 / NIF C-10) son otro nivel y no aplican: la cobertura de Azagro es el **TC pactado con la contraparte**, que ningún ERP de serie modela como cobertura — por eso la pieza de 11.6 es de Azagro, y por eso se construye encima de los documentos, no de un módulo.
 
 **Una empresa que financia en una moneda y vende en otra** (el caso del dueño) hace, en el estándar, exactamente las dos dinámicas: (1) *matching* — compra la moneda del pasivo cuando adquiere el compromiso, para que activo y pasivo queden en la misma moneda; (2) *pass-through* — fija el TC con la contraparte en los dos lados y opera en la moneda de la línea. Y mide lo que queda fuera de las dos con el reporte de posición. Ningún ERP decide cuál usar; reporta. Lo que Azagro tiene y ningún ERP de serie: el **ATC "por cobrar / por devolver"** negociado con el cliente cuando el cobro no honra el pactado, y el TC pactado en la FV en vez del TC de la fecha de factura — las dos son la práctica real del negocio (`EXCEL_VS_SISTEMA.md` § 4) y se conservan.
+
+---
+
+## 12. Bloque A.1 — informe de solo lectura (paso 1, 17-sep-2026) y decisiones tomadas
+
+Pasada de solo lectura (`investigar-bloque`, paso 1) sobre "moneda y TC en toda la cadena de compra" (§ 9 A.1), hecha con cuatro pasadas paralelas. El dueño aceptó las ocho recomendaciones el mismo día → **Decisiones 76-81** en `DECISIONES.md`. El paso 3 (SQL de la migración, punto de paro) viene después de este informe.
+
+### 12.1 Lo que existe hoy
+
+- **Ningún costo tiene moneda:** `products.cost` (0002:47), `ref_cost` (0016:14), `quote_lines.cost/freight/other_cost` (0009:17-18), `customer_request_lines.cost` (0017:42-51), `vendor_rfq_bids.unit_price` (0010:33-39), `purchase_lines.unit_price` (0002:98-105), `partner_products.unit_price` (0009:3-12), `stock_moves.unit_cost`/`stock_quants.avg_cost` (0034:37-38). Solo las cabeceras: `quotes.currency/fx_rate` (0003:110), `purchase_orders.currency/fx_rate` (0003:21-22), `vendor_rfqs.currency` (nace por código, `rfq.ts:32`), `customer_requests.currency` (0017:54). `PriceInput` (`pricing.ts:40-56`) no admite moneda; `resolveCost`/`assertCostForCredit` (`cost.ts:20-26, 55-71`) solo comparan magnitud.
+- **Costo → precio sin conversión:** `applyCheapest` (`requests.ts:786`), `quoteFromRequest` (`:959-976`), `applyRfqWinners` (`rfq.ts:239`), `createQuote` (`ops.ts:968`), `reviseQuote` (`:1400`).
+- **Costo → kardex:** `receivePurchase`/`receivePartial` pasan `unit_price` crudo a `postStock` (`azagro.ts:1458, 1529`); `postStock` (`stock.ts:269`), `movingAverage` (`:58-65`), `refreshProductCost` (`:191-206`) sin moneda.
+- **OC, tres nacimientos:** `createPurchase` (`azagro.ts:1247-1314`) con `fxRate` default 1 y **`/purchases` no manda `fxRate`** (`purchases.tsx:174-183`) → toda OC USD manual nace con TC = 1 en silencio; `applyRfqWinners` (`rfq.ts:282-289`) `1` literal; `decideQuote` (`ops.ts:1714-1723`) hereda el TC del cliente. Ninguno revalida contra `fx_rates`. `purchases.tsx:258,293` propone `p.cost` sin moneda; `rfq.$rfqId.tsx` no enseña la moneda del proveedor.
+- **FP en dólares crudos:** `bornSupplierDebt` (`azagro.ts:1369-1373`) y `bornSupplierDebtByReceipt` (`:1605-1609`): `amount = po.total` en la moneda de la OC, `fx_agreed = po.fx_rate`, `amount_fx` nunca. Moldes correctos ya existentes: FV (`issueDeliveryInvoice`, `azagro.ts:2004, 2051-2064`) y corte (`cutover-core.ts:356-381`, D70, cliente y proveedor).
+- **Lectores de proveedor que suman crudo:** `getDashboard.ap`/`payableWeek` (`azagro.ts:327-331, 467-472`), `getUpcomingPayable` (`reports.ts:945-972`, sin `currency`), `getLiveStatement.ap` (`ops.ts:2655`; `byCurrency` solo de cliente), resumen de `/credit` (`credit.tsx:92-96`), `getCompanyPnl.purchases` (`reports.ts:671-677`). Por fila: `credit.tsx:209,211`, `vencimientos.tsx:154` con `moneyIn(r.amount, r.currency)` — con el molde FV deben leer `amount_fx`. `listInvoices` no expone `amount_fx/fx_agreed/fx_paid` (`azagro.ts:2644-2733`).
+- **Pago de FP:** `applyInvoicePayment` `isUsdCustomer` exige `kind === "customer"` (`ops.ts:1973-1996`); `fxPaymentSplit` (`credit.ts:389-405`) es pura y sin `kind`; `fxTreatment` (`:2054-2089`) con ATC `kind:'customer'` hardcodeado (`:2066`); reversa simétrica salvo `reversal.ts:207`; la pantalla ofrece TC por `currency === "USD"` sin `kind` (`credit.tsx:561`, `banks.tsx:246-266`); `payments` sin columna de TC; `bank_moves.amount` de un cobro USD son pesos reales (`:2041,2047`); nadie valida `banks.currency`.
+- **Bancos:** `bank_moves` sin `fx_rate/amount_fx/currency` (0003:74-85 + 0008/0029/0038); `addBankMove` `transferencia` (`ops.ts:2228-2249`) inserta el mismo `amount` en las dos cuentas, sin liga ni validación de moneda; `banks.tsx:205-217` sin TC; `cash` (`azagro.ts:419-425`) suma todo; la rama sin factura no deja bitácora.
+- **P&L:** `dealPnlCore` (`reports.ts:188-550`) no trae `po.currency/fx_rate`; `po_cost` (`:296-301`) solo `pl.unit_price`; `saleUnit` (`:316`) tratado como pesos siempre (L4a); `costUnit` (`:317-326`) dólares crudos si la OC es USD; `fx_result` de la FV entra como `fxIncome` (`:480`), sin equivalente de proveedor; `getPanorama` hereda; `getCompanyPnl` suma `invoices.amount` de proveedor sin moneda.
+- **Red de seguridad:** las pruebas de precio (`erp-circuito-lineal` +2,940, `erp-precio`, `erp-financiamiento-precio`, `erp-dos-precios`, `erp-costo-referencia`) usan números puros → intactas si la conversión ocurre antes del motor. **Ninguna prueba de `npm test` ejecuta `dealPnlCore` contra una base** (todas son copias JS o `includes("literal")`); `erp-circuitos-verificacion.mjs` es manual y su query tampoco trae moneda. **Ninguna prueba crea OC/FP de proveedor en USD** por el camino normal. El bloque no rompe pruebas — y no tiene ninguna que lo proteja: hay que escribirla.
+- **Borrado:** `purchase_orders`, `invoices` (`cutover_key is null`), `payments`, `bank_moves` en PURGE; `fx_rates`, `banks` en KEEP (`purge-plan.mjs:58-64, 301-308`). Columnas nuevas no cambian el plan.
+- **Abiertas que se citan y no se tocan:** L4a (`ESTADO.md:456-477`, lado venta), 4.3 (`:1018-1028`), 8.2-4 y 8.2-5 de este documento.
+
+### 12.2 Decisiones tomadas (17-sep-2026)
+
+| # | Decisión | Recomendación aceptada |
+|---|---|---|
+| 76 | El costo lleva moneda y se convierte ANTES del motor | (a) convertir con TC de tabla a la fecha, enseñado y editable; sin renglón se detiene |
+| 77 | Catálogo y kardex en pesos | (a) convertir al recibir con el TC de la OC; al final del bloque, con revisor de dinero |
+| 78 | La OC en USD declara el TC del proveedor | (a) obligatorio, propuesto de tabla, nunca 1 ni el del cliente; el campo antes del candado |
+| 79 | La FP con molde FV/corte + backfill | (a) `amount` en pesos al TC de la OC, `amount_fx`, `fx_agreed`; backfill `currency='USD' and cutover_key is null` |
+| 80 | Diferencial cambiario del lado proveedor | (a) `fx_result` o ATC `kind='supplier'`, reversa simétrica |
+| 81 | Compra de dólares y dólares en caja | (a) `kind='compra-usd'` con TC y liga entre patas; promedio móvil por cuenta |
+
+Siguen abiertas para el dueño: 8.2-4 (venta en pesos con costo en dólares: quién absorbe), 8.2-5 (pagar la FP desde la cuenta USD o MXN), 4.3 y L4a.
+
+### 12.3 Cómo se parte (T4) y qué NO va
+
+- **A.1a — Declarar y convertir:** moneda y TC del costo en solicitud/RFQ/cotización; TC del proveedor en los tres nacimientos de OC (campo en `/purchases` antes del candado); FP con molde FV + backfill; `dealPnlCore` con `po.currency/fx_rate`, `costUnit` en pesos, líneas nuevas (spread del deal, diferenciales); lectores por fila a `amount_fx`; prueba nueva con OC USD en PGlite; `erp-circuitos-verificacion.mjs` actualizado.
+- **A.1b — Pagar la FP con TC:** rama proveedor en `applyInvoicePayment`, ATC `kind='supplier'`, reversa simétrica, `payments.fx_rate`, validación `banks.currency`.
+- **A.1c — Comprar dólares y el kardex en pesos:** `compra-usd` con TC y `pair_id`, promedio de dólares en caja, `cash`/`ar`/`ap` por moneda; recepción convirtiendo antes de `postStock` (D77).
+- **Fuera de este bloque:** posición cambiaria (A.2); el lado venta de L4a; costo con vigencia (§ 10); `byCurrency` de proveedor en el estado de cuenta; FI en dólares; `fxToday()` en el inicio (A.2).
+
+### 12.4 Lo que no se pudo determinar leyendo
+
+Cuántas OC/FP en USD y transferencias MXN→USD existen en Neon (no se consulta producción; hoy es dato de prueba); si `/purchases` inyecta `fxRate` en tiempo de ejecución (por grep no); si el corte de existencias acepta costo en USD; si `MoneyField` tiene prop de moneda sin usar; si `/rfq/nuevo` captura un TC que luego se descarta; qué lectores asumen que `payments.amount` son pesos al TC pactado (al menos el hueco 21).
