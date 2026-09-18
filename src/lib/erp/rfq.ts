@@ -5,6 +5,7 @@ import { getSql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
 import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
+import { costToMxn, isUsdFx, loadFxTable, missingFxMessage } from "@/lib/erp/fx";
 import { assertRfqOpen } from "@/lib/erp/request-lock";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -130,7 +131,7 @@ export const getRfq = createServerFn({ method: "POST" })
     const bids = await sql<{ partner_id: number; product_id: number; unit_price: string }>`
       select partner_id, product_id, unit_price::text from vendor_rfq_bids where rfq_id = ${data.id}
     `;
-    return { rfq: head[0], lines, invited, bids };
+    return { rfq: head[0], lines, invited, bids, fxTable: await loadFxTable(sql, companyId) };
   });
 
 export const createRfq = createServerFn({ method: "POST" })
@@ -207,7 +208,14 @@ export const saveRfqBid = createServerFn({ method: "POST" })
 
 export const applyRfqWinners = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ rfqId: z.number(), winners: z.array(z.object({ productId: z.number(), unitPrice: z.number(), partnerId: z.number() })) }))
+  .validator(
+    z.object({
+      rfqId: z.number(),
+      winners: z.array(z.object({ productId: z.number(), unitPrice: z.number(), partnerId: z.number() })),
+      // Decisión 78: el TC del proveedor si la solicitud es en dólares.
+      fxRate: z.number().positive().optional(),
+    }),
+  )
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
@@ -226,6 +234,11 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
     `;
     if (!rfq[0]) throw new Error("Solicitud no encontrada");
     const stock = rfq[0].purpose === "stock";
+    // Decisión 78: adjudicar una solicitud en dólares exige el TC del proveedor
+    // (la pantalla lo propone de la tabla, editable); la OC nace con él, nunca con 1.
+    const rfqCurrency = rfq[0].currency === "USD" ? "USD" : "MXN";
+    if (rfqCurrency === "USD" && !isUsdFx(data.fxRate)) throw new Error(missingFxMessage(`adjudicar ${rfq[0].name} en dólares`));
+    const fx = rfqCurrency === "USD" ? Number(data.fxRate) : 1;
     // /rfq es la pantalla de compras sin excepción, sea de inventario o de
     // cliente: el camino "cliente" ya se cierra desde la solicitud (pickVendor,
     // quotes:edit). Aquí siempre manda purchases:edit.
@@ -236,7 +249,9 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
     const quoteId = rfq[0].quote_id;
     if (quoteId) {
       for (const w of data.winners) {
-        await sql`update quote_lines set cost = ${w.unitPrice} where quote_id = ${quoteId} and product_id = ${w.productId}`;
+        // Decisión 76: el costo de la cotización está en pesos; la moneda y el TC del proveedor quedan en la partida.
+        const c = costToMxn({ cost: w.unitPrice, currency: rfqCurrency, fx, what: `el costo de ${rfq[0].name}` });
+        await sql`update quote_lines set cost = ${c.mxn}, cost_currency = ${c.currency}, cost_fx = ${c.fx} where quote_id = ${quoteId} and product_id = ${w.productId}`;
       }
     }
     const bySup = new Map<number, Array<{ productId: number; unitPrice: number }>>();
@@ -246,7 +261,7 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
       bySup.set(w.partnerId, list);
     }
     for (const [partnerId, products] of bySup) {
-      await rememberTrade(sql, { companyId, partnerId, kind: "buy", products });
+      await rememberTrade(sql, { companyId, partnerId, kind: "buy", products, currency: rfqCurrency });
     }
 
     const pos: string[] = [];
@@ -283,7 +298,7 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
           insert into purchase_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, fulfill_kind, rfq_id)
           values (
             ${companyId}, ${poName}, ${supplierId}, ${today}, 'confirmed', ${loc[0].id},
-            ${`Desde ${rfq[0].name} · inventario`}, ${total}, ${rfq[0].currency}, 1, 'inventory', ${data.rfqId}
+            ${`Desde ${rfq[0].name} · inventario`}, ${total}, ${rfqCurrency}, ${fx}, 'inventory', ${data.rfqId}
           )
           returning id
         `;
@@ -299,6 +314,7 @@ export const applyRfqWinners = createServerFn({ method: "POST" })
           kind: "buy",
           products: lines.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
           locationId: loc[0].id,
+          currency: rfqCurrency,
         });
         // Decisión 14: la deuda con el proveedor no nace al adjudicar la RFQ,
         // nace al recibir la mercancía (bornSupplierDebt, azagro.ts).

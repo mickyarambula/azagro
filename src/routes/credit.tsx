@@ -11,6 +11,7 @@ import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest,
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, fxAdjustmentNote, interestInvoiceFallback, invoiceLineLabel, invoicePaperTitle } from "@/lib/erp/doc-text";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
+import { invoiceShown } from "@/lib/erp/fx";
 import { circuitLabel } from "@/lib/erp/circuits";
 import { ReversalButton } from "@/components/cancel-doc";
 import { reversalPreview, reversePayment } from "@/lib/erp/reversal";
@@ -162,6 +163,8 @@ function Page() {
               const overdue = invoiceStillOwed(r.state) && r.days_overdue > 0;
               const clock = exactClock(r.due_date);
               const cur = r.currency === "USD" ? "USD" : "MXN";
+              // Por fila, un documento en dólares se enseña en dólares (amount_fx): amount/residual viven en pesos.
+              const shown = invoiceShown({ amount: r.amount, residual: r.residual, currency: r.currency, amountFx: r.amount_fx, fxAgreed: r.fx_agreed });
               const terms = (r.credit_days ?? 0) === 0 ? "Contado" : `${r.credit_days} d exactos`;
               return (
                 <tr key={r.id} className="border-t border-line">
@@ -206,9 +209,12 @@ function Page() {
                     <p>{terms}</p>
                     {r.kind === "customer" ? <p className="text-[11px] text-muted">{circuitLabel(r.circuit_code)}</p> : null}
                   </td>
-                  <td className="px-3 py-3 text-right tabular-nums">{moneyIn(r.amount, cur)}</td>
-                  <td className="px-3 py-3 text-right tabular-nums">{moneyIn(paid, cur)}</td>
-                  <td className="px-3 py-3 text-right tabular-nums">{moneyIn(r.residual, cur)}</td>
+                  <td className="px-3 py-3 text-right tabular-nums">
+                    {moneyIn(shown.amount, cur)}
+                    {shown.fx ? <p className="text-[11px] text-muted">TC {shown.fx} · {moneyIn(r.amount, "MXN")}</p> : null}
+                  </td>
+                  <td className="px-3 py-3 text-right tabular-nums">{moneyIn(shown.paid, cur)}</td>
+                  <td className="px-3 py-3 text-right tabular-nums">{moneyIn(shown.residual, cur)}</td>
                   <td className="px-3 py-3">
                     <StatusPill
                       tone={
@@ -329,13 +335,13 @@ function Page() {
                                 {
                                   left: invoiceLineLabel({ name: r.name, origin: r.origin, invClass: r.inv_class }),
                                   qty: "1",
-                                  unit: moneyIn(r.amount, cur),
-                                  amount: moneyIn(r.amount, cur),
+                                  unit: moneyIn(shown.amount, cur),
+                                  amount: moneyIn(shown.amount, cur),
                                 },
                               ],
                               // Revertida: "Importe", no "Saldo" — ya no hay deuda que ese número represente.
                               totalLabel: r.state === "reversed" ? "Importe" : "Saldo",
-                              total: moneyIn(r.residual, cur),
+                              total: moneyIn(shown.residual, cur),
                               // La factura de intereses explica su cuenta con la
                               // fórmula y las cifras que se facturaron ese día.
                               notes:

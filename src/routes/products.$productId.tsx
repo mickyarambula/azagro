@@ -35,6 +35,7 @@ function Ficha() {
       uom: p.uom,
       cost: num(p.cost),
       ref_cost: num(p.ref_cost),
+      ref_cost_currency: "MXN",
       list_price: num(p.list_price),
       min_stock: num(p.min_stock),
     });

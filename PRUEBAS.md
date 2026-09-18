@@ -336,6 +336,26 @@ sesiones.
 
 ---
 
+## ESCENARIO 8 — Compras en dólares (Decisiones 76-81, 17-sep-2026)
+
+**El número que más importa:** una orden de compra de **10,000 USD a tipo de cambio 18.50** tiene que aparecer en Cuentas por pagar como **USD 10,000.00 · TC 18.5 · $185,000.00**, y los totales de esa pantalla tienen que sumar **$185,000.00** en pesos — nunca 10,000 sumados como si fueran pesos.
+
+**Antes de empezar:** un proveedor con plazo de pago capturado (paso 3 lo arregla si no lo tiene) y un tipo de cambio capturado para hoy (paso 1).
+
+1. Entra a "Ajustes". Baja hasta el panel "Tipo de cambio USD/MXN". Deja la fecha de hoy, escribe `18.5` en el campo del valor y pulsa "Agregar". Debes ver el renglón con la fecha de hoy y `18.5000`.
+2. Ve a "Compras" → "Pedidos de compra" y pulsa "Nueva orden" (o la pestaña "Nueva"). En "Moneda" elige `USD`. Debes ver que aparece una caja nueva "Tipo de cambio" con `18.5` ya puesto y debajo el texto "Tabla: 18.5 (fecha). Es el TC del proveedor; corrígelo si pactaron otro." El campo se puede cambiar: es el tipo de cambio que te dio el proveedor, no el que se pactó con el cliente.
+3. En la partida, en "Cant." escribe `10` y en "Costo / UOM" escribe `1000`. El "Total" debe decir `USD 10,000.00`. Pulsa "Colocar orden". Debes ver "Orden OC-… confirmada". En la pestaña "Todas", la orden aparece con `USD 10,000.00` y debajo `TC 18.5`.
+4. Candado — orden en dólares sin tipo de cambio: en "Nueva", con "Moneda" en `USD`, borra el número del campo "Tipo de cambio" y pulsa "Colocar orden". Debes ver, en rojo: "Sin tipo de cambio para la orden de compra en dólares. Captúralo: la pantalla lo propone de la tabla (Ajustes → Tipo de cambio) y se puede corregir; sin renglón en la tabla no se guarda nada en dólares." Escribe de nuevo `18.5` y pulsa "Colocar orden": ahora sí se coloca (esa segunda orden la puedes cancelar después con "Cancelar").
+5. Candado — fecha sin tipo de cambio en la tabla: en "Nueva", cambia "Fecha" a un día anterior al del renglón que capturaste en el paso 1 y elige `USD`. La caja "Tipo de cambio" debe decir "Sin renglón en la tabla para esta fecha: captúralo en Ajustes → Tipo de cambio." El camino: capturar en Ajustes un renglón con esa fecha, o regresar la fecha a hoy. Regresa la fecha a hoy.
+6. En "Todas", en el renglón de la orden del paso 3 pulsa "Recibir" y luego "Recibir todo lo pendiente". Si el proveedor no tiene plazo de pago, debes ver en rojo: "Falta el plazo de pago de … Sin ese dato no se puede saber cuándo hay que pagarle esta compra, y por eso no se puede registrar la entrada. Pídele a compras, administración o gerencia que lo capture en la ficha del proveedor (si es de contado, se captura 0). En cuanto esté, vuelve a recibir." Entonces: "Contactos" → "Proveedores", busca el proveedor, en "Plazo de pago (días) — sin plazo: captúralo" escribe `30` y pulsa "Guardar". Regresa a "Compras" → "Pedidos de compra" → "Recibir" → "Recibir todo lo pendiente". La orden debe quedar en "Recibida".
+7. Ve a "Cartera" → "Por pagar". Debes ver la factura del proveedor con "Total" `USD 10,000.00`, debajo `TC 18.5 · $185,000.00`, "Pagado" `USD 0.00` y "Saldo" `USD 10,000.00`. Arriba, "TOTAL FACTURADO" y "SALDO" deben decir `$185,000.00`. **Este es el número.**
+8. Pulsa "Documento" en esa factura. El papel debe decir `US$10,000.00` en la partida y en "Saldo" — dólares, no pesos con signo de dólar.
+9. Ficha de producto en dólares: "Almacén" → productos, abre cualquier producto (o "+ Alta"). En "Costo de referencia" escribe `1000` y en "Moneda en que lo capturas" elige `USD`; pulsa "Guardar". Vuelve a abrir la ficha: "Costo de referencia" debe decir `18500` (se guardó en pesos al tipo de cambio de hoy). En "Bitácora" el renglón dice "costo de referencia 0 → 18500 · capturado 1000 USD × TC 18.5".
+10. Candado — costo de referencia en dólares sin tipo de cambio: si borras el renglón de tipo de cambio de hoy en "Ajustes" (o pruebas en una empresa sin ninguno) y repites el paso 9, debes ver "Sin tipo de cambio para el costo de referencia en dólares. Captúralo: …" y no se guarda nada. El camino: capturar el tipo de cambio en Ajustes y volver a guardar.
+11. Corrección del tipo de cambio en una orden: solo aparece en órdenes en dólares que nacieron sin tipo de cambio real (las de antes de este cambio, marcadas "sin TC" con un campo y el botón "Guardar TC" bajo el total). Si no tienes ninguna, no verás el campo: es lo esperado. Si la orden ya tiene deuda viva, el botón se detiene con: "OC-… ya tiene deuda viva (FP-…) nacida con TC …: el TC no se cambia después. Si el TC estaba mal, revierte la recepción, corrige el TC y vuelve a recibir."
+
+**Lo que todavía NO se prueba aquí (piezas siguientes):** pagar esa factura en dólares con su tipo de cambio y su diferencial (A.1b); comprar dólares como movimiento con tipo de cambio (A.1c); que el inventario valúe esa entrada en pesos — hoy el movimiento de inventario sigue en `1,000` por unidad mientras la deuda ya está en `18,500` (A.1c, Decisión 77).
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

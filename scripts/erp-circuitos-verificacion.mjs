@@ -358,7 +358,7 @@ try {
   const partidas = await q(
     `select sl.so_id, sl.product_id, p.code, sl.qty::text as qty, sl.unit_price::text as unit_price,
             p.cost::text as catalog_cost, ${hasRef ? "coalesce(p.ref_cost,0)::text" : "'0'"} as ref_cost,
-            ${hasSoId ? "(select pl.unit_price::text from purchase_lines pl join purchase_orders po on po.id = pl.po_id where po.so_id = sl.so_id and pl.product_id = sl.product_id order by pl.id desc limit 1)" : "null"} as po_cost,
+            ${hasSoId ? "(select (case when coalesce(po.currency,'MXN') = 'USD' then (case when po.fx_rate > 1 then pl.unit_price * po.fx_rate else null end) else pl.unit_price end)::text from purchase_lines pl join purchase_orders po on po.id = pl.po_id where po.so_id = sl.so_id and pl.product_id = sl.product_id order by pl.id desc limit 1)" : "null"} as po_cost,
             ql.cost::text as quote_cost, coalesce(ql.freight,0)::text as quote_freight,
             ${hasOther ? "coalesce(ql.other_cost,0)::text" : "'0'"} as quote_other,
             ${hasDisb ? "ql.disbursed_unit::text" : "null"} as quote_disbursed

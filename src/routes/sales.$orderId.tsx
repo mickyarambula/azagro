@@ -716,11 +716,12 @@ function Ficha() {
               {pnl.excluded.n} partida(s) fuera del cálculo de utilidad (venta {money(pnl.excluded.venta)}): {pnl.excluded.motivos.join("; ")}. No se les inventa costo ni tasa; los totales de arriba solo suman las partidas con dato.
             </p>
           )}
-          {(pnl.mora > 0 || pnl.discount > 0 || pnl.fxIncome !== 0) && (
+          {(pnl.mora > 0 || pnl.discount > 0 || pnl.fxIncome !== 0 || pnl.fxSpread !== 0) && (
             <p className="mt-2 text-[12px] text-muted">
               {pnl.mora > 0 ? `Mora facturada: ${money(pnl.mora)} (entra como ingreso). ` : ""}
               {pnl.discount > 0 ? `Descuento pronto pago: ${money(pnl.discount)}. ` : ""}
-              {pnl.fxIncome !== 0 ? `Diferencial cambiario: ${money(pnl.fxIncome)}.` : ""}
+              {pnl.fxIncome !== 0 ? `Diferencial cambiario: ${money(pnl.fxIncome)}. ` : ""}
+              {pnl.fxSpread !== 0 ? `De ese margen, ${money(pnl.fxSpread)} viene del tipo de cambio: el pactado con el cliente contra el de la orden al proveedor.` : ""}
             </p>
           )}
           <div className="mt-3 overflow-x-auto erp-card">

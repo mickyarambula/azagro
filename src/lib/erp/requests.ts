@@ -8,6 +8,7 @@ import { missingRateMessage } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
 import { rememberTrade } from "@/lib/erp/links";
+import { costToMxn, fxAt, loadFxTable } from "@/lib/erp/fx";
 import { marginInvalidMessage, marginOf, marginText, marginValid, normalizeMargin, OFFER_LABEL, type StoredMargin } from "@/lib/erp/margins";
 import { assertRequestOpen, quoteStillBlocks, requestCancelledMessage } from "@/lib/erp/request-lock";
 import { circuitLabel, circuitTerms, inheritCircuit, isSelectableCircuit, missingPriceRateMessage, priceRateFor } from "@/lib/erp/circuits";
@@ -251,6 +252,8 @@ export const getRequest = createServerFn({ method: "POST" })
       cost: string;
       freight: string;
       supplier_id: number | null;
+      cost_currency: string | null;
+      cost_fx: string | null;
       on_hand: string;
       on_hand_own: string;
       on_hand_supplier: string;
@@ -268,7 +271,7 @@ export const getRequest = createServerFn({ method: "POST" })
       margin_credit_source: string | null;
     }>`
       select l.id, l.product_id, pr.code, pr.name as product, l.qty::text, l.uom, l.cost::text, l.freight::text,
-        l.supplier_id,
+        l.supplier_id, l.cost_currency, l.cost_fx::text as cost_fx,
         coalesce((select sum(quantity) from stock_quants q where q.product_id = l.product_id),0)::text as on_hand,
         coalesce((select sum(q.quantity) from stock_quants q join locations lo on lo.id = q.location_id where q.product_id = l.product_id and lo.loc_type = 'internal'),0)::text as on_hand_own,
         coalesce((select sum(q.quantity) from stock_quants q join locations lo on lo.id = q.location_id where q.product_id = l.product_id and lo.loc_type = 'supplier'),0)::text as on_hand_supplier,
@@ -629,7 +632,7 @@ export const sendVendorRfq = createServerFn({ method: "POST" })
 
 export const pickVendor = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ requestId: z.number(), productId: z.number(), supplierId: z.number(), unitPrice: z.number() }))
+  .validator(z.object({ requestId: z.number(), productId: z.number(), supplierId: z.number(), unitPrice: z.number() }).extend({ fxRate: z.number().positive().optional() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     // Elegir/enviar/aplicar proveedor es un paso DENTRO de la solicitud: quien
@@ -644,8 +647,18 @@ export const pickVendor = createServerFn({ method: "POST" })
       join products p on p.id = l.product_id
       where l.request_id = ${data.requestId} and l.product_id = ${data.productId} and r.company_id = ${companyId}
     `;
+    // Decisión 76: el costo de la solicitud se guarda en pesos. Si el proveedor
+    // cotizó en dólares (la moneda de la RFQ), se convierte con el TC dado o con
+    // el de la tabla a hoy; sin TC se detiene. Moneda y TC quedan en la partida.
+    const cur = await sql<{ rfq_currency: string | null; req_date: string }>`
+      select v.currency as rfq_currency, r.date::text as req_date from customer_requests r left join vendor_rfqs v on v.id = r.rfq_id
+      where r.id = ${data.requestId} and r.company_id = ${companyId}
+    `;
+    const bidCurrency = cur[0]?.rfq_currency === "USD" ? "USD" : "MXN";
+    const fx = bidCurrency === "USD" ? (data.fxRate ?? fxAt(await loadFxTable(sql, companyId), cur[0]?.req_date ?? todayMx())?.rate) : null;
+    const c = costToMxn({ cost: data.unitPrice, currency: bidCurrency, fx, what: `el costo en dólares de ${before[0]?.code ?? "la partida"}` });
     await sql`
-      update customer_request_lines set cost = ${data.unitPrice}, supplier_id = ${data.supplierId}
+      update customer_request_lines set cost = ${c.mxn}, cost_currency = ${c.currency}, cost_fx = ${c.fx}, supplier_id = ${data.supplierId}
       where request_id = ${data.requestId} and product_id = ${data.productId}
         and request_id in (select id from customer_requests where company_id = ${companyId})
     `;
@@ -654,6 +667,7 @@ export const pickVendor = createServerFn({ method: "POST" })
       partnerId: data.supplierId,
       kind: "buy",
       products: [{ productId: data.productId, unitPrice: data.unitPrice }],
+      currency: bidCurrency,
     });
     if (before[0]) {
       await writeAudit(sql, {
@@ -758,7 +772,7 @@ export const saveLineMargin = createServerFn({ method: "POST" })
 
 export const applyCheapest = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ requestId: z.number() }))
+  .validator(z.object({ requestId: z.number(), fxRate: z.number().positive().optional() }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     // Elegir/enviar/aplicar proveedor es un paso DENTRO de la solicitud: quien
@@ -766,10 +780,14 @@ export const applyCheapest = createServerFn({ method: "POST" })
     await assertCan(sql, context.userId, "quotes", "edit");
     const companyId = await cid(sql, context.userId);
     await assertRequestOpen(sql, companyId, data.requestId);
-    const req = await sql<{ rfq_id: number | null }>`
-      select rfq_id from customer_requests where id = ${data.requestId} and company_id = ${companyId}
+    const req = await sql<{ rfq_id: number | null; rfq_currency: string | null; req_date: string }>`
+      select r.rfq_id, v.currency as rfq_currency, r.date::text as req_date from customer_requests r left join vendor_rfqs v on v.id = r.rfq_id
+      where r.id = ${data.requestId} and r.company_id = ${companyId}
     `;
     if (!req[0]?.rfq_id) throw new Error("Primero arma la lista a proveedores");
+    // Decisión 76: los bids están en la moneda de la RFQ; el costo se guarda en pesos.
+    const bidCurrency = req[0].rfq_currency === "USD" ? "USD" : "MXN";
+    const fx = bidCurrency === "USD" ? (data.fxRate ?? fxAt(await loadFxTable(sql, companyId), req[0].req_date ?? todayMx())?.rate) : null;
     const bids = await sql<{ product_id: number; partner_id: number; unit_price: string }>`
       select product_id, partner_id, unit_price::text from vendor_rfq_bids
       where rfq_id = ${req[0].rfq_id} and unit_price > 0
@@ -781,9 +799,10 @@ export const applyCheapest = createServerFn({ method: "POST" })
       if (!cur || price < cur.unit_price) best.set(b.product_id, { partner_id: b.partner_id, unit_price: price });
     }
     for (const [productId, w] of best) {
+      const c = costToMxn({ cost: w.unit_price, currency: bidCurrency, fx, what: "el costo en dólares del proveedor más barato" });
       await sql`
         update customer_request_lines
-        set cost = ${w.unit_price}, supplier_id = ${w.partner_id}, pick_reason = 'precio'
+        set cost = ${c.mxn}, cost_currency = ${c.currency}, cost_fx = ${c.fx}, supplier_id = ${w.partner_id}, pick_reason = 'precio'
         where request_id = ${data.requestId} and product_id = ${productId}
       `;
     }
@@ -905,6 +924,8 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       uom: string;
       cost: string;
       freight: string;
+      cost_currency: string | null;
+      cost_fx: string | null;
       margin_mode: string | null;
       margin_pct: string | null;
       margin_nominal: string | null;
@@ -916,6 +937,7 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       margin_credit_nominal: string | null;
     }>`
       select l.product_id, p.code, l.qty::text, l.uom, l.cost::text, l.freight::text,
+        l.cost_currency, l.cost_fx::text as cost_fx,
         l.margin_mode, l.margin_pct::text as margin_pct,
         l.margin_nominal::text as margin_nominal,
         l.margin_cash_mode, l.margin_cash_pct::text as margin_cash_pct, l.margin_cash_nominal::text as margin_cash_nominal,
@@ -995,6 +1017,9 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         qty: Number(l.qty),
         uom: l.uom,
         cost: Number(l.cost),
+        // Decisión 76: en qué moneda dio el costo el proveedor y con qué TC se pasó a pesos.
+        costCurrency: l.cost_currency ?? "MXN",
+        costFx: l.cost_fx != null ? Number(l.cost_fx) : null,
         freight: Number(l.freight),
         cash,
         credit,
@@ -1050,10 +1075,10 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     `;
     for (const line of priced) {
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_currency, cost_fx,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.cash}, ${line.credit},
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.cash}, ${line.credit}, ${line.costCurrency}, ${line.costFx},
           ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
           ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
           ${line.marginCredit ? "captura" : null}, ${line.financeUnit}, ${line.disbursedUnit})

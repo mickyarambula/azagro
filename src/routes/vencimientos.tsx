@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { FinanceNav, StatusPill } from "@/components/erp";
 import { listInvoices } from "@/lib/azagro";
+import { invoiceShown } from "@/lib/erp/fx";
 import { getAlertDigest, sendDueAlerts, sendPartnerReminders } from "@/lib/erp/alerts";
 import { getSettings } from "@/lib/erp/ops";
 import { getUpcomingDue } from "@/lib/erp/reports";
@@ -151,7 +152,7 @@ function Page() {
                     {r.name}
                   </Link>
                 </td>
-                <td className="px-4 py-3 text-right tabular-nums">{moneyIn(r.residual, r.currency)}</td>
+                <td className="px-4 py-3 text-right tabular-nums">{moneyIn(invoiceShown({ amount: r.amount, residual: r.residual, currency: r.currency, amountFx: r.amount_fx, fxAgreed: r.fx_agreed }).residual, r.currency)}</td>
               </tr>
             ))}
             {open.length === 0 && (

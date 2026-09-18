@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { isUsdFx, poCostToMxn } from "@/lib/erp/fx";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
@@ -198,11 +199,13 @@ async function dealPnlCore(
     credit_days: number;
     quote_id: number | null;
     circuit_code: string | null;
+    fx_rate: string;
     q_commission: string | null;
     q_cost_rate: string | null;
     q_collection_rate: string | null;
   }>`
     select so.name, so.currency, so.date::text, coalesce(so.credit_days,0)::int as credit_days, so.quote_id, so.circuit_code,
+      coalesce(so.fx_rate,1)::text as fx_rate,
       (select q.commission_rate::text from quotes q where q.id = so.quote_id) as q_commission,
       (select q.cost_rate::text from quotes q where q.id = so.quote_id) as q_cost_rate,
       (select q.collection_rate::text from quotes q where q.id = so.quote_id) as q_collection_rate
@@ -285,6 +288,8 @@ async function dealPnlCore(
     catalog_cost: string;
     ref_cost: string;
     po_cost: string | null;
+    po_currency: string | null;
+    po_fx: string | null;
     quote_cost: string | null;
     quote_freight: string;
     quote_other: string;
@@ -299,6 +304,18 @@ async function dealPnlCore(
         where po.so_id = sl.so_id and pl.product_id = sl.product_id
         order by pl.id desc limit 1
       ) as po_cost,
+      (
+        select coalesce(po.currency,'MXN') from purchase_lines pl
+        join purchase_orders po on po.id = pl.po_id
+        where po.so_id = sl.so_id and pl.product_id = sl.product_id
+        order by pl.id desc limit 1
+      ) as po_currency,
+      (
+        select po.fx_rate::text from purchase_lines pl
+        join purchase_orders po on po.id = pl.po_id
+        where po.so_id = sl.so_id and pl.product_id = sl.product_id
+        order by pl.id desc limit 1
+      ) as po_fx,
       ql.cost::text as quote_cost,
       coalesce(ql.freight,0)::text as quote_freight,
       coalesce(ql.other_cost,0)::text as quote_other,
@@ -314,7 +331,10 @@ async function dealPnlCore(
     // este producto no viajó en ella); por pedido, la partida completa.
     const qty = opts.qtyByProduct ? (opts.qtyByProduct.get(l.product_id) ?? 0) : Number(l.qty);
     const saleUnit = Number(l.unit_price);
-    const poCost = l.po_cost != null ? Number(l.po_cost) : null;
+    // Decisión 76: el costo de la OC entra en pesos (USD × TC de la OC). Una OC en
+    // dólares sin TC real no se resta contra pesos: la partida se excluye con motivo.
+    const poCost = poCostToMxn({ unitPrice: l.po_cost, currency: l.po_currency, fx: l.po_fx });
+    const poSinTc = l.po_cost != null && poCost == null;
     const quoteCost = l.quote_cost != null ? Number(l.quote_cost) : null;
     // El costo real manda: OC del proveedor, luego el de la cotización. Si no
     // hay ninguno, el del catálogo con el orden único (kardex → referencia).
@@ -326,7 +346,8 @@ async function dealPnlCore(
     const costSource = poCost != null ? "OC" : quoteReal != null ? "cotización" : sinCosto ? "sin costo" : catalogo.source === "referencia" ? "referencia" : "catálogo";
     // Una partida sin costo NO entra a la utilidad (entraría como 100% de
     // ganancia). Queda etiquetada y aparte, con su motivo.
-    const excludeReason = sinTiieMotivo ?? (sinCosto ? "sin costo (ni OC, ni cotización, ni kardex, ni referencia)" : null);
+    const excludeReason =
+      sinTiieMotivo ?? (poSinTc ? "OC en dólares sin tipo de cambio (captúralo en Compras)" : sinCosto ? "sin costo (ni OC, ni cotización, ni kardex, ni referencia)" : null);
     const excluded = excludeReason != null;
     const freightUnit = Number(l.quote_freight);
     const otherUnit = Number(l.quote_other);
@@ -341,6 +362,13 @@ async function dealPnlCore(
     // el mismo número. Antes esta base era solo la mercancía y la tarjeta
     // quedaba corta por el financiamiento del flete.
     const landed = cogs + freight + other;
+    // Spread cambiario del deal (MODELO-NEGOCIO.md § 11.7): con OC y pedido en
+    // dólares, lo que el margen trae por la diferencia entre el TC pactado con el
+    // cliente y el TC del proveedor. Informativo: ya vive dentro de venta − costo.
+    const fxSpread =
+      !excluded && l.po_currency === "USD" && poCost != null && so[0].currency === "USD" && isUsdFx(so[0].fx_rate)
+        ? Math.round(qty * Number(l.po_cost) * (Number(so[0].fx_rate) - Number(l.po_fx)) * 100) / 100
+        : 0;
     // Costo financiero del circuito hermana: comisión + Capa 1 con los días
     // de crédito del pedido (los mismos cobrados al cliente en el precio) +
     // Capa 2 (días excedidos, no previstos). Al contado no hay circuito.
@@ -421,6 +449,7 @@ async function dealPnlCore(
       /** Protección = cobrado al cliente − costo real. ASR: 0. Lineal sin tasa de costo: null. */
       protection,
       revenueLine,
+      fxSpread,
       excluded,
       excludeReason,
     };
@@ -478,6 +507,7 @@ async function dealPnlCore(
   // cobrar (fx_result). Lo que se convirtió en documento ATC es cartera, no
   // utilidad — igual que el Excel.
   const fxIncome = fv[0] ? Number(fv[0].fx_result) : 0;
+  const fxSpread = Math.round(included.reduce((s, l) => s + l.fxSpread, 0) * 100) / 100;
   const margin = revenue - cogs - freight - otherQuote - expOther;
   // Utilidad real de la operación, como el Excel:
   // + venta + mora + diferencial cambiario
@@ -532,6 +562,7 @@ async function dealPnlCore(
     financeBase,
     discount,
     fxIncome,
+    fxSpread,
     margin,
     marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
     marginAfterFinance: netProfit,

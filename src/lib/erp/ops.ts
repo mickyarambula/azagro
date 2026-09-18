@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { isUsdFx, missingFxMessage, mxnToCostCurrency } from "@/lib/erp/fx";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
@@ -987,10 +988,10 @@ export const createQuote = createServerFn({ method: "POST" })
       }
       const mCash = conMargen ? marginFromPrice({ price: line.cash, landed, finance: 0, mode: "nominal" }) : null;
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price, cost_currency, cost_fx,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit},
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit}, 'MXN', null,
           ${mCash?.mode ?? null}, ${mCash?.pct ?? null}, ${mCash?.nominal ?? null}, ${mCash ? "captura" : null},
           ${mCredit?.mode ?? null}, ${mCredit?.pct ?? null}, ${mCredit?.nominal ?? null}, ${mCredit ? "captura" : null}, ${Number(fin.toFixed(4))}, ${disbursed})
       `;
@@ -1198,10 +1199,10 @@ export const duplicateQuote = createServerFn({ method: "POST" })
     `;
     for (const line of priced) {
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, cash_price, credit_price,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, cash_price, credit_price, cost_currency, cost_fx,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.otherCost}, ${line.cash}, ${line.credit},
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.otherCost}, ${line.cash}, ${line.credit}, 'MXN', null,
           ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
           ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
           ${line.marginCredit ? "captura" : null}, ${line.financeUnit}, ${line.disbursedUnit})
@@ -1454,6 +1455,8 @@ export const reviseQuote = createServerFn({ method: "POST" })
           insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price)
           values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)}, 0, ${line.cashPrice}, ${line.creditPrice})
         `;
+        // Decisión 77: el costo de catálogo es pesos.
+        await sql`update quote_lines set cost_currency = 'MXN', cost_fx = null where quote_id = ${q[0].id} and product_id = ${line.productId}`;
       } else {
         await sql`
           update quote_lines
@@ -1696,43 +1699,54 @@ export const decideQuote = createServerFn({ method: "POST" })
       select id, delivery_mode from customer_requests where quote_id = ${q[0].id} and company_id = ${cid} limit 1
     `;
     if (req[0]) {
-      const winners = await sql<{ supplier_id: number; product_id: number; qty: string; cost: string; uom: string }>`
-        select supplier_id, product_id, qty::text, cost::text, uom from customer_request_lines
+      const winners = await sql<{ supplier_id: number; product_id: number; qty: string; cost: string; uom: string; cost_currency: string | null; cost_fx: string | null }>`
+        select supplier_id, product_id, qty::text, cost::text, uom, cost_currency, cost_fx::text as cost_fx from customer_request_lines
         where request_id = ${req[0].id} and supplier_id is not null
       `;
-      const bySup = new Map<number, typeof winners>();
+      // Decisión 78: la OC nace en la moneda del proveedor con SU tipo de cambio (el
+      // que se usó al elegirlo), no en la del cliente ni con el TC pactado con él.
+      // Una OC por proveedor y moneda/TC.
+      const bySup = new Map<string, typeof winners>();
       for (const w of winners) {
         const accepted = take.find((t) => t.productId === w.product_id);
         if (!accepted) continue;
-        const list = bySup.get(w.supplier_id) ?? [];
+        const key = `${w.supplier_id}|${w.cost_currency ?? "MXN"}|${w.cost_fx ?? ""}`;
+        const list = bySup.get(key) ?? [];
         list.push({ ...w, qty: String(accepted.qty) });
-        bySup.set(w.supplier_id, list);
+        bySup.set(key, list);
       }
       await sql`alter table purchase_orders add column if not exists fulfill_kind text not null default 'inventory'`;
       await sql`alter table purchase_orders add column if not exists so_id integer`;
       await sql`alter table purchase_lines add column if not exists deliver_to text not null default ''`;
-      for (const [supplierId, lines] of bySup) {
+      for (const [, lines] of bySup) {
+        const supplierId = lines[0]!.supplier_id;
+        const poCurrency = lines[0]!.cost_currency === "USD" ? "USD" : "MXN";
+        const poFx = poCurrency === "USD" ? Number(lines[0]!.cost_fx) : 1;
+        if (poCurrency === "USD" && !isUsdFx(poFx)) throw new Error(missingFxMessage(`la orden al proveedor en dólares de ${name}`));
+        // El costo de la solicitud está en pesos (Decisión 76); la OC lo lleva en su moneda.
+        const unitOf = (l: (typeof lines)[number]) => mxnToCostCurrency({ mxn: Number(l.cost), currency: poCurrency, fx: poFx, what: `la orden al proveedor de ${name}` });
         const poN = await sql<{ c: number }>`select count(*)::int as c from purchase_orders where company_id = ${cid}`;
         const poName = `OC-${String((poN[0]?.c ?? 0) + 1).padStart(4, "0")}`;
-        const poTotal = lines.reduce((s, l) => s + Number(l.qty) * Number(l.cost), 0);
+        const poTotal = lines.reduce((s, l) => s + Number(l.qty) * unitOf(l), 0);
         const po = await sql<{ id: number }>`
           insert into purchase_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, fulfill_kind, so_id)
           values (${cid}, ${poName}, ${supplierId}, ${today}, 'confirmed', ${data.locationId}, ${`Desde ${name}`}, ${poTotal},
-            ${q[0].currency}, ${Number(q[0].fx_rate)}, ${fulfillKind}, ${so[0]!.id})
+            ${poCurrency}, ${poFx}, ${fulfillKind}, ${so[0]!.id})
           returning id
         `;
         for (const line of lines) {
           await sql`
             insert into purchase_lines (po_id, product_id, qty, unit_price, uom, deliver_to)
-            values (${po[0]!.id}, ${line.product_id}, ${Number(line.qty)}, ${Number(line.cost)}, ${line.uom}, ${q[0].delivery_to})
+            values (${po[0]!.id}, ${line.product_id}, ${Number(line.qty)}, ${unitOf(line)}, ${line.uom}, ${q[0].delivery_to})
           `;
         }
         await rememberTrade(sql, {
           companyId: cid,
           partnerId: supplierId,
           kind: "buy",
-          products: lines.map((l) => ({ productId: l.product_id, unitPrice: Number(l.cost) })),
+          products: lines.map((l) => ({ productId: l.product_id, unitPrice: unitOf(l) })),
           locationId: data.locationId,
+          currency: poCurrency,
         });
         // Decisión 14: la OC nace confirmada, pero la deuda con el proveedor
         // NO nace aquí — nace al recibir la mercancía (o al entregarla, si es

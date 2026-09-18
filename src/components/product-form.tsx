@@ -10,6 +10,8 @@ export type ProductDraft = {
   uom: string;
   cost: number;
   ref_cost: number;
+  /** Decisión 77: en qué moneda se captura el costo de referencia (se guarda en pesos). */
+  ref_cost_currency: "MXN" | "USD";
   list_price: number;
   min_stock: number;
 };
@@ -89,9 +91,15 @@ export function ProductFields({
               onChange={(e) => setForm({ ...form, ref_cost: Math.max(0, Number(e.target.value)) })}
             />
           </Field>
-          <p className="text-xs text-muted md:col-span-2 md:self-center">
+          <Field label="Moneda en que lo capturas">
+            <select className="erp-input" value={form.ref_cost_currency} onChange={(e) => setForm({ ...form, ref_cost_currency: e.target.value as "MXN" | "USD" })}>
+              <option value="MXN">MXN</option>
+              <option value="USD">USD</option>
+            </select>
+          </Field>
+          <p className="text-xs text-muted md:self-center">
             Para productos que nunca entran a bodega (brokeraje, directo) o que aún no se han recibido. El sistema usa el promedio móvil del kardex si existe; si no, este.
-            Sin ninguno de los dos no se puede cotizar a crédito. Todo cambio queda en Bitácora.
+            Sin ninguno de los dos no se puede cotizar a crédito. El catálogo vive en pesos: si lo capturas en dólares se guarda al tipo de cambio de la tabla de hoy, y moneda y TC quedan en Bitácora.
           </p>
         </div>
       )}

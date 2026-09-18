@@ -126,6 +126,8 @@ export async function rememberTrade(
     kind: TradeKind;
     products?: Array<{ productId: number; unitPrice?: number }>;
     locationId?: number | null;
+    /** Decisión 76: en qué moneda se pactó ese precio (se conserva la última conocida). */
+    currency?: string | null;
   },
 ) {
   if (!opts.partnerId || !opts.companyId) return;
@@ -145,13 +147,14 @@ export async function rememberTrade(
     if (!p.productId) continue;
     const price = Number(p.unitPrice) || 0;
     await sql`
-      insert into partner_products (company_id, partner_id, product_id, kind, unit_price, notes)
-      values (${opts.companyId}, ${opts.partnerId}, ${p.productId}, ${opts.kind}, ${price}, '')
+      insert into partner_products (company_id, partner_id, product_id, kind, unit_price, notes, currency)
+      values (${opts.companyId}, ${opts.partnerId}, ${p.productId}, ${opts.kind}, ${price}, '', ${opts.currency ?? null})
       on conflict (company_id, partner_id, product_id, kind)
       do update set unit_price = case
         when excluded.unit_price > 0 then excluded.unit_price
         else partner_products.unit_price
-      end
+      end,
+      currency = case when excluded.unit_price > 0 and excluded.currency is not null then excluded.currency else partner_products.currency end
     `;
   }
   if (opts.locationId) {

@@ -21,6 +21,7 @@ function Nuevo() {
     uom: "KGS",
     cost: 0,
     ref_cost: 0,
+    ref_cost_currency: "MXN",
     list_price: 0,
     min_stock: 0,
   });

@@ -7,7 +7,8 @@ import { MoneyField } from "@/components/fields";
 import { SendButton } from "@/components/send-doc";
 import { applyRfqWinners, getRfq, saveRfqBid } from "@/lib/erp/rfq";
 import { Expediente } from "@/components/expediente";
-import { money, num, qty } from "@/lib/utils";
+import { money, num, qty, todayMx } from "@/lib/utils";
+import { fxAt } from "@/lib/erp/fx";
 
 export const Route = createFileRoute("/rfq/$rfqId")({ component: Page });
 
@@ -18,6 +19,8 @@ function Page() {
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [pick, setPick] = useState<Record<number, number>>({});
+  // Decisión 78: TC del proveedor al adjudicar una solicitud en dólares (propuesto de la tabla, editable).
+  const [fxRate, setFxRate] = useState(0);
 
   async function load() {
     const d = await getRfq({ data: { id } });
@@ -40,6 +43,9 @@ function Page() {
   useEffect(() => {
     void load().catch((e) => setError(e instanceof Error ? e.message : "Error"));
   }, [id]);
+  useEffect(() => {
+    if (data?.rfq.currency === "USD") setFxRate((f) => (f > 0 ? f : (fxAt(data.fxTable, todayMx())?.rate ?? 0)));
+  }, [data]);
 
   const bidMap = useMemo(() => {
     const m = new Map<string, number>();
@@ -148,6 +154,26 @@ function Page() {
               : "Precios aplicados a la cotización del cliente."}
           </p>
         ) : (
+          <div className="flex items-end gap-3">
+            {data.rfq.currency === "USD" ? (
+              <label className="text-xs text-muted">
+                Tipo de cambio del proveedor (USD)
+                <input
+                  className="erp-input mt-1 block w-32"
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  value={fxRate || ""}
+                  onChange={(e) => setFxRate(Number(e.target.value))}
+                />
+                <span className="block text-[11px]">
+                  {(() => {
+                    const t = fxAt(data.fxTable, todayMx());
+                    return t ? `Tabla: ${t.rate} (${t.date})` : "Sin renglón en la tabla: captúralo en Ajustes → Tipo de cambio";
+                  })()}
+                </span>
+              </label>
+            ) : null}
           <button
             type="button"
             className="erp-btn-primary"
@@ -164,7 +190,7 @@ function Page() {
                 return;
               }
               try {
-                const r = await applyRfqWinners({ data: { rfqId: id, winners } });
+                const r = await applyRfqWinners({ data: { rfqId: id, winners, fxRate: data.rfq.currency === "USD" ? fxRate : undefined } });
                 setMsg(
                   data.rfq.purpose === "stock"
                     ? r.pos?.length
@@ -180,6 +206,7 @@ function Page() {
           >
             {data.rfq.purpose === "stock" ? "Emitir OC al ganador" : "Usar precios ganadores como costo"}
           </button>
+          </div>
         )}
       </div>
     </>

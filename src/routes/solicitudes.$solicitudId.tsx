@@ -862,6 +862,7 @@ function Page() {
                     <td className="px-3 py-2.5 text-right tabular-nums">
                       {num(l.cost) > 0 ? money(landed) : <span className="text-warn">Sin costo</span>}
                       {num(l.freight) > 0 ? <span className="block text-[11px] text-muted">{money(num(l.cost))} + flete {money(num(l.freight))}</span> : null}
+                      {l.cost_currency === "USD" ? <span className="block text-[11px] text-muted">proveedor en USD × TC {num(l.cost_fx)}</span> : null}
                     </td>
                     <td className="px-3 py-2">
                       <MarginCell requestId={id} line={l} which="cash" marginUnit={marginValid(mCash) ? marginUnitOf(mCash, landed, 0) : 0} disabled={locked} onSaved={load} onError={fail} />

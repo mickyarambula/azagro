@@ -13,6 +13,7 @@ import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate, NO_MORA_POLICY, requireRate } from "@/lib/erp/credit";
 import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { nextDocFolio } from "@/lib/erp/folios";
+import { costToMxn, fxAt, isUsdFx, loadFxTable, missingFxMessage, supplierInvoiceAmounts } from "@/lib/erp/fx";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { purchaseLineGaps, salesLineGaps } from "@/lib/erp/parciales";
@@ -801,6 +802,9 @@ export const saveProduct = createServerFn({ method: "POST" })
       min_stock: z.number(),
       // Costo de referencia: opcional en el envío. Si no viene, no se toca.
       ref_cost: z.number().nonnegative().optional(),
+      // Decisión 77: se captura declarando moneda y se guarda en pesos.
+      ref_cost_currency: z.enum(["MXN", "USD"]).optional(),
+      ref_cost_fx: z.number().positive().optional(),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -818,6 +822,20 @@ export const saveProduct = createServerFn({ method: "POST" })
     if (data.ref_cost !== undefined && (!Number.isFinite(data.ref_cost) || data.ref_cost < 0)) {
       throw new Error("El costo de referencia no puede ser negativo");
     }
+    // Decisión 77: el catálogo vive en pesos. Un costo de referencia capturado en
+    // dólares se convierte con el TC dado o con el de la tabla a hoy; sin TC se
+    // detiene. Lo capturado queda en el rastro (moneda y TC).
+    const refCur: "MXN" | "USD" | null = data.ref_cost !== undefined ? (data.ref_cost_currency === "USD" && data.ref_cost > 0 ? "USD" : "MXN") : null;
+    let refFx: number | null = null;
+    let refCaptured = "";
+    if (refCur === "USD") {
+      const fx = isUsdFx(data.ref_cost_fx) ? Number(data.ref_cost_fx) : fxAt(await loadFxTable(sql, m.company_id), todayMx())?.rate;
+      const c = costToMxn({ cost: data.ref_cost!, currency: "USD", fx, what: "el costo de referencia en dólares" });
+      refCaptured = `${data.ref_cost} USD × TC ${c.fx}`;
+      refFx = c.fx;
+      // De aquí en adelante el costo de referencia ya es pesos, como todo el catálogo.
+      data.ref_cost = c.mxn;
+    }
     let code = (data.code ?? "").trim().toUpperCase();
     if (!code) code = await nextCodeFor(sql, m.company_id, "PRD-", "products");
     const category = data.category || (data.product_type === "INSUMO" ? "Insumos" : "Fertilizantes");
@@ -831,7 +849,9 @@ export const saveProduct = createServerFn({ method: "POST" })
         update products set code=${code}, name=${data.name}, category=${category},
           product_type=${data.product_type}, uom=${data.uom}, cost=${data.cost},
           list_price=${data.list_price}, min_stock=${data.min_stock},
-          ref_cost = coalesce(${data.ref_cost ?? null}, ref_cost)
+          ref_cost = coalesce(${data.ref_cost ?? null}, ref_cost),
+          ref_cost_currency = coalesce(${refCur}, ref_cost_currency),
+          ref_cost_fx = case when ${refCur}::text is null then ref_cost_fx else ${refFx} end
         where id = ${data.id} and company_id = ${m.company_id}
       `;
       if (before[0]) {
@@ -839,6 +859,7 @@ export const saveProduct = createServerFn({ method: "POST" })
         if (Number(before[0].cost) !== data.cost) cambios.push(`costo ${Number(before[0].cost)} → ${data.cost}`);
         if (data.ref_cost !== undefined && Number(before[0].ref_cost) !== data.ref_cost)
           cambios.push(`costo de referencia ${Number(before[0].ref_cost)} → ${data.ref_cost}`);
+        if (refCaptured && Number(before[0].ref_cost) !== data.ref_cost) cambios.push(`capturado ${refCaptured}`);
         if (Number(before[0].list_price) !== data.list_price)
           cambios.push(`precio lista ${Number(before[0].list_price)} → ${data.list_price}`);
         if (cambios.length) {
@@ -856,8 +877,8 @@ export const saveProduct = createServerFn({ method: "POST" })
       return { id: data.id };
     }
     const row = await sql<{ id: number }>`
-      insert into products (company_id, code, name, category, product_type, uom, cost, list_price, min_stock, ref_cost)
-      values (${m.company_id}, ${code}, ${data.name}, ${category}, ${data.product_type}, ${data.uom}, ${data.cost}, ${data.list_price}, ${data.min_stock}, ${data.ref_cost ?? 0})
+      insert into products (company_id, code, name, category, product_type, uom, cost, list_price, min_stock, ref_cost, ref_cost_currency, ref_cost_fx)
+      values (${m.company_id}, ${code}, ${data.name}, ${category}, ${data.product_type}, ${data.uom}, ${data.cost}, ${data.list_price}, ${data.min_stock}, ${data.ref_cost ?? 0}, ${refCur}, ${refFx})
       returning id
     `;
     if (data.ref_cost) {
@@ -868,7 +889,7 @@ export const saveProduct = createServerFn({ method: "POST" })
         entity: "product",
         entityId: row[0]!.id,
         name: `${code} ${data.name}`,
-        detail: `costo de referencia 0 → ${data.ref_cost}`,
+        detail: `costo de referencia 0 → ${data.ref_cost}${refCaptured ? ` (capturado ${refCaptured})` : ""}`,
       });
     }
     return { id: row[0]!.id };
@@ -1185,6 +1206,7 @@ export const listPurchases = createServerFn({ method: "GET" })
       location: string;
       total: string;
       currency: string;
+      fx_rate: string;
       closed_short_reason: string | null;
       fulfill_kind: string;
       so_id: number | null;
@@ -1193,6 +1215,7 @@ export const listPurchases = createServerFn({ method: "GET" })
       rfq_name: string | null;
     }>`
       select po.id, po.name, po.partner_id, pt.name as partner, po.date::text, po.state, l.name as location, po.total::text, po.currency,
+        coalesce(po.fx_rate,1)::text as fx_rate,
         po.closed_short_reason,
         coalesce(po.fulfill_kind,'inventory') as fulfill_kind,
         po.so_id, so.name as so_name, po.rfq_id, v.name as rfq_name
@@ -1239,9 +1262,10 @@ export const listPurchases = createServerFn({ method: "GET" })
         suppliers,
         products: products.map((p) => ({ ...p, cost: "0" })),
         locations,
+        fxTable: await loadFxTable(sql, m.company_id),
       };
     }
-    return { orders, lines, suppliers, products, locations };
+    return { orders, lines, suppliers, products, locations, fxTable: await loadFxTable(sql, m.company_id) };
   });
 
 export const createPurchase = createServerFn({ method: "POST" })
@@ -1252,7 +1276,7 @@ export const createPurchase = createServerFn({ method: "POST" })
       locationId: z.number(),
       notes: z.string().optional().default(""),
       currency: z.enum(["MXN", "USD"]).optional().default("MXN"),
-      fxRate: z.number().positive().optional().default(1),
+      fxRate: z.number().positive().optional(),
       fulfillKind: z.enum(["inventory", "direct"]).optional().default("inventory"),
       lines: z.array(
         z.object({
@@ -1270,6 +1294,12 @@ export const createPurchase = createServerFn({ method: "POST" })
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "purchases", "edit");
     await ensureInvoiceExtras(sql);
+    // Decisión 78: una OC en dólares declara SU tipo de cambio (el del proveedor):
+    // la pantalla lo propone de la tabla y se puede corregir; nunca 1 por omisión
+    // ni el pactado con el cliente. En pesos el TC es 1 y significa una sola cosa.
+    const currency = data.currency ?? "MXN";
+    if (currency === "USD" && !isUsdFx(data.fxRate)) throw new Error(missingFxMessage("la orden de compra en dólares"));
+    const fxRate = currency === "USD" ? Number(data.fxRate) : 1;
     const n = await sql<{ c: number }>`select count(*)::int as c from purchase_orders where company_id = ${m.company_id}`;
     const name = `OC-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const total = data.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
@@ -1280,7 +1310,7 @@ export const createPurchase = createServerFn({ method: "POST" })
     const po = await sql<{ id: number }>`
       insert into purchase_orders (company_id, name, partner_id, date, state, location_id, notes, total, currency, fx_rate, fulfill_kind)
       values (${m.company_id}, ${name}, ${data.partnerId}, ${today}, 'confirmed', ${data.locationId}, ${data.notes ?? ""}, ${total},
-        ${data.currency ?? "MXN"}, ${data.fxRate ?? 1}, ${data.fulfillKind ?? "inventory"})
+        ${currency}, ${fxRate}, ${data.fulfillKind ?? "inventory"})
       returning id
     `;
     for (const line of data.lines) {
@@ -1296,6 +1326,7 @@ export const createPurchase = createServerFn({ method: "POST" })
       kind: "buy",
       products: data.lines.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
       locationId: data.locationId,
+      currency,
     });
     // Decisión 14: aquí NO nace la deuda. La FP nace cuando la mercancía se
     // movió de verdad — al recibirla, o al entregarla si es directa/brokeraje
@@ -1308,9 +1339,55 @@ export const createPurchase = createServerFn({ method: "POST" })
       entity: "purchase",
       entityId: po[0]!.id,
       name,
-      detail: `Total ${total.toFixed(2)} ${data.currency ?? "MXN"} · la deuda nace al recibir`,
+      detail: `Total ${total.toFixed(2)} ${currency}${currency === "USD" ? ` · TC ${fxRate}` : ""} · la deuda nace al recibir`,
     });
     return { id: po[0]!.id, name };
+  });
+
+/**
+ * Decisión 78, la salida antes del candado: una OC en dólares que nació sin TC
+ * real (las de antes de la migración 0044, con `fx_rate = 1`) lo captura aquí.
+ * Solo mientras no tenga deuda viva: la FP ya nació en pesos con ese TC y no se
+ * reescribe (Decisión 79); si hace falta corregirla, se revierte la recepción.
+ */
+export const setPurchaseFxRate = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ poId: z.number(), fxRate: z.number().positive() }))
+  .handler(async ({ context, data }) => {
+    const sql0 = await getSql();
+    const m = await requireCompany(sql0, context.userId);
+    await assertCan(sql0, context.userId, "purchases", "edit");
+    if (!isUsdFx(data.fxRate)) throw new Error(missingFxMessage("la orden de compra en dólares"));
+    // La OC se bloquea (for update) para que el candado "sin deuda viva" y la
+    // escritura sean un solo acto frente a una recepción simultánea.
+    return withTx(async (sql) => {
+      const po = await sql<{ name: string; currency: string; fx_rate: string; state: string }>`
+        select name, coalesce(currency,'MXN') as currency, coalesce(fx_rate,1)::text as fx_rate, state
+        from purchase_orders where id = ${data.poId} and company_id = ${m.company_id} for update
+      `;
+      if (!po[0]) throw new Error("Orden de compra no encontrada");
+      if (po[0].currency !== "USD") throw new Error(`${po[0].name} está en pesos: no lleva tipo de cambio.`);
+      const fp = await sql<{ name: string }>`
+        select name from invoices where company_id = ${m.company_id} and kind = 'supplier' and origin = ${po[0].name} and state <> 'reversed' limit 1
+      `;
+      if (fp[0]) {
+        throw new Error(
+          `${po[0].name} ya tiene deuda viva (${fp[0].name}) nacida con TC ${Number(po[0].fx_rate)}: el TC no se cambia después. ` +
+            `Si el TC estaba mal, revierte la recepción, corrige el TC y vuelve a recibir.`,
+        );
+      }
+      await sql`update purchase_orders set fx_rate = ${data.fxRate} where id = ${data.poId} and company_id = ${m.company_id}`;
+      await writeAudit(sql, {
+        companyId: m.company_id,
+        userId: context.userId,
+        action: "tc-oc",
+        entity: "purchase",
+        entityId: data.poId,
+        name: po[0].name,
+        detail: `TC ${Number(po[0].fx_rate)} → ${data.fxRate}`,
+      });
+      return { ok: true };
+    });
   });
 
 /**
@@ -1364,12 +1441,15 @@ export async function bornSupplierDebt(
   }
   const day = (opts.date || todayMx()).slice(0, 10);
   const due = addDays(day, days[0].payment_days);
-  const total = Number(po[0].total ?? 0);
+  // Decisión 79: la FP nace como la FV — pesos al TC de la OC, el original en
+  // amount_fx. Una OC en dólares sin TC real no hace nacer deuda (el mensaje
+  // dice dónde capturarlo).
+  const amounts = supplierInvoiceAmounts({ total: po[0].total ?? 0, currency: po[0].currency, fx: po[0].fx_rate, poName: opts.poName });
   const iname = await nextDocFolio(sql, opts.companyId, "FP");
   await sql`
-    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, currency, fx_agreed, created_by)
-    values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${total}, ${total},
-      ${opts.poName}, ${po[0].currency}, ${Number(po[0].fx_rate)}, ${opts.userId})
+    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, amount_fx, origin, currency, fx_agreed, created_by)
+    values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${amounts.amount}, ${amounts.amount}, ${amounts.amountFx},
+      ${opts.poName}, ${amounts.currency}, ${amounts.fxAgreed}, ${opts.userId})
   `;
   return iname;
 }
@@ -1600,12 +1680,18 @@ export async function bornSupplierDebtByReceipt(
   }
   const day = (opts.date || todayMx()).slice(0, 10);
   const due = addDays(day, days[0].payment_days);
-  const total = opts.received.reduce((s, r) => s + r.qty * r.unitPrice, 0);
+  // Decisión 79: mismo molde que la FV (pesos al TC de la OC, original en amount_fx).
+  const amounts = supplierInvoiceAmounts({
+    total: opts.received.reduce((s, r) => s + r.qty * r.unitPrice, 0),
+    currency: po[0].currency,
+    fx: po[0].fx_rate,
+    poName: opts.poName,
+  });
   const iname = await nextDocFolio(sql, opts.companyId, "FP");
   await sql`
-    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, origin, event_ref, currency, fx_agreed, created_by)
-    values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${total}, ${total},
-      ${opts.poName}, ${opts.eventRef}, ${po[0].currency}, ${Number(po[0].fx_rate)}, ${opts.userId})
+    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, amount_fx, origin, event_ref, currency, fx_agreed, created_by)
+    values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${amounts.amount}, ${amounts.amount}, ${amounts.amountFx},
+      ${opts.poName}, ${opts.eventRef}, ${amounts.currency}, ${amounts.fxAgreed}, ${opts.userId})
   `;
   return iname;
 }
@@ -2655,6 +2741,9 @@ export const listInvoices = createServerFn({ method: "POST" })
       amount: string;
       residual: string;
       late_amount: string;
+      amount_fx: string;
+      fx_agreed: string;
+      fx_paid: string | null;
       origin: string;
       credit_days: number;
       days_overdue: number;
@@ -2682,6 +2771,7 @@ export const listInvoices = createServerFn({ method: "POST" })
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
         i.date::text, i.due_date::text,
         i.state, i.amount::text, i.residual::text, i.late_amount::text, i.origin,
+        coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,1)::text as fx_agreed, i.fx_paid::text as fx_paid,
         coalesce(i.credit_days, 0)::int as credit_days,
         greatest(0, (${today}::date - i.due_date))::int as days_overdue,
         (i.due_date - ${today}::date)::int as days_left,

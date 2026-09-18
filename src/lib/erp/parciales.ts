@@ -225,6 +225,8 @@ export type PnlLine = {
   revenueLine: number;
   excluded: boolean;
   excludeReason: string | null;
+  /** Spread cambiario del deal (§ 11.7), informativo. */
+  fxSpread?: number;
 };
 
 export type PnlPart = {
@@ -261,6 +263,7 @@ export type PnlPart = {
     financeBase: number;
     discount: number;
     fxIncome: number;
+    fxSpread?: number;
   };
 };
 
@@ -323,6 +326,7 @@ export function mergeDealPnl(
       lineCost: sumOrNull(ls, (l) => l.lineCost),
       protection: sumOrNull(ls, (l) => l.protection),
       revenueLine,
+      fxSpread: r2(sum(ls, (l) => l.fxSpread ?? 0)),
       excluded,
       excludeReason: excluded ? [...new Set(excludedLs.map((l) => l.excludeReason ?? ""))].filter(Boolean).join("; ") || null : null,
     };
@@ -350,6 +354,7 @@ export function mergeDealPnl(
   // Pronto pago y diferencial cambiario: los de cada factura, sumados.
   const discount = sum(parts, (p) => p.pnl.discount);
   const fxIncome = sum(parts, (p) => p.pnl.fxIncome);
+  const fxSpread = r2(sum(parts, (p) => p.pnl.fxSpread ?? 0));
   const margin = revenue - cogs - freight - otherQuote - expOther;
   const netProfit = margin + order.mora + fxIncome - finance - discount;
   // Cuánto se ha cobrado: TODAS las facturas, no solo la última.
@@ -410,6 +415,7 @@ export function mergeDealPnl(
     financeBase,
     discount,
     fxIncome,
+    fxSpread,
     margin,
     marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
     marginAfterFinance: netProfit,

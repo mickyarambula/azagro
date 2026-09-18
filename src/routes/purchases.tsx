@@ -8,7 +8,8 @@ import { SearchSelect, asOpts } from "@/components/search-select";
 import { SendButton } from "@/components/send-doc";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
-import { closeShortPurchase, createPurchase, listPurchases, receivePurchase } from "@/lib/azagro";
+import { closeShortPurchase, createPurchase, listPurchases, receivePurchase, setPurchaseFxRate } from "@/lib/azagro";
+import { fxAt, isUsdFx } from "@/lib/erp/fx";
 import { CloseShortButton } from "@/components/close-short";
 import { useAccess } from "@/lib/access";
 import { CancelChainButton, ReceiptReversalButton } from "@/components/cancel-doc";
@@ -128,10 +129,15 @@ function Page() {
   const [date, setDate] = useState(todayMx);
   const [notes, setNotes] = useState("");
   const [currency, setCurrency] = useState<"MXN" | "USD">("MXN");
+  // Decisión 78: el TC del proveedor, propuesto de la tabla a la fecha y editable.
+  const [fxRate, setFxRate] = useState(0);
   const [fulfillKind, setFulfillKind] = useState<"inventory" | "direct">("inventory");
   const [lines, setLines] = useState([{ productId: 0, qty: 1, unitPrice: 0, uom: "TM", deliverTo: "" }]);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (currency === "USD" && data) setFxRate((f) => (f > 0 ? f : (fxAt(data.fxTable, date)?.rate ?? 0)));
+  }, [currency, date, data]);
 
   async function load() {
     const d = await listPurchases();
@@ -177,6 +183,7 @@ function Page() {
                     locationId,
                     notes,
                     currency,
+                    fxRate: currency === "USD" && fxRate > 0 ? fxRate : undefined,
                     fulfillKind,
                     lines: lines.filter((l) => l.productId && l.qty > 0),
                   },
@@ -240,6 +247,24 @@ function Page() {
                   <option value="USD">USD</option>
                 </select>
               </HeadBox>
+              {currency === "USD" ? (
+                <HeadBox label="Tipo de cambio">
+                  <input
+                    className="erp-input w-full border-0 bg-transparent px-0"
+                    type="number"
+                    step="0.0001"
+                    min="0"
+                    value={fxRate || ""}
+                    onChange={(e) => setFxRate(Number(e.target.value))}
+                  />
+                  <p className="text-[11px] text-muted">
+                    {(() => {
+                      const t = fxAt(data?.fxTable ?? [], date);
+                      return t ? `Tabla: ${t.rate} (${t.date}). Es el TC del proveedor; corrígelo si pactaron otro.` : "Sin renglón en la tabla para esta fecha: captúralo en Ajustes → Tipo de cambio.";
+                    })()}
+                  </p>
+                </HeadBox>
+              ) : null}
               <HeadBox label="Total">
                 <p className="text-xl font-semibold tabular-nums">{moneyIn(total, currency)}</p>
                 <p className="text-[11px] text-muted">{lines.length} partidas</p>
@@ -255,7 +280,7 @@ function Page() {
                   {
                     productId: data?.products[0]?.id ?? 0,
                     qty: 1,
-                    unitPrice: num(data?.products[0]?.cost),
+                    unitPrice: currency === "USD" ? 0 : num(data?.products[0]?.cost),
                     uom: data?.products[0]?.uom || "TM",
                     deliverTo: loc?.name || "",
                   },
@@ -433,7 +458,10 @@ function Page() {
                               : "Por recibir"}
                       </StatusPill>
                     </td>
-                    <td className="px-3 py-3 text-right tabular-nums">{moneyIn(o.total, o.currency)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {moneyIn(o.total, o.currency)}
+                      {o.currency === "USD" ? <PoFxLine po={o} onSaved={load} onError={setMsg} /> : null}
+                    </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex justify-end gap-2">
                         <button
@@ -545,5 +573,48 @@ function Page() {
         )}
       </div>
     </AppShell>
+  );
+}
+
+/**
+ * Decisión 78, la salida antes del candado: una OC en dólares enseña su TC y, si
+ * nació sin uno real (TC 1, antes de la migración 0044), lo captura aquí
+ * mientras no tenga deuda viva.
+ */
+function PoFxLine({ po, onSaved, onError }: { po: { id: number; name: string; fx_rate: string }; onSaved: () => Promise<void>; onError: (m: string) => void }) {
+  const [fx, setFx] = useState(0);
+  const [busy, setBusy] = useState(false);
+  if (isUsdFx(po.fx_rate)) return <p className="text-[11px] text-muted">TC {num(po.fx_rate)}</p>;
+  return (
+    <div className="mt-1 flex items-center justify-end gap-1">
+      <input
+        className="erp-input w-24 px-1 py-0.5 text-[11px]"
+        type="number"
+        step="0.0001"
+        min="0"
+        placeholder="TC"
+        value={fx || ""}
+        onChange={(e) => setFx(Number(e.target.value))}
+      />
+      <button
+        type="button"
+        className="erp-btn text-[11px]"
+        disabled={busy || !(fx > 1)}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await setPurchaseFxRate({ data: { poId: po.id, fxRate: fx } });
+            await onSaved();
+          } catch (e) {
+            onError(e instanceof Error ? e.message : "No se pudo guardar el tipo de cambio");
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        Guardar TC
+      </button>
+      <span className="text-[11px] text-warn">sin TC</span>
+    </div>
   );
 }
