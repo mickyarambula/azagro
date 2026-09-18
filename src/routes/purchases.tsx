@@ -22,8 +22,9 @@ import { moneyIn, num, todayMx } from "@/lib/utils";
 /**
  * BLOQUE DE PARCIALES, paso 1.4: recibir cantidad por partida. Envoltorio del
  * diálogo compartido (`PartialQtyDialog`, el mismo que usa Entregar en la
- * ficha del pedido). "Recibir todo lo pendiente" llama sin `lines` (el camino
- * de hoy); confirmar con cantidades llama con `lines`.
+ * ficha del pedido). "Recibir todo lo pendiente" llama sin `lines` y confirmar
+ * con cantidades llama con `lines`; desde la Decisión 89 los dos van por el
+ * mismo camino — sin `lines`, el servidor calcula lo pendiente por partida.
  */
 function ReceivePartialButton(props: {
   poName: string;

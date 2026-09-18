@@ -106,7 +106,9 @@ test("cableado: el P&L por pedido usa TIIE de emisión y parámetros de Ajustes"
     rep.includes("snap.financialDays ?? (fv[0] ? fv[0].credit_days : so[0].credit_days)"),
     "el plazo financiado es el del PEDIDO (foto de la factura, o sus días de crédito), no un fijo de Ajustes",
   );
-  assert.ok(rep.includes("margin + mora + fxIncome - finance - discount"), "utilidad = margen + mora + dif. − financiero − descuento");
+  // Decisión 87 (18-sep-2026): los DOS diferenciales realizados — el del
+  // cobro al cliente y el del pago al proveedor.
+  assert.ok(rep.includes("margin + mora + fxIncome + fxCompra - finance - discount"), "utilidad = margen + mora + los dos diferenciales − financiero − descuento");
   assert.ok(!rep.includes("finance_spread"), "ya no debe usarse el spread de línea como costo del circuito");
 });
 

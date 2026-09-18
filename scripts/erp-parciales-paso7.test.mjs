@@ -114,13 +114,15 @@ test("entregar y recibir NO tocan lo cerrado corto: pendiente = qty − hecho �
   assert.ok(rp.includes("const pending = Number(line[0].qty) - Number(line[0].qty_received) - Number(line[0].qty_closed_short);"));
   assert.ok(rp.includes("qty_received >= qty - 0.0001 - coalesce(qty_closed_short,0)"), "erp-recepcion-parcial fija el prefijo");
   assert.ok(fnBody(src("src/lib/erp/receipt-reversal.ts"), "reverseReceiptEvent").includes("qty_received < qty - 0.0001 - coalesce(qty_closed_short,0)"), "la reversa de recepción vuelve a confirmed solo si queda pendiente de verdad");
-  // Segunda pasada del revisor: «Recibir todo lo pendiente» (sin lines) entraba al camino viejo, que pisa qty_received = qty
-  // y hace nacer la FP por po.total — recibía lo cerrado corto. Con cierre corto va por partidas; sin cierre corto, el camino de siempre.
+  // Segunda pasada del revisor (16-sep): «Recibir todo lo pendiente» entraba al
+  // camino viejo, que pisaba qty_received = qty y recibía lo cerrado corto. Se
+  // parchó mandando por partidas SOLO cuando había cierre corto. El 18-sep se
+  // cerró de raíz: ya no hay camino viejo — toda recepción va por partidas y
+  // resta lo cerrado en la misma consulta, tenga o no cierre corto.
   const rw = fnBody(az, "receivePurchase");
-  assert.ok(rw.includes("from purchase_lines where po_id = ${po[0].id} and coalesce(qty_closed_short,0) > 0"), "detecta cierre corto");
-  assert.ok(rw.includes("const pendLines = all.map((l) => ({ lineId: l.id, qty: Number(l.pending) })).filter((l) => l.qty > 0.0001);"), "pendiente sin lo cerrado, por partida");
-  assert.ok(rw.includes("lo demás se cerró corto"), "y si no queda nada, lo dice");
-  assert.ok(rw.includes("const pending = Number(line.qty) - Number(line.qty_received);") && rw.includes("update purchase_lines set qty_received = qty where id = ${line.id}"), "el camino viejo sigue byte a byte para OC sin cierre corto (erp-fp-al-recibir lo fija)");
+  assert.ok(rw.includes("select id, (qty - coalesce(qty_received,0) - coalesce(qty_closed_short,0))::text as pending"), "lo pendiente ya viene sin lo cerrado");
+  assert.ok(!rw.includes("update purchase_lines set qty_received = qty where id = ${line.id}"), "nunca se pisa qty_received con qty: eso recibía lo cerrado corto");
+  assert.ok(!rw.includes("await postStock(sql, {"), "y no hay un segundo camino que mueva kardex por su cuenta");
 });
 
 test("closeShortSale / closeShortPurchase por API: sin nada entregado / recibido no se cierra corto — eso sería cancelar sin pasar por cancelar", () => {

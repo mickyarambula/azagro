@@ -60,9 +60,14 @@ test("receiptUnitCostMxn (D77): la OC de 1,000 USD a 18.50 entra al kardex a 18,
 // ---------------------------------------------------------------------------
 // Cableado.
 // ---------------------------------------------------------------------------
-test("la recepción convierte ANTES de postStock, en los dos caminos; postStock no cambia de firma", () => {
+test("la recepción convierte ANTES de postStock; postStock no cambia de firma", () => {
   const a = src("src/lib/azagro.ts");
-  assert.ok(fnBody(a, "receivePurchase").includes("unitCost: receiptUnitCostMxn({ unitPrice: line.unit_price, currency: po[0].currency, fx: po[0].fx_rate, poName: po[0].name })"), "recibir todo lo pendiente");
+  // Ya no hay «dos caminos»: toda recepción pasa por `receivePartial`, así que
+  // la conversión vive en UN solo lugar (18-sep-2026, el agujero de la cuenta
+  // por pagar). `receivePurchase` no mueve kardex por su cuenta.
+  const rw = fnBody(a, "receivePurchase");
+  assert.ok(!rw.includes("await postStock(sql, {"), "receivePurchase no toca el kardex: delega");
+  assert.ok(rw.includes("const r = await receivePartial(sql, {"), "toda recepción va por partidas");
   const rp = fnBody(a, "receivePartial");
   assert.ok(rp.includes("unitCost: receiptUnitCostMxn({ unitPrice: line[0].unit_price, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName })"), "recibir por partida");
   assert.ok(rp.includes("received.push({ productId: line[0].product_id, qty: l.qty, unitPrice: Number(line[0].unit_price) });"), "la FP sigue recibiendo el precio en la moneda de la OC (ella convierte)");

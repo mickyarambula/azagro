@@ -478,6 +478,40 @@ sesiones.
 
 **Lo que esta pantalla NO hace, a propósito:** no dice cuáles dólares de la caja se compraron para cuál orden. En el banco los dólares son una bolsa sola, sin etiqueta, así que la cobertura con dólares se mide a nivel empresa y por cubeta, nunca por pedido. Lo que sí se deriva pedido por pedido es la otra dinámica, la de pactar el tipo de cambio en las dos puntas: eso sale en la tabla "Por negocio".
 
+## ESCENARIO 14 — Lo que cuesta de más pagarle al proveedor ya baja la utilidad del pedido; y la mercancía nunca entra sin cuenta por pagar (Decisiones 87-89, 18-sep-2026)
+
+**Los dos números que más importan:** (1) una compra de **10,000 dólares** pactada a **18.00** y pagada a **18.50** cuesta **$5,000 pesos** de más, y esos $5,000 tienen que **bajar la utilidad de ese pedido** — antes el sistema los registraba y nadie los veía nunca. (2) Si recibes una orden **en dos viajes**, tienen que nacer **dos facturas del proveedor**, una por viaje. Antes nacía solo la del primero: la mercancía del segundo entraba a la bodega **sin que nadie te la cobrara en el sistema**.
+
+**Antes de empezar:** el dólar de hoy capturado en "Ajustes" → "Tipo de cambio" (usa **18.5**), un proveedor con "Plazo de pago (días)" capturado, un cliente, un producto con costo y precio, y las dos cuentas de banco (una en pesos con saldo, una en dólares).
+
+### Parte A — La mercancía nunca entra sin cuenta por pagar
+
+1. Ve a "Compras" → "Nueva orden". Elige el proveedor, "Moneda" `MXN`, y captura una partida de **10** piezas a `1000`. "Colocar orden".
+2. Pulsa "Recibir". En el cuadro escribe **6** y pulsa **"Recibir lo capturado"**. Debes ver que nace **"FP-0001"**, y la orden sigue en **"Por recibir"** (le faltan 4).
+3. Pulsa "Recibir" otra vez y ahora pulsa **"Recibir todo lo pendiente"**. Debes ver que nace **"FP-0002"** y la orden pasa a **"Recibida"**.
+4. **Éste es el punto.** Ve a "Cartera" → "Por pagar". Tienen que estar **las dos facturas**: FP-0001 por **$6,000.00** y FP-0002 por **$4,000.00** — los $10,000 completos. Antes de este cambio solo aparecía la primera, por $6,000, y las otras 4 piezas quedaban en la bodega sin deuda: el inventario decía $10,000 y las cuentas por pagar $6,000. Si ves una sola factura, avísame.
+5. Ve a "Almacén" → "Inventario" y confirma que el producto tiene **10** de existencia. Inventario y cuentas por pagar dicen lo mismo.
+
+### Parte B — Lo que cuesta de más pagarle al proveedor baja la utilidad
+
+6. Ve a "Compras" → "Nueva orden", el mismo proveedor, "Moneda" `USD`. En "Tipo de cambio" **cámbialo a `18`** (el que pactaste con él; la tabla propone 18.5). Captura **10** piezas a `1000`. "Colocar orden" y "Recibir" → "Recibir todo lo pendiente". Nace una factura de **"USD 10,000.00 · TC 18 · $180,000.00"**.
+7. Ahora vende de ese inventario, **ligando la venta a esa compra**: ve a "Ventas" → "Cotizaciones" → "Alta manual (sin solicitud)", moneda `MXN`, elige el cliente, 10 piezas, guarda, pulsa "Ver" y "Cliente aceptó → pedido"; confirma, entrega y factura la entrega.
+8. Abre el pedido y baja a la tarjeta de utilidad. **Apunta el número de "Utilidad final".**
+9. Ve a "Cartera" → "Por pagar", encuentra la factura del proveedor y págala: en "Bancos", "Pago", cuenta **en pesos**, "Aplicar a factura" esa FP, "TC del pago" **`18.5`**, importe completo. El sistema te dirá "Diferencial TC: pérdida cambiaria 5,000.00".
+10. Vuelve al pedido. En el párrafo debajo de la tarjeta debe decir **"Diferencial cambiario (pago al proveedor): −$5,000.00"**, y la **"Utilidad final" tiene que haber bajado exactamente $5,000** respecto al paso 8. Pagaste 18.50 lo que habías pactado a 18.00, por diez mil dólares: cinco mil pesos que antes no se veían en ningún lado.
+11. Si el cliente te hubiera pagado a ti en dólares y a otro tipo de cambio, ahí mismo aparecería el otro renglón: **"Diferencial cambiario (cobro al cliente)"**. Son dos cosas distintas y por eso salen con apellido: uno es lo que te pasó cobrando, el otro lo que te pasó pagando.
+11b. Ve a "Reportes" → el bloque de **Panorama**. La tabla tiene ahora dos columnas separadas, **"Dif. TC cobro"** y **"Dif. TC pago"**, y los −$5,000 tienen que salir en la segunda. **Compruébalo sumando el renglón:** Venta + Mora + Dif. TC cobro + Dif. TC pago − Costo prov. − Comisión − Capa 1 − Capa 2 − Descuento tiene que dar exactamente la "Utilidad". Si no cuadra, avísame: es la señal de que algo entra a la utilidad sin columna que lo explique.
+
+### Parte C — El pedido que no se puede juzgar
+
+12. Levanta un pedido de venta **sin cotización** ("Ventas" → "Pedidos de venta" → "Nuevo pedido"), surtiéndolo del inventario que ya tienes, y entrégalo y factúralo.
+13. Abre ese pedido. Debajo de la tarjeta de utilidad debe decir: **"Este pedido no tiene una orden de compra ligada: se surtió de inventario o su orden se levantó por separado…"**, y mandarte a "Cartera" → "Posición cambiaria". **Eso es a propósito:** la mercancía salió de una bolsa común y no hay forma honesta de decir qué parte de aquella pérdida cambiaria le toca a este pedido en particular. Antes de inventar un número, el sistema prefiere decirte por qué no lo tiene. Si algún día quieres que sí se reparta, dímelo y lo definimos.
+
+### Parte D — El dinero a tu favor que no se veía
+
+14. Repite el paso 9 pero al revés: paga una factura del proveedor en dólares a un TC **más bajo** que el pactado (por ejemplo, pactaste 18.5 y pagas a 18.00) y elige el tratamiento **"Ajustar al pactado"**. Nace un documento de ajuste a **tu favor** contra ese proveedor.
+15. Ve al inicio y mira el bloque de lo que vence por pagar. Ese ajuste a tu favor debe estar **restando** de lo que le debes a ese proveedor. Antes no aparecía en ningún total del sistema: era dinero a tu favor invisible.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

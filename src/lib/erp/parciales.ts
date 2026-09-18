@@ -278,6 +278,15 @@ export function mergeDealPnl(
     mora: number;
     moraPendiente: number;
     uninvoiced: Array<{ productId: number; code: string; name: string; uom: string; qty: number }>;
+    /**
+     * Decisión 87 — el diferencial de la COMPRA. Es del pedido entero, como
+     * los gastos y la mora: entra una sola vez por aquí, nunca sumado factura
+     * por factura. `compraLigada` en false quiere decir que el pedido no tiene
+     * ninguna orden de compra ligada y por eso el número es 0 — no que no haya
+     * diferencial.
+     */
+    fxCompra?: number;
+    compraLigada?: boolean;
   },
 ) {
   if (!parts.length) throw new Error("mergeDealPnl: sin facturas");
@@ -356,7 +365,8 @@ export function mergeDealPnl(
   const fxIncome = sum(parts, (p) => p.pnl.fxIncome);
   const fxSpread = r2(sum(parts, (p) => p.pnl.fxSpread ?? 0));
   const margin = revenue - cogs - freight - otherQuote - expOther;
-  const netProfit = margin + order.mora + fxIncome - finance - discount;
+  const fxCompra = order.fxCompra ?? 0;
+  const netProfit = margin + order.mora + fxIncome + fxCompra - finance - discount;
   // Cuánto se ha cobrado: TODAS las facturas, no solo la última.
   const fvAmount = sum(parts, (p) => p.invoice.amount);
   const fvResidual = sum(parts, (p) => p.invoice.residual);
@@ -366,6 +376,9 @@ export function mergeDealPnl(
   const utilidadRealizada = netProfit - order.moraPendiente;
   const utilidadCaja = fullyPaid ? utilidadRealizada : 0;
   const utilidadProporcional = netProfit * paidRatio;
+  // La utilidad POR FACTURA no lleva el diferencial de la compra: es del
+  // pedido, como los gastos y la mora, y repartirlo entre facturas de venta
+  // sería inventar una proporción que ningún documento dice.
   const invoices = parts.map((p) => ({
     ...p.invoice,
     financialDays: p.pnl.financialDays,
@@ -415,6 +428,8 @@ export function mergeDealPnl(
     financeBase,
     discount,
     fxIncome,
+    fxCompra,
+    compraLigada: order.compraLigada ?? false,
     fxSpread,
     margin,
     marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,

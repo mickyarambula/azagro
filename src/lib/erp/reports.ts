@@ -5,6 +5,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { activeMember, assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { dateDMY, todayMx } from "@/lib/utils";
+import { purchaseFxOfDeal } from "@/lib/erp/deal-supplier";
 import { mergeDealPnl } from "@/lib/erp/parciales";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
@@ -41,15 +42,14 @@ type DealFvRow = {
 };
 
 export async function computeDealPnl(sql: Sql, companyId: number, soId: number) {
-  await sql`alter table purchase_orders add column if not exists so_id integer`;
-  await sql`alter table sales_orders add column if not exists quote_id integer`;
-  await sql`alter table quote_lines add column if not exists cost numeric(14,4) not null default 0`;
-  await sql`alter table quote_lines add column if not exists freight numeric(14,4) not null default 0`;
-  await sql`alter table quote_lines add column if not exists other_cost numeric(14,4) not null default 0`;
+  // Aquí corrían SIETE `alter table ... add column if not exists` — y el
+  // Panorama llama a esta función hasta 500 veces por carga: tres mil
+  // quinientas sentencias de esquema para dibujar una tabla. Las siete
+  // columnas están declaradas en migraciones (0003, 0009, 0010 y 0045), que
+  // es donde vive el esquema desde el 18-sep-2026.
+  //
   // La factura de venta manda: su fecha de emisión fija la TIIE de costo, y
   // sus fechas de pago/plazo financiero fijan la Capa 2 y el pronto pago.
-  await sql`alter table invoices add column if not exists fx_result numeric(14,2) not null default 0`;
-  await sql`alter table invoices add column if not exists params_snap text not null default ''`;
   const fv = await sql<DealFvRow>`
     select date::text, due_date::text, credit_due::text, paid_date::text,
       amount::text, residual::text, coalesce(fx_result,0)::text as fx_result,
@@ -130,6 +130,8 @@ async function computeDealPnlMulti(
   }
   const expenses = await orderExpenses(sql, companyId, soId);
   const { mora, moraPendiente } = await orderMora(sql, companyId, soId);
+  // Decisión 87: del pedido, una sola vez — igual que los gastos y la mora.
+  const compraFx = await purchaseFxOfDeal(sql, companyId, soId);
   const pend = await sql<{ product_id: number; code: string; name: string; uom: string; ordered: string; closed_short: string; invoiced: string }>`
     select sl.product_id, p.code, p.name, coalesce(sl.uom, p.uom) as uom, sum(sl.qty)::text as ordered,
       sum(coalesce(sl.qty_closed_short, 0))::text as closed_short,
@@ -150,7 +152,7 @@ async function computeDealPnlMulti(
       invoice: { id: x.fv.id, name: x.fv.name, eventRef: x.fv.event_ref, date: x.fv.date, amount: Number(x.fv.amount), residual: Number(x.fv.residual), paidDate: x.fv.paid_date },
       pnl: x.pnl,
     })),
-    { expenses, mora, moraPendiente, uninvoiced },
+    { expenses, mora, moraPendiente, uninvoiced, fxCompra: compraFx.fxCompra, compraLigada: compraFx.ligado },
   );
 }
 
@@ -465,6 +467,15 @@ async function dealPnlCore(
   const expPedido = expenses.filter((e) => e.class === "pedido").reduce((s, e) => s + e.amount, 0);
   const expOther = expenses.filter((e) => e.class !== "pedido").reduce((s, e) => s + e.amount, 0);
   const { mora, moraPendiente } = opts.orderLevel ? await orderMora(sql, companyId, soId) : { mora: 0, moraPendiente: 0 };
+  // DECISIÓN 87 — el diferencial de la COMPRA entra a la utilidad del pedido.
+  // Es del pedido entero, como los gastos y la mora: se lee una sola vez y no
+  // se reparte entre facturas de venta. Va en campo PROPIO, nunca sumado a
+  // `fxIncome`: el Panorama agrega `d.fxIncome` por razón social del CLIENTE
+  // (:815), y meterlo ahí haría aparecer una pérdida del proveedor como «Dif.
+  // TC» de un cliente que no tuvo nada que ver.
+  const compraFx = opts.orderLevel
+    ? await purchaseFxOfDeal(sql, companyId, soId)
+    : { ligado: false, fxCompra: 0, facturas: [] as Awaited<ReturnType<typeof purchaseFxOfDeal>>["facturas"] };
   // Solo las partidas con costo (y con TIIE cuando hace falta) entran al
   // cálculo; las excluidas se reportan aparte.
   // ASR: la venta es al cliente. Lineal: la venta de Azagro es la factura a
@@ -508,11 +519,15 @@ async function dealPnlCore(
   // utilidad — igual que el Excel.
   const fxIncome = fv[0] ? Number(fv[0].fx_result) : 0;
   const fxSpread = Math.round(included.reduce((s, l) => s + l.fxSpread, 0) * 100) / 100;
+  const fxCompra = compraFx.fxCompra;
   const margin = revenue - cogs - freight - otherQuote - expOther;
   // Utilidad real de la operación, como el Excel:
   // + venta + mora + diferencial cambiario
   // − costo proveedor − comisión − Capa 1 − Capa 2 − descuento pronto pago.
-  const netProfit = margin + mora + fxIncome - finance - discount;
+  // Los DOS diferenciales realizados, cada uno con su signo ya puesto
+  // (MODELO-NEGOCIO § 11.7): el del cobro al cliente y el del pago al
+  // proveedor. Decisión 87.
+  const netProfit = margin + mora + fxIncome + fxCompra - finance - discount;
   // Las cuatro visiones de la hoja PANORAMA:
   // devengada (todo) · realizada (sin la mora aún no cobrada) ·
   // en caja (solo facturas 100% cobradas) · proporcional (parte pagada).
@@ -562,6 +577,12 @@ async function dealPnlCore(
     financeBase,
     discount,
     fxIncome,
+    fxCompra,
+    // Si el pedido no tiene compra ligada, `fxCompra` es 0 pero NO porque no
+    // haya diferencial: porque no hay forma de saber cuál le toca. La pantalla
+    // lo dice con esas palabras; un cero mudo sería mentir.
+    compraLigada: compraFx.ligado,
+    fpsDelPedido: compraFx.facturas,
     fxSpread,
     margin,
     marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
@@ -591,7 +612,6 @@ export const listDealPnl = createServerFn({ method: "POST" })
     const companyId = await cid(sql, context.userId);
     const from = (data.from || "2000-01-01").slice(0, 10);
     const to = (data.to || "2099-12-31").slice(0, 10);
-    await sql`alter table purchase_orders add column if not exists so_id integer`;
     const orders = await sql<{
       id: number;
       name: string;
@@ -631,6 +651,10 @@ export const listDealPnl = createServerFn({ method: "POST" })
         protection: d.protection,
         margin: d.margin,
         marginPct: d.marginPct,
+        // Decisión 87: la utilidad final lleva el diferencial del pago al
+        // proveedor, así que el Excel tiene que traerlo como columna o no
+        // cuadra con la utilidad que enseña al lado.
+        fxCompra: d.fxCompra ?? 0,
         netProfit: d.netProfit,
         netProfitPct: d.netProfitPct,
         excluidas: d.excluded.n,
@@ -683,7 +707,6 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
     const companyId = await cid(sql, context.userId);
     const from = data.from.slice(0, 10);
     const to = data.to.slice(0, 10);
-    await sql`alter table invoices add column if not exists inv_class text not null default 'product'`;
 
     const sales = await sql<{ n: number; amount: string }>`
       select count(*)::int as n, coalesce(sum(amount),0)::text as amount
@@ -788,6 +811,8 @@ export const getPanorama = createServerFn({ method: "GET" })
       venta: number;
       mora: number;
       fx: number;
+      /** Decisión 87: el diferencial del PAGO al proveedor, en columna propia. */
+      fxCompra: number;
       costo: number;
       comision: number;
       capa1: number;
@@ -810,7 +835,7 @@ export const getPanorama = createServerFn({ method: "GET" })
       const r = byPartner.get(o.partner) ?? {
         partner: o.partner,
         group: o.group_name,
-        venta: 0, mora: 0, fx: 0, costo: 0, comision: 0, capa1: 0, capa2: 0,
+        venta: 0, mora: 0, fx: 0, fxCompra: 0, costo: 0, comision: 0, capa1: 0, capa2: 0,
         descuento: 0, financiamientoSR: 0, proteccion: 0, utilidad: 0, realizada: 0, caja: 0, proporcional: 0,
         excluidas: 0, ventaExcluida: 0,
       };
@@ -820,6 +845,11 @@ export const getPanorama = createServerFn({ method: "GET" })
       r.venta += d.revenue;
       r.mora += d.mora;
       r.fx += d.fxIncome;
+      // Decisión 87: columna PROPIA. `r.fx` agrega por razón social del CLIENTE;
+      // si el del proveedor se sumara ahí, la tabla enseñaría una pérdida de
+      // compra como diferencial de un cliente que no tuvo nada que ver — y la
+      // utilidad dejaría de cuadrar con las columnas que la explican.
+      r.fxCompra += d.fxCompra ?? 0;
       r.costo += d.cogs;
       r.comision += d.commission;
       r.capa1 += d.layer1;
@@ -841,6 +871,7 @@ export const getPanorama = createServerFn({ method: "GET" })
       venta: sum((r) => r.venta),
       mora: sum((r) => r.mora),
       fx: sum((r) => r.fx),
+      fxCompra: sum((r) => r.fxCompra),
       costo: sum((r) => r.costo),
       comision: sum((r) => r.comision),
       capa1: sum((r) => r.capa1),
@@ -980,9 +1011,15 @@ export const getUpcomingPayable = createServerFn({ method: "GET" })
     const sql = await getSql();
     await assertCan(sql, context.userId, "credit", "view");
     const companyId = await cid(sql, context.userId);
+    // El filtro era `residual > 0.009` y dejaba fuera la MITAD de los ajustes
+    // por tipo de cambio del proveedor: el ATC nace con `-fxDiff`, así que si a
+    // Azagro le sobró pagar nace NEGATIVO («POR COBRAR AL PROVEEDOR») y no lo
+    // sumaba ningún total del sistema — dinero a favor que no se veía en
+    // ninguna pantalla. Ahora entra restando lo que se le debe a ese proveedor,
+    // que es lo que de verdad va a salir del banco (18-sep-2026).
     const open = await sql<{ residual: string; due_date: string }>`
       select residual::text, due_date::text from invoices
-      where company_id = ${companyId} and kind = 'supplier' and state = 'open' and residual > 0.009
+      where company_id = ${companyId} and kind = 'supplier' and state = 'open' and abs(residual) > 0.009
     `;
     const today = todayMx();
     type Bucket = { month: string; n: number; saldo: number };

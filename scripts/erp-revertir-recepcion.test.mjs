@@ -131,9 +131,9 @@ test("SECUENCIA: recibir → revertir → volver a recibir tiene que hacer nacer
 });
 
 test("SECUENCIA (cableado): bornSupplierDebt excluye la FP revertida al decidir si ya existe", () => {
-  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebt");
+  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebtByReceipt");
   assert.ok(body.includes("and origin = ${opts.poName}\n      and state <> 'reversed'"), "la FP revertida no cuenta como existente");
-  assert.ok(body.includes("tiene que nacer deuda nueva"), "y está explicado en el código");
+  assert.ok(body.includes("state <> 'reversed'"), "una FP revertida no cuenta como «ya existe»: volver a recibir hace nacer deuda nueva (Decisión 36)");
   assert.ok(body.includes("if (already[0]) return null;"), "sigue siendo idempotente para una FP viva");
 });
 

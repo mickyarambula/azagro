@@ -86,7 +86,7 @@ test("fxAt: el renglón más reciente con fecha ≤ la pedida; sin renglón que 
 // ---------------------------------------------------------------------------
 test("D79: los dos nacimientos de FP usan supplierInvoiceAmounts y escriben amount_fx y fx_agreed", () => {
   const a = src("src/lib/azagro.ts");
-  for (const fn of ["bornSupplierDebt", "bornSupplierDebtByReceipt"]) {
+  for (const fn of ["bornSupplierDebtByReceipt"]) {
     const b = fnBody(a, fn);
     assert.ok(b.includes("supplierInvoiceAmounts({"), `${fn} convierte con el molde de la FV`);
     assert.ok(b.includes("amount, residual, amount_fx, origin,"), `${fn} escribe amount_fx`);
@@ -129,7 +129,11 @@ test("D76, P&L: dealPnlCore trae moneda y TC de la OC, convierte antes de restar
   assert.ok(b.includes(") as po_currency,") && b.includes(") as po_fx,"), "la consulta trae po.currency y po.fx_rate");
   assert.ok(b.includes("const poCost = poCostToMxn({ unitPrice: l.po_cost, currency: l.po_currency, fx: l.po_fx });"), "costUnit en pesos");
   assert.ok(b.includes('"OC en dólares sin tipo de cambio (captúralo en Compras)"'), "la partida se excluye con motivo, no se mezcla");
-  assert.ok(b.includes("const netProfit = margin + mora + fxIncome - finance - discount;"), "la utilidad final no cambió (el spread es informativo)");
+  // El spread sigue siendo informativo: NO está en la fórmula. Lo que sí
+  // entró el 18-sep-2026 es `fxCompra`, el diferencial REALIZADO del pago al
+  // proveedor (Decisión 87) — otra cosa, y con documento que lo respalda.
+  assert.ok(b.includes("const netProfit = margin + mora + fxIncome + fxCompra - finance - discount;"), "la utilidad lleva los dos diferenciales realizados");
+  assert.ok(!b.includes("+ fxSpread -") && !b.includes("+ fxSpread +"), "el spread sigue fuera de la utilidad");
   assert.ok(b.includes("const fxSpread = Math.round(included.reduce((s, l) => s + l.fxSpread, 0) * 100) / 100;"), "spread cambiario del deal, sumado sobre lo incluido");
 });
 

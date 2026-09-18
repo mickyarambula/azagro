@@ -54,8 +54,8 @@ test("CENTRAL: los tres sitios de la OC ya no crean la factura de proveedor", ()
 });
 
 test("CENTRAL: el nacimiento es idempotente — recibir no duplica deuda, ni la crea de nuevo para una OC vieja que ya la traía", () => {
-  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebt");
-  assert.ok(body.includes("kind = 'supplier' and origin = ${opts.poName}"), "busca si esa OC ya tiene su FP");
+  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebtByReceipt");
+  assert.ok(body.includes("kind = 'supplier' and event_ref = ${opts.eventRef} and origin = ${opts.poName}"), "busca si ESE EVENTO ya tiene su FP: la idempotencia es por viaje, no por orden");
   assert.ok(body.includes("if (already[0]) return null;"), "si ya existe, no crea otra");
 });
 
@@ -63,9 +63,41 @@ test("CENTRAL: el nacimiento es idempotente — recibir no duplica deuda, ni la 
 // 2) Dónde nace ahora: al recibir, y en brokeraje al entregar y facturar.
 // ---------------------------------------------------------------------------
 test("la deuda nace al recibir la mercancía", () => {
-  const body = fnBody(src("src/lib/azagro.ts"), "receivePurchase");
-  assert.ok(body.includes("const fp = await bornSupplierDebt(sql, {"), "receivePurchase la hace nacer");
-  assert.ok(body.includes("nace ${fp} por pagar"), "y queda en bitácora con su folio");
+  const az = src("src/lib/azagro.ts");
+  // Decisión 14, con el mecanismo del 18-sep-2026: toda recepción va por
+  // partidas y la factura del proveedor nace POR EVENTO (Decisión 28), por lo
+  // que entró en ESE evento. Antes había un segundo camino que llamaba a
+  // `bornSupplierDebt` (una FP por ORDEN): con una recepción parcial previa su
+  // guarda de idempotencia devolvía null y el resto de la mercancía entraba al
+  // kardex SIN cuenta por pagar.
+  const body = fnBody(az, "receivePurchase");
+  assert.ok(body.includes("const r = await receivePartial(sql, {"), "receivePurchase delega en el camino por evento");
+  assert.ok(!body.includes("await bornSupplierDebt(sql, {"), "y ya no llama a la de por orden, que se saltaba con una parcial previa");
+  assert.ok(body.includes("nace ${r.fp} por pagar"), "y queda en bitácora con su folio");
+  const rp = fnBody(az, "receivePartial");
+  assert.ok(rp.includes("const fp = await bornSupplierDebtByReceipt(sql, {"), "la deuda nace ahí, por evento");
+});
+
+test("una recepción parcial y luego «recibir todo lo pendiente» dejan DOS facturas, no una: nada entra al kardex sin cuenta por pagar", () => {
+  const az = src("src/lib/azagro.ts");
+  const body = fnBody(az, "receivePurchase");
+  // La guarda de bornSupplierDebt es por folio de ORDEN y sin mirar el evento:
+  // `origin = poName and state <> 'reversed' limit 1`. Con la FP del primer
+  // evento viva devolvía null. Por eso receivePurchase ya no la usa.
+  // La función que emitía UNA factura por ORDEN (`bornSupplierDebt`) se borró
+  // el 18-sep-2026: se quedó sin llamadores —brokeraje usa la de por evento,
+  // dentro de deliverPartial— y su guarda era la trampa. Dejarla exportada era
+  // dejarla puesta para el siguiente.
+  assert.ok(!az.includes("export async function bornSupplierDebt("), "la de por orden ya no existe");
+  assert.ok(az.includes("Se borró el 18-sep-2026 (Decisión 89)"), "y el código dice por qué");
+  assert.ok(body.includes("lines: data.lines,") === false, "un solo objeto de partidas, calculado antes");
+  assert.ok(body.includes("const lines = data.lines && data.lines.length"), "con partidas las usa; sin ellas, lo pendiente");
+  assert.ok(body.includes("No queda nada pendiente por recibir en esta orden."), "y si no queda nada, lo dice");
+  // La idempotencia que sí aplica ahora es por EVENTO (Decisión 28).
+  assert.ok(
+    fnBody(az, "bornSupplierDebtByReceipt").includes("event_ref"),
+    "bornSupplierDebtByReceipt es idempotente por evento, no por orden",
+  );
 });
 
 test("brokeraje: la OC directa nunca se recibe, así que su deuda nace al entregar y facturar", () => {
@@ -83,23 +115,23 @@ test("brokeraje: la OC directa nunca se recibe, así que su deuda nace al entreg
 });
 
 test("la FP nace con la moneda y el tipo de cambio de su OC (antes el camino de recepción los perdía)", () => {
-  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebt");
+  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebtByReceipt");
   assert.ok(body.includes("coalesce(po.currency,'MXN') as currency"), "lee la moneda de la OC");
   assert.ok(body.includes("coalesce(po.fx_rate,1)::text as fx_rate"), "y su tipo de cambio");
-  assert.ok(body.includes("origin, currency, fx_agreed, created_by"), "y los escribe en la factura");
+  assert.ok(body.includes("origin, event_ref, currency, fx_agreed, created_by"), "y los escribe en la factura, con su evento");
 });
 
 // ---------------------------------------------------------------------------
 // 3) Sin plazo capturado: se detiene, y el mensaje sirve a quien recibe.
 // ---------------------------------------------------------------------------
 test("sin plazo de pago capturado no se inventa un cero: se detiene", () => {
-  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebt");
+  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebtByReceipt");
   assert.ok(body.includes("if (!days[0] || days[0].payment_days == null)"), "vacío no es cero (regla 9)");
   assert.ok(!body.includes("coalesce(payment_days,0)"), "sin respaldo silencioso");
 });
 
 test("el mensaje dice qué falta, de qué proveedor y a quién pedírselo — quien recibe es almacén y no puede capturarlo", () => {
-  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebt");
+  const body = fnBody(src("src/lib/azagro.ts"), "bornSupplierDebtByReceipt");
   assert.ok(body.includes("Falta el plazo de pago de ${po[0].partner}"), "nombra al proveedor");
   assert.ok(body.includes("compras, administración o gerencia"), "dice a quién llamar");
   assert.ok(body.includes("si es de contado, se captura 0"), "dice qué se captura");

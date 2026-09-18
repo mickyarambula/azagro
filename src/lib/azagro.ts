@@ -1411,69 +1411,25 @@ export const setPurchaseFxRate = createServerFn({ method: "POST" })
   });
 
 /**
- * Decisión 14: la deuda con el proveedor NACE cuando la mercancía se movió de
- * verdad — al recibirla en bodega, o al entregarla al cliente si la OC es
- * directa / brokeraje (ésa nunca se recibe: `receivePurchase` la rechaza, así
- * que sin este segundo camino el brokeraje quedaría sin cuenta por pagar).
+ * LA DEUDA CON EL PROVEEDOR NACE CUANDO LA MERCANCÍA SE MOVIÓ (Decisión 14),
+ * nunca al capturar la orden: al recibirla en bodega, o al entregarla al
+ * cliente si la orden es directa / brokeraje (ésa nunca se recibe —
+ * `receivePurchase` la rechaza—, así que sin ese segundo camino el brokeraje
+ * quedaría sin cuenta por pagar). Antes nacía al capturar la OC y el plazo
+ * empezaba a correr ese día aunque la mercancía llegara un mes después: la
+ * cuenta por pagar decía que se debía algo que todavía no se tenía.
  *
- * Antes nacía al capturar la OC, y el plazo empezaba a correr ese día aunque
- * la mercancía llegara un mes después: la cuenta por pagar decía que se debía
- * algo que todavía no se tenía.
+ * El único lugar donde nace es `bornSupplierDebtByReceipt` (más abajo), UNA
+ * POR EVENTO de recepción o entrega (Decisión 28).
  *
- * Devuelve el folio de la FP, o null si esa OC ya tenía la suya (idempotente:
- * recibir dos veces no duplica la deuda, y las OC viejas que ya traen FP del
- * defecto anterior no generan una segunda).
+ * Aquí vivía `bornSupplierDebt`, que emitía una factura por ORDEN y era
+ * idempotente por folio de orden. Se borró el 18-sep-2026 (Decisión 89): se
+ * había quedado sin un solo llamador —brokeraje usa la de por evento, dentro
+ * de `deliverPartial`— y su guarda era justamente la que abría el agujero:
+ * con una recepción parcial ya viva devolvía null y el resto de la mercancía
+ * entraba al kardex sin cuenta por pagar. Dejarla exportada era dejar la
+ * trampa puesta para el siguiente que la llamara.
  */
-export async function bornSupplierDebt(
-  sql: Sql,
-  opts: { companyId: number; userId: string; poId: number; poName: string; date?: string },
-) {
-  // Una FP REVERTIDA no cuenta como "ya existe": si se revirtió la recepción
-  // (paso 6) y la mercancía se vuelve a recibir, tiene que nacer deuda nueva.
-  // Sin este filtro, la mercancía entraría sin cuenta por pagar — el mismo
-  // defecto que corrigió la Decisión 14, colándose por otra puerta.
-  const already = await sql<{ id: number }>`
-    select id from invoices
-    where company_id = ${opts.companyId} and kind = 'supplier' and origin = ${opts.poName}
-      and state <> 'reversed'
-    limit 1
-  `;
-  if (already[0]) return null;
-  const po = await sql<{ partner_id: number; total: string; currency: string; fx_rate: string; partner: string }>`
-    select po.partner_id, po.total::text, coalesce(po.currency,'MXN') as currency,
-      coalesce(po.fx_rate,1)::text as fx_rate, p.name as partner
-    from purchase_orders po join partners p on p.id = po.partner_id
-    where po.id = ${opts.poId} and po.company_id = ${opts.companyId}
-  `;
-  if (!po[0]) throw new Error("Orden de compra no encontrada");
-  // El plazo del proveedor es el que se capturó en su ficha (0 = contado): no
-  // hay plazo de respaldo en el código (regla 9). Quien recibe suele ser
-  // almacén, que no puede editar proveedores — el mensaje dice a quién pedirle.
-  const days = await sql<{ payment_days: number | null }>`
-    select payment_days from partners where id = ${po[0].partner_id}
-  `;
-  if (!days[0] || days[0].payment_days == null) {
-    throw new Error(
-      `Falta el plazo de pago de ${po[0].partner}. Sin ese dato no se puede saber cuándo hay que pagarle esta compra, ` +
-        `y por eso no se puede registrar la entrada. Pídele a compras, administración o gerencia que lo capture en la ` +
-        `ficha del proveedor (si es de contado, se captura 0). En cuanto esté, vuelve a recibir.`,
-    );
-  }
-  const day = (opts.date || todayMx()).slice(0, 10);
-  const due = addDays(day, days[0].payment_days);
-  // Decisión 79: la FP nace como la FV — pesos al TC de la OC, el original en
-  // amount_fx. Una OC en dólares sin TC real no hace nacer deuda (el mensaje
-  // dice dónde capturarlo).
-  const amounts = supplierInvoiceAmounts({ total: po[0].total ?? 0, currency: po[0].currency, fx: po[0].fx_rate, poName: opts.poName });
-  const iname = await nextDocFolio(sql, opts.companyId, "FP");
-  await sql`
-    insert into invoices (company_id, kind, name, partner_id, date, due_date, state, amount, residual, amount_fx, origin, currency, fx_agreed, created_by)
-    values (${opts.companyId}, 'supplier', ${iname}, ${po[0].partner_id}, ${day}, ${due}, 'open', ${amounts.amount}, ${amounts.amount}, ${amounts.amountFx},
-      ${opts.poName}, ${amounts.currency}, ${amounts.fxAgreed}, ${opts.userId})
-  `;
-  return iname;
-}
-
 export const receivePurchase = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({
@@ -1496,77 +1452,34 @@ export const receivePurchase = createServerFn({ method: "POST" })
     if (po[0].fulfill_kind === "direct") {
       throw new Error("Esta OC es directa / brokeraje: no se recibe en bodega. La mercancía va en camino al cliente.");
     }
-    if (data.lines && data.lines.length) {
-      const r = await receivePartial(sql, {
-        companyId: m.company_id,
-        userId: context.userId,
-        poId: po[0].id,
-        poName: po[0].name,
-        locationId: po[0].location_id,
-        lines: data.lines,
-      });
-      await writeAudit(sql, {
-        companyId: m.company_id,
-        userId: context.userId,
-        action: "recibir",
-        entity: "purchase",
-        entityId: po[0].id,
-        name: po[0].name,
-        detail: `Recepción parcial ${r.eventRef}${r.fp ? ` · nace ${r.fp} por pagar` : ""}`,
-      });
-      return { ok: true, fp: r.fp, eventRef: r.eventRef };
-    }
-    // Paso 7: si alguna partida ya se cerró corto, "todo lo pendiente" es lo
-    // pendiente SIN lo cerrado, y va por partidas (el camino por evento, que
-    // conoce la casilla). Una OC sin cierre corto sigue el camino de siempre.
-    const closed = await sql<{ id: number; pending: string }>`
+    // TODA recepción va por partidas, con su evento `RCP` y su factura del
+    // proveedor por lo que entró en ESE evento (Decisión 28). Antes había un
+    // segundo camino —"recibir todo lo pendiente" sin partidas— que llamaba a
+    // `bornSupplierDebt` (una FP por ORDEN, idempotente por folio de orden): si
+    // la orden ya tenía una recepción parcial, esa guarda encontraba la factura
+    // del primer evento, devolvía null, y **el resto de la mercancía entraba al
+    // kardex sin cuenta por pagar** — justo lo que prohíbe la Decisión 14. El
+    // parche del paso 7 (ir por partidas solo si había cierre corto) tapaba una
+    // esquina del mismo agujero. Con un solo camino, Σ(FP de una orden) = lo
+    // recibido, siempre, y cada entrada al kardex queda amarrada a su evento.
+    // `bornSupplierDebt` (por orden) sigue viva para brokeraje/directo, que
+    // nunca pasa por aquí (Decisión 29).
+    const pend = await sql<{ id: number; pending: string }>`
       select id, (qty - coalesce(qty_received,0) - coalesce(qty_closed_short,0))::text as pending
-      from purchase_lines where po_id = ${po[0].id} and coalesce(qty_closed_short,0) > 0
+      from purchase_lines where po_id = ${po[0].id} order by id
     `;
-    if (closed.length) {
-      const all = await sql<{ id: number; pending: string }>`
-        select id, (qty - coalesce(qty_received,0) - coalesce(qty_closed_short,0))::text as pending
-        from purchase_lines where po_id = ${po[0].id} order by id
-      `;
-      const pendLines = all.map((l) => ({ lineId: l.id, qty: Number(l.pending) })).filter((l) => l.qty > 0.0001);
-      if (!pendLines.length) throw new Error("No queda nada pendiente por recibir en esta orden (lo demás se cerró corto).");
-      const r = await receivePartial(sql, { companyId: m.company_id, userId: context.userId, poId: po[0].id, poName: po[0].name, locationId: po[0].location_id, lines: pendLines });
-      await writeAudit(sql, {
-        companyId: m.company_id,
-        userId: context.userId,
-        action: "recibir",
-        entity: "purchase",
-        entityId: po[0].id,
-        name: po[0].name,
-        detail: `Recepción ${r.eventRef} de lo pendiente sin lo cerrado corto${r.fp ? ` · nace ${r.fp} por pagar` : ""}`,
-      });
-      return { ok: true, fp: r.fp, eventRef: r.eventRef };
-    }
-    const lines = await sql<{ id: number; product_id: number; qty: string; qty_received: string; unit_price: string }>`
-      select id, product_id, qty::text, qty_received::text, unit_price::text from purchase_lines where po_id = ${po[0].id}
-    `;
-    for (const line of lines) {
-      const pending = Number(line.qty) - Number(line.qty_received);
-      if (pending <= 0) continue;
-      await postStock(sql, {
-        companyId: m.company_id,
-        userId: context.userId,
-        moveType: "receipt",
-        origin: po[0].name,
-        productId: line.product_id,
-        quantity: pending,
-        locationTo: po[0].location_id,
-        // Decisión 77: el kardex vive en pesos; una OC en dólares entra al TC de la OC.
-        unitCost: receiptUnitCostMxn({ unitPrice: line.unit_price, currency: po[0].currency, fx: po[0].fx_rate, poName: po[0].name }),
-      });
-      await sql`update purchase_lines set qty_received = qty where id = ${line.id}`;
-    }
-    await sql`update purchase_orders set state = 'done' where id = ${po[0].id}`;
-    const fp = await bornSupplierDebt(sql, {
+    const lines = data.lines && data.lines.length
+      ? data.lines
+      : pend.map((l) => ({ lineId: l.id, qty: Number(l.pending) })).filter((l) => l.qty > 0.0001);
+    if (!lines.length) throw new Error("No queda nada pendiente por recibir en esta orden.");
+    const parcial = Boolean(data.lines && data.lines.length);
+    const r = await receivePartial(sql, {
       companyId: m.company_id,
       userId: context.userId,
       poId: po[0].id,
       poName: po[0].name,
+      locationId: po[0].location_id,
+      lines,
     });
     await writeAudit(sql, {
       companyId: m.company_id,
@@ -1575,9 +1488,9 @@ export const receivePurchase = createServerFn({ method: "POST" })
       entity: "purchase",
       entityId: po[0].id,
       name: po[0].name,
-      detail: `Entró al kardex${fp ? ` · nace ${fp} por pagar` : ""}`,
+      detail: `${parcial ? "Recepción parcial" : "Recepción"} ${r.eventRef}${r.fp ? ` · nace ${r.fp} por pagar` : ""}`,
     });
-    return { ok: true, fp };
+    return { ok: true, fp: r.fp, eventRef: r.eventRef };
     });
   });
 

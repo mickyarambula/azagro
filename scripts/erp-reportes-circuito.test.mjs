@@ -98,7 +98,7 @@ function totals(lines, extra) {
   const other = lines.reduce((s, l) => s + l.other, 0);
   const finance = lines.reduce((s, l) => s + l.commission + l.layer1 + l.layer2, 0);
   const margin = revenue - cogs - freight - other - extra.expOther;
-  const netProfit = margin + extra.mora + extra.fxIncome - finance - extra.discount;
+  const netProfit = margin + extra.mora + extra.fxIncome + (extra.fxCompra ?? 0) - finance - extra.discount;
   return { revenue, cogs, freight, finance, margin, netProfit };
 }
 
@@ -109,7 +109,7 @@ test("las copias siguen iguales al original (reports.ts, paso 4)", () => {
   assert.ok(r.includes("let lineCost: number | null = asr ? finance : null;") && r.includes("let protection: number | null = asr ? 0 : null;"), "ASR: costo real = costo financiero, protección 0");
   assert.ok(r.includes("const financierFinance = !asr && !excluded ? Math.round((sale - disbursed) * 100) / 100 : 0;"), "financiamiento de Santa Rosa (sin cambio)");
   assert.ok(r.includes("const margin = excluded ? 0 : revenueLine - cogs - freight - other;"), "margen por partida (sin cambio)");
-  assert.ok(r.includes("const netProfit = margin + mora + fxIncome - finance - discount;"), "utilidad final (sin cambio)");
+  assert.ok(r.includes("const netProfit = margin + mora + fxIncome + fxCompra - finance - discount;"), "utilidad final: los dos diferenciales realizados (Decisión 87)");
   assert.ok(r.includes("const finance = commission + layer1 + layer2;"), "costo financiero = comisión + Capa 1 + Capa 2 (sin cambio)");
 });
 

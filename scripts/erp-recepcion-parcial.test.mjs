@@ -26,15 +26,22 @@ function fnBody(source, name) {
 }
 
 // ---------------------------------------------------------------------------
-// 1) El camino de hoy (sin `lines`) queda BYTE A BYTE — lo fija también
-//    erp-fp-al-recibir.test.mjs; aquí se verifica que el nuevo branch no lo
-//    tocó.
+// 1) UN SOLO CAMINO (18-sep-2026). Hasta ese día había dos: con `lines` iba por
+//    evento, y sin `lines` iba por un camino propio que llamaba a
+//    `bornSupplierDebt` (una FP por ORDEN). Ese segundo camino tenía un agujero
+//    de dinero: si la orden ya tenía una recepción parcial, la guarda de
+//    idempotencia —por folio de orden, sin mirar el evento— encontraba la
+//    factura del primer evento y devolvía null, así que el resto de la
+//    mercancía entraba al kardex SIN cuenta por pagar (contra la Decisión 14).
+//    Ahora «recibir todo lo pendiente» es solo «las partidas con pendiente».
 // ---------------------------------------------------------------------------
-test("receivePurchase: sin data.lines, el camino de hoy sigue llamando a bornSupplierDebt (no al nuevo por evento)", () => {
+test("receivePurchase: toda recepción va por partidas, con su evento y su factura; ya no hay camino por orden", () => {
   const body = fnBody(src("src/lib/azagro.ts"), "receivePurchase");
-  assert.ok(body.includes("if (data.lines && data.lines.length) {"), "hay un branch nuevo, explícito");
-  assert.ok(body.includes("const fp = await bornSupplierDebt(sql, {"), "el camino de hoy no cambia — lo sigue fijando erp-fp-al-recibir.test.mjs");
-  assert.ok(body.includes("update purchase_lines set qty_received = qty where id = ${line.id}"), "el update de hoy sigue igual");
+  assert.ok(body.includes("const lines = data.lines && data.lines.length"), "con partidas las usa; sin ellas calcula lo pendiente");
+  assert.ok(body.includes("const r = await receivePartial(sql, {"), "una sola llamada, siempre");
+  assert.ok(!body.includes("await bornSupplierDebt(sql, {"), "nunca la FP por orden: se saltaba con una parcial previa");
+  assert.ok(!body.includes("update purchase_lines set qty_received = qty where id = ${line.id}"), "ni el update que pisaba lo recibido");
+  assert.ok(body.includes("const parcial = Boolean(data.lines && data.lines.length);"), "la bitácora sigue distinguiendo parcial de completa");
 });
 
 // ---------------------------------------------------------------------------

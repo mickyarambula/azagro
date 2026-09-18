@@ -182,7 +182,7 @@ test("FV, FP, NC, FI, ATC y facturas de corte guardan quién las generó", () =>
   // Decisión 14 (paso 3): la FP ya no nace con la OC — nace al recibir, o al
   // entregar si es brokeraje. Su autor vive donde nace, en bornSupplierDebt.
   assert.ok(!fnBody(az, "createPurchase").includes("'supplier'"), "createPurchase ya no crea la FP");
-  const nace = az.slice(az.indexOf("export async function bornSupplierDebt"), az.indexOf("export const receivePurchase"));
+  const nace = az.slice(az.indexOf("export async function bornSupplierDebtByReceipt"), az.indexOf("export const closeShortPurchase"));
   assert.ok(nace.length > 0 && nace.includes("created_by"), "FP con autor, donde nace");
   assert.ok(fnBody(az, "returnSale").includes("created_by"), "NC con autor");
   assert.ok(ops.slice(ops.indexOf("export async function issueMoraInvoice")).includes("created_by"), "FI con autor");

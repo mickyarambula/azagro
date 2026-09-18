@@ -728,12 +728,25 @@ function Ficha() {
               {pnl.excluded.n} partida(s) fuera del cálculo de utilidad (venta {money(pnl.excluded.venta)}): {pnl.excluded.motivos.join("; ")}. No se les inventa costo ni tasa; los totales de arriba solo suman las partidas con dato.
             </p>
           )}
-          {(pnl.mora > 0 || pnl.discount > 0 || pnl.fxIncome !== 0 || pnl.fxSpread !== 0) && (
+          {(pnl.mora > 0 || pnl.discount > 0 || pnl.fxIncome !== 0 || (pnl.fxCompra ?? 0) !== 0 || pnl.fxSpread !== 0) && (
             <p className="mt-2 text-[12px] text-muted">
               {pnl.mora > 0 ? `Mora facturada: ${money(pnl.mora)} (entra como ingreso). ` : ""}
               {pnl.discount > 0 ? `Descuento pronto pago: ${money(pnl.discount)}. ` : ""}
-              {pnl.fxIncome !== 0 ? `Diferencial cambiario: ${money(pnl.fxIncome)}. ` : ""}
+              {/* Decisión 87: los dos diferenciales, cada uno con su nombre. Uno
+                  nace al COBRARLE al cliente en una moneda distinta de la
+                  pactada; el otro, al PAGARLE al proveedor. Juntarlos en un
+                  solo número escondería de qué lado se ganó o se perdió. */}
+              {pnl.fxIncome !== 0 ? `Diferencial cambiario (cobro al cliente): ${money(pnl.fxIncome)}. ` : ""}
+              {(pnl.fxCompra ?? 0) !== 0 ? `Diferencial cambiario (pago al proveedor): ${money(pnl.fxCompra ?? 0)}. ` : ""}
               {pnl.fxSpread !== 0 ? `De ese margen, ${money(pnl.fxSpread)} viene del tipo de cambio: el pactado con el cliente contra el de la orden al proveedor.` : ""}
+            </p>
+          )}
+          {/* El cero que sí hay que explicar: sin compra ligada no es que no
+              haya diferencial, es que no se sabe cuál de este pedido es. */}
+          {pnl.compraLigada === false && (
+            <p className="mt-2 text-[12px] text-muted">
+              Este pedido no tiene una orden de compra ligada: se surtió de inventario o su orden se levantó por separado. Si esa compra fue en dólares y se pagó en
+              pesos a otro tipo de cambio, la diferencia existe pero no se le puede cargar a este pedido en particular; se ve en <span className="font-semibold">Cartera → Posición cambiaria</span>.
             </p>
           )}
           <div className="mt-3 overflow-x-auto erp-card">

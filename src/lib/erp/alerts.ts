@@ -71,7 +71,7 @@ async function buildDigest(sql: Sql, companyId: number) {
       coalesce(i.currency,'MXN') as currency, coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,0)::text as fx_agreed
     from invoices i
     join partners p on p.id = i.partner_id
-    where i.company_id = ${companyId} and i.state not in ('paid','reversed') and i.residual > 0.009
+    where i.company_id = ${companyId} and i.state not in ('paid','reversed') and abs(i.residual) > 0.009
     order by i.due_date, i.id
   `;
   const items = rows

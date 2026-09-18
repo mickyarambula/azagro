@@ -91,7 +91,7 @@ function Page() {
           onClick={() =>
             exportCsv(
               "utilidad-azagro",
-              ["Pedido", "Fecha", "Cliente", "Estado", "Circuito", "Venta", "Costo", "Flete", "Costo financiero", "Financ. Santa Rosa", "Costo real línea", "Protección", "Margen", "%", "Utilidad final"],
+              ["Pedido", "Fecha", "Cliente", "Estado", "Circuito", "Venta", "Costo", "Flete", "Costo financiero", "Financ. Santa Rosa", "Costo real línea", "Protección", "Margen", "%", "Dif. TC pago", "Utilidad final"],
               (deals?.deals ?? []).map((d) => [
                 d.name,
                 d.date,
@@ -107,6 +107,7 @@ function Page() {
                 d.protection ?? "",
                 d.margin,
                 d.marginPct,
+                d.fxCompra ?? 0,
                 d.netProfit,
               ]),
             )
@@ -152,7 +153,8 @@ function Page() {
                     <th className="px-4 py-3 font-medium">Razón social</th>
                     <th className="px-3 py-3 text-right font-medium">Venta</th>
                     <th className="px-3 py-3 text-right font-medium">Mora</th>
-                    <th className="px-3 py-3 text-right font-medium">Dif. TC</th>
+                    <th className="px-3 py-3 text-right font-medium">Dif. TC cobro</th>
+                    <th className="px-3 py-3 text-right font-medium">Dif. TC pago</th>
                     <th className="px-3 py-3 text-right font-medium">Costo prov.</th>
                     <th className="px-3 py-3 text-right font-medium">Comisión</th>
                     <th className="px-3 py-3 text-right font-medium">Capa 1</th>
@@ -174,6 +176,11 @@ function Page() {
                       <td className="px-3 py-3 text-right tabular-nums">{money(r.venta)}</td>
                       <td className="px-3 py-3 text-right tabular-nums">{money(r.mora)}</td>
                       <td className="px-3 py-3 text-right tabular-nums">{money(r.fx)}</td>
+                      {/* Decisión 87: la utilidad ya lleva el diferencial del pago al
+                          proveedor, así que la tabla tiene que enseñarlo o dejaría de
+                          cuadrar por columnas. El del cobro es del cliente; éste, de la
+                          compra que surtió sus pedidos. */}
+                      <td className="px-3 py-3 text-right tabular-nums">{money(r.fxCompra ?? 0)}</td>
                       <td className="px-3 py-3 text-right tabular-nums">{money(r.costo)}</td>
                       <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.comision)}</td>
                       <td className="px-3 py-3 text-right tabular-nums text-muted">{money(r.capa1)}</td>
@@ -195,6 +202,7 @@ function Page() {
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.venta)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.mora)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.fx)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.fxCompra ?? 0)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.costo)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.comision)}</td>
                     <td className="px-3 py-3 text-right tabular-nums">{money(pano.totales.capa1)}</td>

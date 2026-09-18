@@ -201,6 +201,10 @@ test("getDashboard: pedidos confirmados sin entregar cuenta lo cerrado corto com
 test("getUpcomingPayable: agrupa por mes de due_date, kind supplier, sin TIIE ni interés", () => {
   const body = fnBody(src("src/lib/erp/reports.ts"), "getUpcomingPayable");
   assert.ok(body.includes("kind = 'supplier' and state = 'open'"));
+  // 18-sep-2026: `abs(residual)`, no `residual > 0`. Un ajuste por TC a favor
+  // de Azagro nace con saldo NEGATIVO y quedaba fuera de todos los totales.
+  assert.ok(body.includes("and abs(residual) > 0.009"), "el ajuste a favor de Azagro también cuenta, restando");
+  assert.ok(!body.includes("and residual > 0.009"), "el filtro viejo escondía la mitad de los ajustes");
   assert.ok(!body.includes("tiie_rates"), "no calcula interés: Azagro no le cobra mora al proveedor, el proveedor se la cobraría a Azagro");
   assert.ok(body.includes('inv.due_date.slice(0, 7)'), "mismo bucketing por mes que getUpcomingDue");
   assert.ok(body.includes('inv.due_date < today ? vencido'));

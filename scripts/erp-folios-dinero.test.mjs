@@ -70,7 +70,7 @@ test("cableado: nextDocFolio usa el insert…on conflict…returning de folio_co
   assert.ok(!body.includes("count(*)"));
 });
 
-test("cableado: ningún documento de dinero se numera ya con count(*); los 13 sitios leen de nextDocFolio", () => {
+test("cableado: ningún documento de dinero se numera ya con count(*); los 12 sitios leen de nextDocFolio", () => {
   const files = ["src/lib/azagro.ts", "src/lib/erp/ops.ts", "src/lib/erp/reversal.ts", "src/lib/erp/return-reversal.ts", "src/lib/erp/delivery-reversal.ts"];
   for (const f of files) {
     const s = src(f);
@@ -80,7 +80,8 @@ test("cableado: ningún documento de dinero se numera ya con count(*); los 13 si
     }
   }
   const az = src("src/lib/azagro.ts");
-  assert.equal((az.match(/nextDocFolio\(sql, opts\.companyId, "FP"\)/g) || []).length, 2, "FP: por OC y por recepción");
+  // Un solo sitio desde el 18-sep-2026: la FP por ORDEN se borró (Decisión 89).
+  assert.equal((az.match(/nextDocFolio\(sql, opts\.companyId, "FP"\)/g) || []).length, 1, "FP: una sola, por recepción/entrega (por evento)");
   assert.ok(az.includes('const iname = await nextDocFolio(sql, opts.companyId, "FV");'), "FV");
   assert.ok(az.includes('const ncName = await nextDocFolio(sql, m.company_id, "NC");'), "NC de devolución");
   assert.ok(az.includes('const payName = await nextDocFolio(sql, m.company_id, "PAG");'), "PAG virtual de la devolución");
