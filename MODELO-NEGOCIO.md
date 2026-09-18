@@ -18,7 +18,7 @@ Este documento es el mapa de lo que una distribuidora así necesita, capacidad p
 
 Lo que ya está sólido y no hay que volver a tocar: el kardex y su trazabilidad, bodegas múltiples, la cadena SOL→COT→PV→ENV→FV con parciales por evento, la cartera del lado cliente (cobro, mora, pronto pago, TC, estado de cuenta, aging, recordatorios), las cuatro reversas y la cancelación en cascada, el P&L por pedido y consolidado, el inicio, y la importación del corte.
 
-**El tipo de cambio** (§ 11) es lo que más pesa: el TC se congela bien del lado cliente (cotización → pedido → FV → cobro con ATC), pero **el costo no tiene moneda en ningún lado** — un costo en dólares que llega a una cotización en pesos se precia como pesos, el kardex pondera dólares con pesos, la OC desde RFQ nace con TC = 1, y una FP en dólares se paga mezclando pesos contra un saldo en dólares sin diferencial. **El costo del proveedor con vigencia** (§ 10): la vigencia al cliente sí sirve de molde; del lado proveedor hoy no hay nada que fechar.
+**El tipo de cambio** (§ 11) es lo que más pesa — y el dueño lo enmarcó el 17-sep: las líneas de crédito son **en pesos**, la operación es en buena parte **en dólares**, y el crédito largo agranda ese desajuste; el **TC pactado es la herramienta de cobertura**, con dos dinámicas reales (§ 11.0) que el sistema tiene que soportar explícitamente y una **posición cambiaria** (§ 11.6) que hoy no existe. Lo ya encontrado sigue primero: el TC se congela bien del lado cliente (cotización → pedido → FV → cobro con ATC), pero **el costo no tiene moneda en ningún lado** — un costo en dólares que llega a una cotización en pesos se precia como pesos, el kardex pondera dólares con pesos, la OC desde RFQ nace con TC = 1, y una FP en dólares se paga mezclando pesos contra un saldo en dólares sin diferencial. **El costo del proveedor con vigencia** (§ 10): la vigencia al cliente sí sirve de molde; del lado proveedor hoy no hay nada que fechar.
 
 **El plazo "cosecha"** (§ 6): existe en el sistema y el dueño acaba de decir que no existe en su operación. Está muy poco enredado: es un clon de "fecha" con otra etiqueta; quitarlo de pantalla es una línea, quitarlo del todo son ~6 archivos y un archivo de pruebas.
 
@@ -176,6 +176,10 @@ Candados sin salida y defectos que salieron al levantar el mapa, sin severidad a
 21. **La estimación del diferencial en el estado de cuenta abierto usa `amount_fx` completo y un solo `fx_paid`** (`ops.ts:2491-2494`), no lo abierto ni un promedio ponderado — el cobro sí lo hace bien (`fxPaymentSplit`).
 22. **`rememberTrade` pisa `partner_products.unit_price` sin fecha, origen ni bitácora** (`links.ts:144-156`); `vendor_rfq_bids` no tiene fecha, moneda ni vigencia (migración 0010:9-40).
 23. **Sin reporte de posición en moneda extranjera** ni revaluación de saldos abiertos (§ 11.4).
+24. **$ Comprar dólares no se puede registrar**: la transferencia entre cuentas (`addBankMove`, `ops.ts:2185-2253`) no pide TC ni valida moneda e inserta el mismo importe en las dos cuentas (`:2239-2249`): 18,000 MXN de Banorte MXN a Banorte USD acreditan "18,000" en la cuenta en dólares. La UI (`banks.tsx:205-234`) tampoco lo pide.
+25. **$ El inicio suma pesos y dólares en un solo número**: `cash` (`azagro.ts:419-425`) suma todas las cuentas sin `currency`; `ar`/`ap` (`:318-331`) suman residuales de todas las monedas; `getPanorama` (`reports.ts:736-825`) agrega 500 pedidos sin moneda.
+26. **`listInvoices` no expone `amount_fx`, `fx_agreed` ni `fx_paid`** (`azagro.ts:2644-2733`); `getUpcomingPayable` (`reports.ts:945-972`) ni siquiera trae `currency`; `getUpcomingDue` separa "de docs. USD" pero el total del bucket sigue mixto (`vencimientos.tsx:106,187-206`).
+27. **No hay un helper "TC de hoy"**: cinco pantallas repiten `nearestRate(tabla, hoy)` con su propia consulta (`orders.ts:113`, `quotes.tsx:247`, `ops.ts:1107`, `cpo.ts:192`, `cutover-core.ts:232`); el TC vigente solo se ve en Ajustes, no en el inicio.
 
 ---
 
@@ -219,33 +223,34 @@ Las que ya estaban abiertas se citan por clave (no se reabren): **H4c** NC/devol
 
 Criterio: "operar" = correr la semana en paralelo con Compaq (CLAUDE.md § Siguiente 3) sin perder dinero ni datos. Sin proponer cómo construir — solo qué va antes.
 
-**A. Indispensable antes de operar en paralelo** (sin esto, la operación real se atora o pierde dinero):
-1. **Moneda del costo y del TC en compras** (§ 11, huecos 13-16): que un costo lleve moneda, que la OC desde RFQ no nazca con TC = 1, que el P&L no reste dólares contra pesos, y que pagar una FP en dólares no mezcle pesos contra dólares. Con "gran parte de la operación en dólares", esto está por encima de todo lo demás: pierde dinero en silencio en cada compra en USD.
-2. **Cosecha fuera de pantalla** — una línea; no se captura lo que no existe.
-3. **Anticipo de cliente (D11-12) y reparto de un cobro (D13)** — decididos hace 10 días; hoy el sobrante de un depósito se descarta y cada cobro real de un productor suele cubrir varias facturas. Son la misma pieza (saldo a favor + aplicación a N facturas). Con el anticipo a proveedor como espejo (8.1).
-4. **Reasignar vendedor** — candado sin salida en un dato que filtra media aplicación.
-5. **Guía de carga por evento** — el bloque de parciales quedó cojo del lado del papel que firma el cliente.
-6. **Alta de cuentas de banco** — si hay una tercera cuenta o caja, hoy no cabe.
-7. **NC / devolución a proveedor (H4c)** — mercancía equivocada llega; hoy la FP se queda viva sin camino.
-8. Los cierres pendientes de `AUDITORIA.md` § 4 que tocan dinero (GRUPO F #28, J #33) — ya priorizados ahí.
+**A. Indispensable antes de operar en paralelo** (sin esto, la operación real se atora o pierde dinero). Con la corrección del dueño (§ 11.0), el tipo de cambio ocupa los dos primeros lugares y no se mueve de ahí:
+1. **Moneda y TC en toda la cadena de compra** (§ 11.2-11.3, huecos 13-17, 24): que un costo lleve moneda; que la OC declare **su** TC (el del proveedor), no el del cliente ni 1; que la FP nazca con `amount_fx` y `fx_agreed`; que pagar una FP en dólares capture el TC y genere su diferencial (espejo del ATC); y que **comprar dólares** sea un movimiento con TC (pesos salen, dólares entran, TC de compra guardado). Sin esto, ninguna de las dos dinámicas del dueño se puede registrar: la 1 porque comprar dólares acredita pesos como dólares, la 2 porque pagar en pesos al TC del proveedor mezcla pesos contra un saldo en dólares. Y el P&L deja de restar dólares contra pesos.
+2. **Posición cambiaria** (§ 11.6): la vista que hoy no existe — cuánto se debe y nos deben en dólares por vencimiento, a qué TC se pactó cada documento vivo contra el TC de hoy, cuánto se gana o pierde si el dólar se mueve X pesos, y qué parte está cubierta y cuál abierta. Depende de 1 (sin `amount_fx` en la FP y sin TC en la compra de dólares no hay con qué calcularla). Tarjeta en el inicio con el TC de hoy y la exposición neta.
+3. **Cosecha fuera de pantalla** — una línea; no se captura lo que no existe.
+4. **Anticipo de cliente (D11-12) y reparto de un cobro (D13)** — decididos hace 10 días; hoy el sobrante de un depósito se descarta y cada cobro real de un productor suele cubrir varias facturas. Son la misma pieza (saldo a favor + aplicación a N facturas). Con el anticipo a proveedor como espejo (8.1).
+5. **Reasignar vendedor** — candado sin salida en un dato que filtra media aplicación.
+6. **Guía de carga por evento** — el bloque de parciales quedó cojo del lado del papel que firma el cliente.
+7. **Alta de cuentas de banco** — si hay una tercera cuenta o caja, hoy no cabe.
+8. **NC / devolución a proveedor (H4c)** — mercancía equivocada llega; hoy la FP se queda viva sin camino.
+9. Los cierres pendientes de `AUDITORIA.md` § 4 que tocan dinero (GRUPO F #28, J #33) — ya priorizados ahí.
 
 **B. Necesario en el primer trimestre de operación** (se puede arrancar sin ello, pero pronto duele):
-9. **Costo del proveedor con vigencia** (§ 10) y el aviso "costo vence antes que la cotización" — es la pieza que sustituye a las listas de precios y la que protege el margen al cotizar.
-10. **Producto inactivo** y **catálogo de producto** con ingrediente activo y presentación.
-11. **Kardex con filtro por producto y fecha en el servidor** (hoy 200 renglones de toda la empresa).
-12. **Flete real al costo del kardex** y al costo financiero (8.1).
-13. **Descuento comercial** como renglón (8.1).
-14. **Margen por producto y por familia**; **ventas por vendedor**; **posición en moneda extranjera** — para que Reportes conteste lo que hoy contesta el Excel.
-15. **Bitácora en gastos y movimientos bancarios sueltos**; folios PV/OC/SC/GAS por `folio_counters`; OC desde RFQ en transacción; TC revalidado contra la tabla al guardar.
-16. **Reposición real** (punto de pedido con demanda comprometida y tránsito) — hoy el mínimo avisa, no sugiere.
-17. **Conteo físico** (L8a) — el primer inventario físico contra el sistema lo va a pedir.
+10. **Costo del proveedor con vigencia** (§ 10) y el aviso "costo vence antes que la cotización" — es la pieza que sustituye a las listas de precios y la que protege el margen al cotizar.
+11. **Producto inactivo** y **catálogo de producto** con ingrediente activo y presentación.
+12. **Kardex con filtro por producto y fecha en el servidor** (hoy 200 renglones de toda la empresa).
+13. **Flete real al costo del kardex** y al costo financiero (8.1).
+14. **Descuento comercial** como renglón (8.1).
+15. **Margen por producto y por familia**; **ventas por vendedor** — para que Reportes conteste lo que hoy contesta el Excel.
+16. **Bitácora en gastos y movimientos bancarios sueltos**; folios PV/OC/SC/GAS por `folio_counters`; OC desde RFQ en transacción; TC revalidado contra la tabla al guardar.
+17. **Reposición real** (punto de pedido con demanda comprometida y tránsito) — hoy el mínimo avisa, no sugiere.
+18. **Conteo físico** (L8a) — el primer inventario físico contra el sistema lo va a pedir.
 
 **C. Puede esperar / depende de respuestas del dueño:**
-18. **UOM con conversión (H6)** y **lotes/caducidad (H5)** — estructurales sobre el kardex; van separados y UOM antes que lotes; lotes según la respuesta 8.2-2.
-19. **Fórmulas / mezclas (BOM)** — el menos invasivo de los estructurales; entra cuando se decida producir o maquilar.
-20. **Liquidación con Santa Rosa (D-C)** — Fase 3 del circuito lineal; hoy se lleva fuera del sistema.
-21. **Rotación, DSO, top deudores, concentración, valuación histórica, cierre de periodo, revaluación de saldos en USD, exportar cartera y estado de cuenta** — reportes y candados de madurez.
-22. **Comisiones de vendedor, zona, aprobación de OC por monto, propuesta de pago a proveedores, importar estado de cuenta bancario** — según 8.2-1 y volumen.
+19. **UOM con conversión (H6)** y **lotes/caducidad (H5)** — estructurales sobre el kardex; van separados y UOM antes que lotes; lotes según la respuesta 8.2-2.
+20. **Fórmulas / mezclas (BOM)** — el menos invasivo de los estructurales; entra cuando se decida producir o maquilar.
+21. **Liquidación con Santa Rosa (D-C)** — Fase 3 del circuito lineal; hoy se lleva fuera del sistema.
+22. **Rotación, DSO, top deudores, concentración, valuación histórica, cierre de periodo, exportar cartera y estado de cuenta** — reportes y candados de madurez. (La revaluación de saldos en USD ya no está aquí: va dentro de la posición cambiaria, A.2.)
+23. **Comisiones de vendedor, zona, aprobación de OC por monto, propuesta de pago a proveedores, importar estado de cuenta bancario** — según 8.2-1 y volumen.
 
 ---
 
@@ -299,6 +304,17 @@ En cualquiera de las dos:
 ## 11. El tipo de cambio
 
 Gran parte de la operación es en dólares y el TC mueve los precios. Esta sección recorre el TC de punta a punta contra el código del 17-sep-2026.
+
+### 11.0 La realidad del negocio (corrección del dueño, 17-sep-2026)
+
+- Proveedores y clientes, unos en pesos y otros en dólares. **Con todos se negocia el TC.**
+- **Las líneas de crédito de Azagro son en pesos** (Santa Rosa financia en MXN; `FinancingBase` y `pricing.ts` no tienen moneda — trabajan en lo que traiga el costo). La operación es en buena parte en dólares. **Ese desajuste es la exposición de fondo**, y la agranda el crédito largo: entre que se compra y que se cobra pasan meses.
+- **El TC pactado no es un dato administrativo: es la herramienta de cobertura.** Las dos dinámicas reales:
+  - **Dinámica 1 — cubrir con dólares:** comprar dólares para pagarle al proveedor, y vender en dólares con TC pactado. Las dos patas quedan en dólares; el margen en pesos queda fijo en el momento en que se compran los dólares contra el pactado con el cliente.
+  - **Dinámica 2 — cubrir con TC pactado en las dos puntas:** pagarle al proveedor **en pesos al TC que él pone**, facturar al cliente **en dólares al TC pactado**, y cobrar **en pesos a ese mismo TC**. Las dos patas quedan fijas en pesos; el margen no depende del mercado mientras el cliente honre el pactado (y si no, el ATC captura la diferencia — ya construido).
+- **No hay un escenario único. El sistema tiene que aguantar todos**, y decir en cada momento qué está cubierto y qué está abierto.
+
+Lo que sigue (11.1-11.5) es el estado del código antes de esta corrección; 11.6-11.8 es lo que falta con esta corrección encima. Lo que ya se había encontrado (costo sin moneda, OC con TC = 1, pago de FP ignorando el TC, P&L mezclando monedas) **sigue siendo lo primero** — sin eso no se puede registrar ninguna de las dos dinámicas.
 
 ### 11.1 Dónde se congela el TC hoy
 
@@ -368,3 +384,55 @@ Odoo, con una empresa cuya moneda es MXN, hace esto — y es lo que hace cualqui
 7. **Cotizar en pesos con costo en dólares no lo protege nadie**: ni Odoo. Es un control de negocio: cotizar en USD, vigencia corta, o cláusula de TC en el papel (8.2-4).
 
 **Dónde diverge Azagro del estándar (los huecos 13-23 en una línea cada uno):** el costo y el kardex no tienen moneda (5, 6); el diferencial solo existe del lado cliente (3); la FP en USD no tiene equivalente en pesos ni se paga con TC (1, 3); no hay revaluación ni posición (4); el TC de cotización y pedido se captura libre sin revalidar (1); la FV toma el TC del pedido, no de la fecha de factura (1 — esto es una decisión de negocio de Azagro, "TC pactado", que el Excel también seguía; conviene dejarla así y decirlo). Lo que Azagro tiene y Odoo no: el **ATC "por cobrar / por devolver"** como documento negociado con el cliente — es una práctica real del negocio (Excel § 4), no un defecto.
+
+### 11.6 La exposición cambiaria como cosa propia
+
+**Qué hay hoy como materia prima** (verificado):
+- Por documento sí se sabe la moneda y el TC: `quotes`/`sales_orders`/`purchase_orders.currency + fx_rate`; FV con `amount_fx` y `fx_agreed`; FP con `currency` y `fx_agreed` pero **sin `amount_fx`**; cobros con `fx_paid`. `banks.currency` existe y `/bancos` la enseña por cuenta. `purchase_orders.so_id` e `invoices.order_id` permiten aparear las OC y las FV de un pedido; la FP se amarra a su OC por `origin` (texto).
+- La única vista por moneda es el **estado de cuenta por cliente** (`getStatement`, `ops.ts:2653-2673`, `byCurrency` MXN/USD con cargo, abono, saldo, interés y utilidad cambiaria) — por socio, no de la empresa. `getUpcomingDue` separa "de docs. USD" por mes pero el total sigue mixto.
+- El TC de hoy vive en Ajustes (`settings.tsx:637-670`, captura manual por fecha, solo admin, sin cadencia obligada); `nearestRate` (`credit.ts:35`) lo resuelve, repetido en cinco pantallas.
+
+**Qué no hay** (huecos 23-27): ninguna vista consolidada en dólares; el inicio suma pesos con dólares en caja, por cobrar y por pagar; `listInvoices` no expone los campos de TC; **comprar dólares no se puede registrar** (la transferencia entre cuentas acredita pesos como dólares); no hay revaluación ni sensibilidad; nada dice qué está cubierto.
+
+**La pieza: «Posición cambiaria».** Una sola pantalla y una tarjeta en el inicio que contestan las cuatro preguntas del dueño:
+
+| Pregunta | Qué enseña | De dónde sale |
+|---|---|---|
+| ¿Cuánto se debe y cuánto nos deben en dólares, por vencimiento? | Cubetas hoy / 1-30 / 31-60 / 61-90 / 91-150 / +150 con **USD abiertos** por lado: CxC (FV vivas USD), CxP (FP vivas USD), **comprometido** (OC confirmadas sin recibir en USD; PV confirmados sin facturar en USD) | `invoices.amount_fx − pagado en USD` (exige `amount_fx` en la FP: hueco 17), `purchase_orders`/`sales_orders` por `currency` y pendiente |
+| ¿A qué TC se pactó cada documento vivo y cuál es el TC de hoy? | Tabla por documento: tipo, socio, USD abierto, **TC pactado**, vence, MXN al pactado, MXN al TC de hoy, diferencia | `fx_agreed` / `fx_rate` por documento; un helper único `fxToday()` (hueco 27) enseñado en el inicio |
+| ¿Cuánto se gana o pierde si el dólar se mueve X pesos? | Posición neta abierta en USD × X, por cubeta y total; y la **revaluación** de lo vivo al TC de hoy (no realizado) | Posición neta = (banco USD + CxC USD + PV USD comprometidos) − (CxP USD + OC USD comprometidas), **solo la parte abierta** (ver cobertura) |
+| ¿Qué está cubierto y qué está abierto? | Por deal (pedido + sus OC + FV/FP + dólares comprados): **cubierto, dinámica 1** (OC en USD pagada con dólares comprados a TC conocido, FV en USD con pactado) · **cubierto, dinámica 2** (OC/FP pagada en MXN al TC del proveedor, FV en USD con pactado y cobro en MXN al pactado) · **abierto lado compra** (FP en USD viva sin dólares en caja) · **abierto lado venta** (venta en MXN con costo en USD, o FV USD sin pactado) · **abierto ambos** | Comparar `po.currency/fx` vs `so.currency/fx` vs saldo USD en banco y la compra de dólares registrada con su TC (hueco 24) |
+
+Reglas que la sostienen (sin proponer código): (i) la posición se calcula **en vivo**, sin columna "exposición" (mismo patrón que `creditExposure`, D51); (ii) el TC de hoy es el de la tabla a la fecha o el sistema dice "sin TC de hoy" (regla 9), nunca uno inventado; (iii) la cobertura se **deriva** de los documentos, no se declara a mano — pero cada documento sí declara explícitamente su moneda y su TC (11.7); (iv) "dólares en caja" es el saldo de las cuentas en USD, y su costo en pesos es el TC de cada compra registrada.
+
+**Dónde vive:** motor puro `src/lib/erp/fx-position.ts` (clasificación por deal, cubetas, sensibilidad — probado con números como `parciales.ts`), consulta en el mismo archivo o en `reports.ts`, pantalla `/posicion` (o pestaña en `/reportes`), tarjeta en `/` ("Exposición neta USD · TC hoy · ± si se mueve 1 peso"), y `fxToday()` en `credit.ts` junto a `nearestRate`. Prerrequisitos: A.1 completo (sin `amount_fx` en la FP, sin TC real en la OC y sin compra de dólares con TC no hay con qué calcular).
+
+### 11.7 Las dos dinámicas, soportadas explícitamente: qué declara cada documento y qué compara el sistema
+
+Hoy la cadena respeta el TC del cliente y **pierde** el del proveedor. Para que las dos dinámicas existan por diseño y no por accidente:
+
+| Documento | Declara hoy | Debe declarar | Compara / produce |
+|---|---|---|---|
+| COT | moneda + TC (editable, sin revalidar) | moneda + **TC pactado con el cliente**, revalidado contra la tabla o capturado con motivo (como la TIIE) | — |
+| PV | hereda COT | hereda COT; el TC pactado es el compromiso con el cliente | — |
+| OC | TC del cliente (vía cotización) o **1** (vía RFQ) | moneda + **TC del proveedor** (el que él pone en dinámica 2; el de mercado esperado en dinámica 1), nunca el del cliente | **Spread cambiario del deal** = PV.fx − OC.fx sobre los USD del pedido: una línea en el P&L del pedido (hoy no existe) |
+| FP | `amount` en moneda de la OC, sin `amount_fx` | `amount` en MXN al TC de la OC + `amount_fx` + `fx_agreed` — **el mismo molde que la FV** (`azagro.ts:2059`) y que ya usa el corte (D70) | — |
+| Compra de dólares | no se puede registrar | movimiento de banco **con TC**: salen MXN, entran USD, `fx_rate` de compra guardado (hueco 24) | Costo en pesos de los dólares en caja |
+| Pago de FP | pesos contra dólares 1:1 | si se paga en MXN: `fx_paid` y **diferencial vs `fx_agreed`** (espejo del ATC, hueco 16); si se paga en USD desde la cuenta USD: sin diferencial, y se consume "dólares en caja" | Utilidad/pérdida cambiaria realizada lado compra |
+| FV | moneda + TC pactado (`fx_agreed`) — correcto | igual | — |
+| Cobro | `fx_paid` vs `fx_agreed` → ATC / `fx_result` — correcto | igual | Utilidad/pérdida cambiaria realizada lado venta (existe) |
+| P&L del pedido | resta `po_cost` crudo contra venta | costo y venta **en MXN a sus TC declarados**, más la línea de spread cambiario y los dos diferenciales realizados | Margen real en una sola moneda |
+
+Con esto, "cubierto" y "abierto" (11.6) se derivan solos, y las decisiones 8.2-4 y 8.2-5 del dueño se vuelven capturables: quién absorbe el TC en una venta en pesos con costo en dólares es lo que el P&L enseña como "abierto lado venta", y pagar desde la cuenta USD o MXN es un dato del pago, no una política.
+
+### 11.8 Qué hace el estándar y cómo se llaman los reportes
+
+**Lo que un ERP contable da de serie** (Odoo, SAP Business One, Dynamics 365 Business Central, NetSuite — todos lo mismo con otros nombres):
+1. **Partidas abiertas por moneda** — "Aged Receivable / Aged Payable" con columna en moneda del documento y en moneda de la empresa (Odoo: *Aged Receivable/Payable*; SAP B1: *Open Items List*; BC: *Aged Accounts Receivable* por moneda). Es la mitad de la primera pregunta del dueño (falta "comprometido" por OC/PV y falta cobertura).
+2. **Diferencia cambiaria realizada** — automática al liquidar, en los dos lados. Odoo: asiento en el *Exchange Difference Journal*; SAP B1: *Exchange Rate Differences*; NetSuite: *Realized Exchange Rate Gains and Losses*. Azagro lo tiene del lado cliente (ATC/`fx_result`), no del proveedor.
+3. **Revaluación del no realizado** — los saldos abiertos en moneda extranjera se valúan al TC de cierre y la diferencia se asienta con reversa. Odoo: *Unrealized Currency Gains/Losses* (Contabilidad ▸ Informes) y el asistente *Foreign Currency Revaluation*; SAP B1: *Conversion Differences*; BC: *Adjust Exchange Rates*; NetSuite: *Currency Revaluation*. Es la tercera pregunta del dueño en su versión contable ("cuánto vale hoy lo vivo"), sin sensibilidad ni cobertura.
+4. **Inventario y costos en moneda de la empresa**, convertidos al recibir — nunca mezclados. Odoo valúa en MXN al TC de la recepción; el costo del proveedor (`product.supplierinfo`) lleva moneda y vigencia.
+
+**Lo que un ERP de distribución NO da de serie, y que el dueño está pidiendo:** la **posición cambiaria neta por vencimiento con cobertura** — "cuánto está abierto, cuánto cubierto, y cuánto cambia si el dólar se mueve un peso". Eso es un reporte de **tesorería**, no de contabilidad: en la práctica se llama *FX exposure report* / *net open position by maturity* / *currency exposure by bucket* (SAP Treasury "Exposure Management", Kyriba, o un Excel de tesorería), y su lógica es la de 11.6: activos en USD menos pasivos en USD, por cubeta, separando lo cubierto (*natural hedge*: cuentas por cobrar en USD contra cuentas por pagar en USD, o dólares ya comprados) de lo abierto. Las coberturas con forwards (contabilidad de coberturas, IFRS 9 / NIF C-10) son otro nivel y no aplican: la cobertura de Azagro es el **TC pactado con la contraparte**, que ningún ERP de serie modela como cobertura — por eso la pieza de 11.6 es de Azagro, y por eso se construye encima de los documentos, no de un módulo.
+
+**Una empresa que financia en una moneda y vende en otra** (el caso del dueño) hace, en el estándar, exactamente las dos dinámicas: (1) *matching* — compra la moneda del pasivo cuando adquiere el compromiso, para que activo y pasivo queden en la misma moneda; (2) *pass-through* — fija el TC con la contraparte en los dos lados y opera en la moneda de la línea. Y mide lo que queda fuera de las dos con el reporte de posición. Ningún ERP decide cuál usar; reporta. Lo que Azagro tiene y ningún ERP de serie: el **ATC "por cobrar / por devolver"** negociado con el cliente cuando el cobro no honra el pactado, y el TC pactado en la FV en vez del TC de la fecha de factura — las dos son la práctica real del negocio (`EXCEL_VS_SISTEMA.md` § 4) y se conservan.
