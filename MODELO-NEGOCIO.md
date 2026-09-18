@@ -495,3 +495,77 @@ Sin migración (usa `payments.currency/fx_rate` de la 0003, `bank_moves.amount_f
 **Verificado en navegador (PGlite fresco):** FP-0001 de 10,000 USD a 18.5 → pago de 400 USD desde Banorte USD: «Aplicado $7,400.00 en Banorte USD. Saldo factura $177,600.00. Caja $1,600.00», fila Pagado USD 400.00 / Saldo USD 9,600.00 → pago de 11,400 MXN a 19.00 desde Banorte MXN: «Aplicado $11,100.00 en Banorte MXN. Saldo factura $166,500.00. Caja $38,600.00. Diferencial TC: pérdida cambiaria 300.00» → preview de «Revertir último abono»: contra-pago −11,100, contra-movimiento +11,400 MXN, «pérdida cambiaria de este pago registrada en la factura → se regresa · $300.00».
 
 **Revisor de dinero: PASA CON AVISOS.** Cerrados antes de commitear: el ATC de proveedor ya no entra como «compra» en el P&L por periodo (`getCompanyPnl` excluye `inv_class='fx'`); el panorama de ajustes de TC es solo de cliente; la reversa con abonos en dos monedas ya no escribe `fx_paid = 1`; el PAG queda en `'MXN'`. **Anotados, no tocados:** (1) el `fx_result` de la FP todavía no entra al P&L del pedido (`netProfit` congelado; el diferencial realizado del lado compra queda como columna pendiente — en el caso del 19.00 la pérdida de 300 no se ve en la utilidad del pedido); (2) el contra-movimiento de la reversa no copia `amount_fx`/`fx_rate` (insert congelado por `erp-revertir-pago:66-70`; cuando exista el promedio de dólares en caja, ese renglón no tendrá costo en pesos); (3) `fx_invoiced` no crece para proveedor, y la estimación del estado de cuenta abierto (hueco 21) sigue sobre `amount_fx` completo; (4) una FP en USD pagada desde Banorte USD entre `a6fe4e0` y este commit escribió pesos en la cuenta en dólares (datos de prueba); (5) el preview de la reversa etiqueta el PAG (pesos al pactado) con la moneda de la factura («$11,100.00 USD»), misma familia del hueco 20; (6) `payments.fx_rate = 1` en pesos con pesos es el default del esquema, no un TC.
+
+---
+
+## 13. La matriz de monedas (18-sep-2026)
+
+En el negocio pasa de todo: se compra en pesos o en dólares, se vende en pesos o en dólares, se paga al proveedor en una u otra y el cliente paga en una u otra — y las combinaciones se cruzan. Esta sección recorre **las 16 combinaciones** (moneda de la compra × moneda de la venta × moneda con que Azagro paga × moneda con que el cliente paga) contra el código del 18-sep-2026 (después de A.1a y A.1b), eslabón por eslabón: cotización a proveedor, cotización al cliente, pedido, OC, FP, FV, cobro, pago, kardex, P&L y el papel que ve el cliente. Tres pasadas de solo lectura la verificaron línea por línea.
+
+**Cómo leerla.** Cada eslabón depende de UNA o DOS de las cuatro monedas, así que las 16 casillas se arman de cuatro piezas:
+
+| Pieza | Depende de | Estado | Dónde |
+|---|---|---|---|
+| **Compra** (RFQ → OC → FP → P&L costo) | moneda de la compra | ✅ en MXN y en USD (A.1a, Decisiones 76-79) | `rfq.ts:240,253`, `azagro.ts:1301` (`createPurchase`), `ops.ts:1723-1725` (`decideQuote`: la OC nace en la moneda del **proveedor**, no en la del cliente), `bornSupplierDebt*` con `supplierInvoiceAmounts`, `reports.ts:336` (`poCostToMxn`) |
+| **Kardex** (recepción → promedio → `products.cost` → siguiente cotización) | moneda de la compra | ✅ en MXN · **◐ en USD hasta A.1c**: `receivePurchase`/`receivePartial` pasan `unit_price` crudo a `postStock` (`azagro.ts:1538, 1609`); `refreshProductCost` lo escribe en `products.cost` (`stock.ts:204`) y `resolveCost` lo reusa como pesos en la siguiente cotización sin OC propia (`cost.ts:20-26`, `ops.ts:969`); `/inventory` lo enseña con signo `$` (`inventory.tsx:430`) | Decisión 77, pendiente |
+| **Venta** (cotización → pedido → FV → NC → papel → estado de cuenta → límite de crédito) | moneda de la venta | ✅ en MXN · **✗ en USD (L4a)**: el precio se captura en un `MoneyField` sin etiqueta de moneda (`quotes.tsx:594-606`, `order-form.tsx:572-583`) con el precio de lista en pesos por omisión (`quotes.tsx:264`), `createQuote`/`quoteFromRequest` nunca multiplican ni dividen por `fx_rate` (`ops.ts:940-955`, `requests.ts:976-1047`), `decideQuote` hereda el número crudo (`ops.ts:1625-1687`) mientras dos líneas más abajo la OC sí convierte (`:1727`), `issueDeliveryInvoice` guarda `amount = Σ qty × unit_price` y `amount_fx = amount / fx` (`azagro.ts:2143-2148`) **sin candado**; la NC de devolución nace sin `amount_fx` ni `fx_agreed` (`azagro.ts:2569-2579`, hallazgo nuevo); `creditExposure` suma el total del pedido USD contra un límite en pesos (`credit-limit.ts:39-68`); el papel y el estado de cuenta imprimen esa cifra con signo US$ (`doc-text.ts:116-145`, `ops.ts:2698-2709`, `statements.tsx:178-224`) | `ESTADO.md` L4a, Decisión 2 (solo el modelo) |
+| **Dinero** (cobro y pago: factura × cuenta) | moneda de la factura × moneda de la cuenta | ✅ los cuatro modos en los dos lados (A.1b, Decisión 80): `settleMode` (`fx.ts:133-160`), `applyInvoicePayment` (`ops.ts:1999-2000, 2089-2117`), reversa (`reversal.ts:215-223`) · **◐ la caja**: comprar dólares no existe (`addBankMove` `transferencia` acredita el mismo número en las dos cuentas, `ops.ts:2286-2292`), el inicio suma pesos y dólares en un número (`azagro.ts:420-426`), los KPIs de `/credit` (`:91-99`) y las cubetas de `/vencimientos` (`:104-116`) suman residuales de las dos monedas, `getUpcomingPayable` no trae moneda (`reports.ts:977-1004`) | A.1c (compra de dólares, caja por moneda), A.2 (posición) |
+
+Y tres transversales que cruzan casillas: (i) **el `fx_result` de la FP no entra al P&L del pedido** (`reports.ts:509` lee solo `fv.fx_result`; `netProfit` congelado) — toca toda compra en USD pagada con pesos; (ii) **`fxSpread` solo cuando OC y pedido son USD** (`reports.ts:368-371`) — en compra USD con venta MXN el spread real no se ve en ningún lado (8.2-4, abierta); (iii) **la FI y el pronto pago son siempre en pesos** (`ops.ts:2823, 2886, 2162`) — la mora de una FV en USD se cobra en pesos sobre el cargo al pactado (`EXCEL_VS_SISTEMA.md` § 4 dice que en el Excel hubo cobros de mora en USD: sigue sin existir).
+
+### 13.1 Las 16 combinaciones
+
+Columnas: **C** compra, **V** venta, **P** pago al proveedor (moneda de la cuenta), **K** cobro al cliente (moneda de la cuenta). Estado global: ✅ funciona · ◐ a medias · ✗ no funciona. "Real" = pasa en la operación según § 11.0; "rara" = posible pero no es práctica normal; "teórica" = solo por combinatoria.
+
+| # | C | V | P | K | Global | Cotiz. prov. · OC · FP | Kardex | Cotiz. cliente · PV · FV · papel | Pago (modo) | Cobro (modo) | P&L | Depende de | Ocurre |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | MXN | MXN | MXN | MXN | ✅ | ✅ | ✅ | ✅ | ✅ mxn | ✅ mxn | ✅ | — | real (todo nacional) |
+| 2 | MXN | MXN | MXN | USD | ◐ | ✅ | ✅ | ✅ | ✅ mxn | ✅ mxn-con-dólares (TC del pago, sin diferencial: la deuda es en pesos) | ✅ | caja por moneda (A.1c) | rara |
+| 3 | MXN | MXN | USD | MXN | ◐ | ✅ | ✅ | ✅ | ✅ mxn-con-dólares | ✅ mxn | ✅ | dólares en caja + caja por moneda (A.1c) | teórica |
+| 4 | MXN | MXN | USD | USD | ◐ | ✅ | ✅ | ✅ | ✅ mxn-con-dólares | ✅ mxn-con-dólares | ✅ | A.1c | teórica |
+| 5 | MXN | USD | MXN | MXN | ✗ | ✅ (OC en pesos aunque el pedido sea USD, `ops.ts:1723`) | ✅ | ✗ L4a | ✅ mxn | ✅ usd-con-pesos (TC del cobro, ATC/utilidad) — sobre `amount`/`amount_fx` que pueden haber nacido mal | ◐ `sale` en la unidad tecleada vs `landed` en pesos (`reports.ts:329-354`) | L4a | **real (dinámica 2 con proveedor nacional)** |
+| 6 | MXN | USD | MXN | USD | ✗ | ✅ | ✅ | ✗ L4a | ✅ mxn | ✅ usd-con-dólares (sin diferencial) | ◐ | L4a, A.1c | real |
+| 7 | MXN | USD | USD | MXN | ✗ | ✅ | ✅ | ✗ L4a | ✅ mxn-con-dólares | ✅ usd-con-pesos | ◐ | L4a, A.1c | teórica |
+| 8 | MXN | USD | USD | USD | ✗ | ✅ | ✅ | ✗ L4a | ✅ mxn-con-dólares | ✅ usd-con-dólares | ◐ | L4a, A.1c | teórica |
+| 9 | USD | MXN | MXN | MXN | ◐ | ✅ (OC en USD con TC del proveedor) | ◐ crudo hasta A.1c | ✅ | ✅ usd-con-pesos: pérdida/utilidad con signo de proveedor, ATC «POR PAGAR»/«POR COBRAR AL PROVEEDOR» | ✅ mxn | ◐ costo bien (`poCostToMxn`); **el diferencial del pago no entra** (i); **spread 0** (ii) | A.1c; 8.2-4; (i) | **real (compra en USD, venta en pesos — la exposición abierta de § 11.0)** |
+| 10 | USD | MXN | MXN | USD | ◐ | ✅ | ◐ | ✅ | ✅ usd-con-pesos | ✅ mxn-con-dólares | ◐ (i)(ii) | A.1c; (i) | rara |
+| 11 | USD | MXN | USD | MXN | ◐ | ✅ | ◐ | ✅ | ✅ usd-con-dólares (sin diferencial; exige dólares en la cuenta → **comprar dólares no existe**) | ✅ mxn | ◐ (ii) | **A.1c (compra de dólares)** | real (dinámica 1 con cliente nacional) |
+| 12 | USD | MXN | USD | USD | ◐ | ✅ | ◐ | ✅ | ✅ usd-con-dólares | ✅ mxn-con-dólares | ◐ (ii) | A.1c | teórica |
+| 13 | USD | USD | MXN | MXN | ✗ | ✅ | ◐ | ✗ L4a | ✅ usd-con-pesos | ✅ usd-con-pesos | ◐ `fxSpread` sí (OC y pedido USD) pero sobre `sale` ambiguo; (i) | L4a, A.1c, (i) | **real (dinámica 2: pagar en pesos al TC del proveedor, facturar en USD al pactado, cobrar en pesos)** |
+| 14 | USD | USD | MXN | USD | ✗ | ✅ | ◐ | ✗ L4a | ✅ usd-con-pesos | ✅ usd-con-dólares | ◐ (i) | L4a, A.1c, (i) | rara |
+| 15 | USD | USD | USD | MXN | ✗ | ✅ | ◐ | ✗ L4a | ✅ usd-con-dólares (exige dólares en caja) | ✅ usd-con-pesos (cobro en pesos al pactado) | ◐ | L4a, **A.1c (compra de dólares)** | **real (dinámica 1 cobrando en pesos al pactado)** |
+| 16 | USD | USD | USD | USD | ✗ | ✅ | ◐ | ✗ L4a | ✅ usd-con-dólares | ✅ usd-con-dólares | ◐ | L4a, A.1c | **real (dinámica 1 pura: todo en dólares)** |
+
+**Resumen:** 1 completa (#1), 7 a medias (#2-4 por la caja por moneda; #9-12 por el kardex crudo, el diferencial de la FP fuera del P&L y el spread que no se ve), **8 no funcionan** (#5-8 y #13-16: toda venta en dólares, por L4a). De las combinaciones que de verdad pasan en la operación — #1, #5, #9, #11, #13, #15, #16 — hoy solo #1 está completa; **las dos dinámicas de cobertura del dueño (#13 y #15/#16) caen en L4a**: la mecánica de pago y cobro ya es correcta (A.1b), pero el número que factura la FV puede nacer 18× mal si el vendedor teclea dólares, y ningún candado lo detiene.
+
+### 13.2 Lo que rompe L4a (todas las casillas con V = USD)
+
+El precio de venta vive en pesos por convención del motor (`pricing.ts` no tiene moneda; el costo entra en pesos por A.1a) pero la pantalla no lo dice: el campo es un `MoneyField` sin moneda, el precio por omisión es el de lista en pesos, y el importe de la partida se enseña con `moneyIn(imp, currency)` → «US$» (`quotes.tsx:594-610`). Si el vendedor teclea 500 pensando en dólares, la FV nace con `amount = 500` (pesos) y `amount_fx = 500/18 = 27.78` "dólares" (`azagro.ts:2143-2148`): el caso literal de `LOGICA.md` h.14. A partir de ahí todo es consistente entre sí y todo está mal: el cobro reparte bien un número equivocado, el estado de cuenta lo imprime en el bloque "Dólar americano" con signo US$, `creditExposure` lo suma contra el límite en pesos, y `dealPnlCore` resta un costo bien convertido contra una venta ambigua. **Cerrar L4a** es el espejo de A.1a del lado venta: capturar el precio en la moneda del pedido con la etiqueta puesta y convertirlo a pesos con `fx_rate` al guardar (`mxnToCostCurrency` al revés), en los cinco nacimientos (`createQuote`, `quoteFromRequest`, `decideQuote`, `saveOrder`, `createSale`) y en la NC (`returnSale` con `amount_fx`/`fx_agreed`); los lectores en pesos no cambian. Es del tamaño de A.1a + A.1b juntos y conviene partirlo. **Es lo que sigue después de A.1c.**
+
+### 13.3 Lo que depende de A.1c (todas las casillas con C = USD o con P/K = USD)
+
+- **Kardex en pesos** (#9-16): la recepción convierte con el TC de la OC antes de `postStock`; con la base limpia no hay promedios que descontaminar.
+- **Comprar dólares** (#3-4, #11-12, #15-16): sin `compra-usd` la cuenta en dólares solo recibe dólares por cobros de clientes en USD; pagar al proveedor en dólares (dinámica 1) exige haberlos comprado, y hoy la transferencia MXN→USD acredita pesos como dólares.
+- **Caja, por cobrar y por pagar por moneda** (#2-16): el inicio suma un solo número.
+
+### 13.4 El `fx_result` de la FP y el spread (casillas con C = USD)
+
+Con pago en pesos (#9, #10, #13, #14) el diferencial del lado compra se registra en la FP (`fx_result` con signo de pérdida, o ATC de proveedor) pero **no llega al P&L del pedido**: la línea `netProfit = margin + mora + fxIncome − finance − discount` está congelada y `fxIncome` lee solo la FV. Con compra USD y venta MXN (#9-12) el spread cambiario del deal es 0 por construcción: `fxSpread` exige pedido y OC en USD. Los dos son columnas pendientes del P&L, no errores de saldo.
+
+### 13.5 Banco ≠ moneda de la factura, en los dos lados
+
+| Factura | Cuenta | Modo | Cliente | Proveedor |
+|---|---|---|---|---|
+| USD | MXN | usd-con-pesos | `fxPaymentSplit`, diferencial = utilidad/pérdida o ATC por cobrar/devolver (dinámica 2) | mismo reparto, signo contrario, ATC por pagar / por cobrar al proveedor |
+| USD | USD | usd-con-dólares | sin diferencial, el banco lleva dólares (dinámica 1) | igual — exige dólares en caja (A.1c) |
+| MXN | USD | mxn-con-dólares | los dólares valen pesos al TC del pago; sin diferencial (la deuda es en pesos) | igual |
+| MXN | MXN | mxn | como siempre | como siempre |
+
+Los ocho renglones están construidos y probados (`erp-pago-fp-tc`); la reversa los deshace con el mismo signo y no inventa diferencial cuando el abono salió de la cuenta en dólares. Lo que falta alrededor: el contra-movimiento de la reversa no copia `amount_fx`/`fx_rate`, y `fx_invoiced` no crece para proveedor (la estimación del estado de cuenta abierto sigue sobre `amount_fx` completo, hueco 21).
+
+### 13.6 Hallazgos nuevos de esta pasada
+
+1. **La NC de devolución de una FV en USD nace sin `amount_fx` ni `fx_agreed`** (`azagro.ts:2569-2579`): cualquier suma futura por `amount_fx` (posición cambiaria) contará la FV en dólares y la NC en cero. Va con el cierre de L4a.
+2. El papel de la OC al proveedor imprime la moneda pero **no el TC** (`purchases.tsx:481-497`); el mensaje de RFQ (`doc-text.ts:271-274`) no dice en qué moneda se espera la cotización.
+3. La solicitud no deja corregir el TC antes de elegir proveedor (usa el de la tabla a la fecha de la solicitud, `requests.ts:658, 790`); la RFQ sí.
+4. `payments.currency` queda en `'MXN'` aunque el banco sea USD: el PAG está en pesos al pactado y solo `bank_moves` sabe que salieron dólares (decisión de A.1b, anotada).
