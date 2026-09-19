@@ -71,7 +71,9 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 | Estado | Preguntas |
 |---|---|
 | **ABIERTA** (8) | L8a (ajuste de inventario: ¿pide costo?) · H3 (Sesión D) · H4c (devolución a proveedor) · H4f (candado sin salida en la reversa de devolución) · H5 (lotes y caducidad) · H6 (unidades de medida) · D-B (tasa del pronto pago) · D-C (plazo de Santa Rosa a Azagro) |
-| Resuelta en documento, no construida | L3a (Decisión 9) · L3b (10) · L3c (11) · L5 (12 y 13) · L6 (14) · H2 · H4a (16) · H4b (15) · H7 · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) |
+| Resuelta en documento, **no construida** (5) | L3b (Decisión 10: la mora no se ajusta al devolver) · L3c (11) · L5 (12 y 13: el anticipo — del que cuelga L3c) · H2 (tres columnas muertas, no mueven dinero) · **N1 (5: la mora sigue con la tasa vieja — la única de estas cinco que mueve dinero hoy)** |
+| Resuelta en documento **y ya construida** (7) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) |
+| Parcial | H7 (el flete ya viaja por partida; repartir **un** flete de viaje entre productos sigue sin regla) |
 | Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2; captura: Decisión 82) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
 | En construcción / construida | H4d (Decisiones 46 a 54; pasos 0-3 de `PARCIALES.md` hechos) · H4e (Decisión 48; construida el 15-sep-2026) |
 | No es pregunta | N2 (requisito verificado el 5-sep-2026) |
@@ -427,14 +429,15 @@ saldo"; `credit.ts:191` (estado de cuenta); `issueMoraInvoice` factura con
 (`src/lib/erp/doc-text.ts`, `statementPaperRow`). Decisión en HANDOFF.
 
 ### L3a. Devoluciones: ¿la mercancía regresa al costo al que salió o al promedio de hoy? (LOGICA h.9)
-**RESUELTA EN DOCUMENTO (Decisión 9 del dueño, 7-sep-2026), no construida.**
-Al costo con el que salió, no al promedio de hoy: si entrara al promedio de
-hoy, la devolución movería la utilidad de una venta ya cerrada y aparecería
-una ganancia o pérdida que nunca existió. Hoy sigue regresando al promedio
-actual de la bodega: `returnSale` llama a `postStock` sin costo
-(`azagro.ts:1590-1591`) y `postStock` toma el promedio del destino cuando no
-recibe uno (`src/lib/erp/stock.ts:191-194`) — falta construir que `returnSale`
-pase el costo original de la venta en vez de dejarlo en blanco.
+**CONSTRUIDA** (Decisión 9 del dueño, 7-sep-2026; verificada contra el código
+el 19-sep-2026). Al costo con el que salió, no al promedio de hoy: si entrara
+al promedio de hoy, la devolución movería la utilidad de una venta ya cerrada
+y aparecería una ganancia o pérdida que nunca existió. `returnSale` lee el
+costo del movimiento de SALIDA de ese pedido (`deliveredUnitCost`,
+`src/lib/erp/stock.ts:151`, llamada en `azagro.ts:2484`), ponderado por
+cantidad si hubo entregas parciales (Decisión 26); si no aparece la salida no
+se bloquea — entra al promedio de hoy y se avisa en pantalla y en bitácora
+(Decisión 27). `CLAUDE.md` regla 2.
 
 ### L3b. ¿La mora ya facturada se ajusta si el cliente devuelve parte del producto? (LOGICA h.11)
 **RESUELTA EN DOCUMENTO (Decisión 10 del dueño, 7-sep-2026), no construida.**
@@ -444,6 +447,8 @@ caso por caso, con bitácora (depende de por qué devolvió: error de Azagro no
 es lo mismo que sobrante del cliente). Hoy la devolución no toca las FI ni el
 cargo sobre el que corre el interés (la NC es un documento aparte) — falta
 construir el ajuste y la opción de anularlo caso por caso.
+**Verificado el 19-sep-2026: sigue sin construirse** — `returnSale`
+(`azagro.ts:2361`) no menciona la FI ni `inv_class = 'mora'` en ningún camino.
 
 ### L3c. ¿Qué se hace con el saldo a favor de una nota de crédito sobre una factura ya pagada? (LOGICA h.10)
 **RESUELTA EN DOCUMENTO (Decisión 11 del dueño, 7-sep-2026), no construida.**
@@ -452,6 +457,10 @@ recurrente lo normal es aplicarlo a lo que sigue debiendo; devolver el dinero
 queda como opción disponible, no como regla. HANDOFF "Qué falta" lo listaba
 entre los INCOMPLETOS "sin tocar" — sigue sin construirse: hoy la NC sobre una
 factura pagada queda atrapada, sin aplicarse a nada (LOGICA h.10, Sesión D).
+**Verificado el 19-sep-2026: sigue sin construirse**, y no puede construirse
+antes que L5 — necesita el saldo a favor de la Decisión 12, que tampoco
+existe (`cutover-core.ts:209` lo dice con esas palabras al rechazar un
+anticipo del corte).
 
 ### L4a. En un pedido en dólares, ¿el precio se captura en dólares o en pesos? (LOGICA h.14)
 **Cerrada el 18-sep-2026, Decisión 82:** el precio se captura en la moneda del pedido (campo con etiqueta «USD») y se guarda en pesos al TC del documento; pantalla y papel enseñan dólares. Construcción: bloque L4a (`MODELO-NEGOCIO.md` § 13.7).
@@ -498,16 +507,23 @@ nueva (Decisión 13 — misma regla del circuito: el sistema propone, la persona
 confirma o cambia, porque el cliente a veces dice cuál factura está pagando).
 Falta construir el anticipo (tabla, saldo visible, aplicación manual) y la
 pantalla de repartir un depósito entre varias facturas.
+**Verificado el 19-sep-2026: sigue sin construirse.** El sobrante se sigue
+descartando en silencio — `applied = Math.min(opts.amount, residual)`,
+`ops.ts:2072` — y el corte rechaza a propósito los anticipos de Compaq
+«hasta que exista el saldo a favor» (Decisión 71, `cutover-core.ts:214`).
+**De aquí cuelga L3c**: sin saldo a favor no hay dónde poner una NC sobre una
+factura ya pagada.
 
 ### L6. ¿Cuándo nace la deuda con el proveedor: al capturar la OC, al recibir, o con su factura real? (LOGICA h.16)
-**RESUELTA EN DOCUMENTO (Decisión 14 del dueño, 7-sep-2026), no construida.**
-Nace al **recibir** la mercancía, no al capturar la orden de compra; si el
-proveedor factura después, la fecha de su factura puede ajustar el plazo —
-corrige un defecto real: hoy nace al capturar la OC (`createPurchase` inserta
-la FP en el mismo momento, `azagro.ts:1153-1159`) y el plazo corre desde ese
-día aunque la mercancía llegue un mes después, así que la cuenta por pagar
-dice que se debe algo que todavía no se tiene. Falta mover la creación de la
-FP de `createPurchase` a `receivePurchase`.
+**CONSTRUIDA** (Decisión 14 del dueño, 7-sep-2026; verificada el
+19-sep-2026). Nace al **recibir** la mercancía, no al capturar la orden de
+compra — y en directo/brokeraje, al entregar (Decisión 29), porque esa OC
+nunca pasa por recepción. Una FP por recepción (`bornSupplierDebtByReceipt`,
+Decisión 28), idempotente por evento y por OC, y se detiene si el proveedor no
+tiene plazo capturado (Decisión 30). El 18-sep-2026 se cerró además el hueco
+de la Decisión 89: **todas** las recepciones pasan hoy por `receivePartial`,
+así que ninguna mercancía entra al kardex sin su cuenta por pagar.
+`CLAUDE.md` regla 5b.
 
 ### L7. ¿El pronto pago se bonifica de verdad o solo se informa? (LOGICA h.19)
 **RESUELTA EN CÓDIGO.** Se aplica de verdad como descuento al cobrar:
@@ -539,6 +555,13 @@ capturar `fega_commission` y `early_pay_days` en una base que ya existía.
 ### H2. Columnas sin uso (`credit_policies.spread`, `fega_rate`, `customer_pos.fx_rate`)
 **RESUELTA EN DOCUMENTO pero no construida.** HANDOFF: "Quitarlas cuando toque
 una limpieza de esquema". No requiere decisión del dueño.
+**Verificado el 19-sep-2026: las tres siguen ahí y siguen sin lector.**
+`credit_policies.spread` y `.fega_rate` se crean en `azagro.ts:107-115` y nada
+las lee (el `fega_rate` que sí se usa es el de Ajustes, `ops.ts:162`);
+`customer_pos.fx_rate` viene de la migración 0007 y no aparece en `src/`.
+Son columnas muertas, no números equivocados: no mueven dinero. Se quitan
+cuando haya una migración de limpieza — y hoy no la hay, porque el esquema
+solo crece (`CLAUDE.md`: migraciones aditivas).
 
 ### H3. La "Sesión D": barrido de uso real, simplificación de pantallas y huecos operativos
 **ABIERTA.** HANDOFF la deja "pendiente, no se ha hecho todavía"; DISENO § 14
@@ -546,6 +569,8 @@ no la programa. *Para el dueño: ¿se hace ese barrido antes de pegar el corte
 de Compaq, o después?*
 
 ### H4a. Revertir un pago capturado por error (LOGICA h.8)
+**CONSTRUIDA** (Decisión 16; verificada el 19-sep-2026): paso 5 de `DESHACER.md`, `src/lib/erp/reversal.ts`. El contrario es del mismo tipo con importe negativo, ligado por `reverses_id`; nunca se borra un movimiento de dinero. `CLAUDE.md` regla 5d.
+
 **RESUELTA EN DOCUMENTO (Decisión 16 del dueño, 7-sep-2026), no construida.**
 Nunca se borra un movimiento de dinero: se mete uno contrario que lo cancela,
 y quedan los tres — el error, la reversa y el correcto. Razón del dueño: el
@@ -554,6 +579,8 @@ no, tiene que haber rastro. Sigue sin existir; HANDOFF lo listaba "sin tocar"
 — falta construir la reversa.
 
 ### H4b. Cancelaciones (pedido entregado, OC recibida, factura cobrada) (LOGICA h.15)
+**CONSTRUIDA** (Decisión 15; verificada el 19-sep-2026): paso 4 de `DESHACER.md`, `src/lib/erp/cancel.ts`. La cadena se calcula, se enseña completa y se pregunta una vez; se detiene antes de escribir si algo ya movió inventario, cartera o banco, y el intento rechazado queda en bitácora (Decisión 32). `CLAUDE.md` regla 5c.
+
 **RESUELTA EN DOCUMENTO (Decisión 15 del dueño, 7-sep-2026), no construida.**
 La regla depende de si el documento ya movió inventario o cartera. Lo que
 **no** ha movido nada (solicitud, cotización, pedido sin confirmar) se
@@ -654,9 +681,15 @@ caduca, y desde cuándo?*
 unidad y se vende en otra, y en qué productos?*
 
 ### H7. Flete prorrateado entre productos de un mismo viaje
-**RESUELTA EN DOCUMENTO pero no construida.** DISENO § 14: "En paralelo,
-cuando toque: […] prorrateo de flete". La regla de reparto (por peso, por
-importe, por tambo) no está escrita en ningún lado.
+**PARCIAL — verificada el 19-sep-2026.** Lo que sí existe: el flete **ya viaja
+por partida** y entra al costo puesto antes del margen (`quote_lines.freight`
+→ `pricing.ts:81` y `reports.ts:355-367`, las dos cifras cuadran y hay prueba;
+`CLAUDE.md` regla 8). Lo que **no** existe es lo que preguntaba este punto:
+repartir **un** flete de viaje entre los productos que venían en ese viaje.
+Hoy quien captura escribe el flete de cada partida a mano. La regla de reparto
+(por peso, por importe, por tambo) sigue sin estar escrita en ningún lado, y
+sin esa regla no se puede construir — *para el dueño: ¿cómo se reparte el
+flete de un viaje entre los productos que trae?*
 
 ### H8a. Pegar el CSV de saldos abiertos y existencias del corte de Compaq
 **RESUELTA EN CÓDIGO (pendiente operativo).** El importador existe, es
@@ -668,9 +701,12 @@ Falta el archivo.
 corte de Compaq entran con el circuito de **doble facturación (ASR)**, porque
 así se operaron: son deudas reales que ya corrieron por ese circuito, no un
 caso nuevo. Con el catálogo corregido de cuatro circuitos (DISENO § 3), sí
-caben — ya no hacía falta un quinto caso. Ver 4.6, misma respuesta. Falta
-construir el selector de circuito y que el importador (`cutover.ts:152`) lo
-capture además de la política de cobro.
+caben — ya no hacía falta un quinto caso. Ver 4.6, misma respuesta.
+**CONSTRUIDA — verificada el 19-sep-2026.** No hizo falta un selector: la
+decisión no es una preferencia por lote sino un hecho de cómo se operaron esos
+saldos, así que es una constante con nombre, `CUTOVER_CIRCUIT`
+(`circuits.ts`), estampada en cada factura del corte (`cutover.ts:139`) y
+nombrada en la bitácora del lote (`cutover.ts:151`).
 
 ### D-A. La comisión del 1% en el precio (DISENO § 13.A)
 **RESUELTA EN DOCUMENTO (Decisión 3 del dueño, 5-sep-2026; consecuencia
@@ -683,10 +719,12 @@ margen, lo sube en la operación como cualquier otro margen. Consecuencia con
 el número del § 5 recalculado: el precio al cliente baja **$1,118.77 por cada
 $100,000 de costo** (~1 %), y esa baja sale **del lado de Santa Rosa**, no del
 margen de Azagro (la factura de Azagro a Santa Rosa se queda en $106,951.87).
-Deja de ser una constante global. El código de hoy la cobra siempre y la
-reporta como costo (`pricing.ts:57-77`, `credit.ts:471` "NO QUITAR", Ajustes
-`settings.tsx:340`) — correcto mientras solo exista doble facturación; falta
-condicionarla por circuito cuando se construya el lineal.
+Deja de ser una constante global.
+**CONSTRUIDA — verificada el 19-sep-2026.** La comisión vive en
+`credit_circuits.commission_rate` (ya no en Ajustes), se **congela** en
+`quotes.commission_rate` al cotizar, y `reviseQuote` / `changeOrderTerm` leen
+la congelada. En el circuito lineal no se cobra, sin sustituto ni
+compensación automática (Decisión 6). `CLAUDE.md` regla 1.
 
 ### D-B. ¿A qué tasa se bonifica el pronto pago, de costo o de cobro? (DISENO § 13.B)
 **ABIERTA — reformulada el 5-sep-2026.** Ya no es "real (4.00) vs cálculo
@@ -715,9 +753,16 @@ capturadas directamente** —tasa de costo y tasa de cobro—, ninguna se llama
 la protección se calcula como la diferencia entre las dos. El riesgo de los
 dos colchones encimados (comprobación 3.b) desaparece porque ya no hay un
 colchón "agregado en código" sobre una tasa que quizá ya traía uno: los dos
-números que importan se capturan tal cual. Falta construir la tabla de dos
-columnas (hoy es de una sola, `tiie_rates`) y decidir con qué se siembra la
-columna de costo para las tasas ya capturadas.
+números que importan se capturan tal cual.
+**CONSTRUIDA — verificada el 19-sep-2026.** La tabla de dos columnas existe
+desde la migración 0024: `funding_rates (date, cost_rate, collection_rate)`,
+capturada en Ajustes por `saveFundingRate` (`circuits.ts:325`), que además
+rechaza una tasa de cobro menor que la de costo — la protección es la
+diferencia y no puede ser negativa. No se sembró la columna de costo de las
+tasas viejas, a propósito: habría sido inventar un número de negocio que nadie
+capturó con este criterio (regla 9, y lo dice la propia migración).
+**Pero ver N1**: la tabla se construyó y el motor de precios la usa; la MORA
+todavía no.
 
 ### E3. La TIIE del precio (al cotizar) y la del costo (al emitir la factura) son distintas (EXCEL § 1 y § 2)
 **RESUELTA EN CÓDIGO.** El precio usa el renglón vigente al cotizar
@@ -740,6 +785,18 @@ protección desaparezca. `DISENO_FINANCIAMIENTO.md` § 5 y § 6 actualizados. El
 código de hoy sigue usando una sola tasa de la tabla (`ops.ts:1954`,
 `credit.ts:156`); falta construir la tabla de dos columnas y aplicar esta
 regla.
+
+**Verificado el 19-sep-2026 — la mitad se construyó y la otra mitad no, y eso
+es peor que ninguna.** La tabla de dos columnas SÍ existe (E2, migración 0024)
+y el motor de precios del circuito lineal SÍ lee la tasa de cobro. La **mora
+no**: `issueMoraInvoice` sigue leyendo `tiie_rates` (`ops.ts:2637`,
+`nearestRate(tiieTable, moraDue)`). Y las dos tablas se capturan por separado
+en Ajustes, sin nada que las amarre (`saveTiie` escribe `tiie_rates`,
+`ops.ts:517`; `saveFundingRate` escribe `funding_rates`, `circuits.ts:336`),
+así que **el precio y la mora del mismo documento pueden correr con dos tasas
+distintas** y nadie se entera. La decisión ya está tomada (Decisión 5): la
+mora usa la tasa de **cobro** + spread de mora, sin excepción. Lo que falta es
+construirla.
 
 **ABIERTAS en esta lista: 9** (llegaron a ser 19, luego 17 con N1 abierta; el
 5-sep-2026 se cerraron D-A, H8b, E2 y, más tarde el mismo día, N1 — las
