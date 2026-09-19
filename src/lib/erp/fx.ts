@@ -219,14 +219,96 @@ export function exchangeLegs(i: { direction: ExchangeKind; usd: number; fx: numb
  * como «sin TC»: no se les inventa costo (regla 9). Los movimientos van en
  * orden de captura; una salida consume primero los dólares con costo.
  */
-export function usdCashAverage(i: { opening: number; moves: Array<{ amount: number | string; fxRate: number | string | null | undefined; reversal?: boolean }> }) {
+export type UsdCashMove = {
+  amount: number | string;
+  /** TC con el que entró o al que salió. Nulo = sin TC conocido. */
+  fxRate: number | string | null | undefined;
+  reversal?: boolean;
+  /** Para poder nombrar la salida en pantalla. Opcionales: el promedio no los usa. */
+  ref?: string | null;
+  date?: string | null;
+  /** Id del movimiento, para que una reversa pueda deshacer la salida que revierte. */
+  id?: number | null;
+  /** A cuál movimiento revierte. */
+  reversesId?: number | null;
+  /** Tipo del movimiento. Un traslado entre cuentas en dólares NUNCA realiza. */
+  kind?: string | null;
+};
+
+/**
+ * UNA SALIDA DE DÓLARES, con lo que costaron y lo que valieron (Decisión 91).
+ *
+ * Los dólares en caja son como la mercancía en la bodega: entran con un costo,
+ * se promedian, y cuando salen **salen a ese costo**. La diferencia contra lo
+ * que valieron al usarse es una ganancia o una pérdida REALIZADA, igual que el
+ * margen de una venta contra el costo del kardex.
+ */
+export type UsdCashExit = {
+  ref: string | null;
+  date: string | null;
+  /** Id del movimiento que sacó los dólares, para poder deshacerlo al revertir. */
+  id: number | null;
+  /** Dólares que salieron con costo conocido. */
+  usd: number;
+  /** TC al que salieron: lo que valieron al usarse. */
+  fxOut: number;
+  /** TC al que habían entrado: el promedio móvil en ESE momento. */
+  fxCost: number;
+  /** Pesos ganados (+) o perdidos (−): usd × (fxOut − fxCost). */
+  result: number;
+};
+
+/**
+ * Dólares que salieron y NO se pudieron medir, con su motivo. Se dicen aparte
+ * en vez de contarse como cero: un cero mudo haría creer que no pasó nada.
+ */
+export type UsdCashUnmeasured = {
+  ref: string | null;
+  date: string | null;
+  usd: number;
+  /** `sin-costo` = venían del saldo inicial, sin TC de entrada con qué comparar.
+   *  `sin-tc` = tenían costo, pero el movimiento no dice a qué TC salieron. */
+  motivo: "sin-costo" | "sin-tc";
+};
+
+/**
+ * EL RECORRIDO, uno solo (Decisión 91). De aquí salen las dos preguntas que se
+ * le hacen a la caja en dólares —cuánto vale hoy y cuánto se ganó o se perdió
+ * al usarla— para que nunca haya dos promedios distintos.
+ *
+ * **Una reversa nunca realiza nada: deshace, no usa.** Revertir una ENTRADA la
+ * borra a su propio TC, así que el promedio queda como si no hubiera existido.
+ * Revertir una SALIDA devuelve los dólares **al costo con el que salieron** y
+ * borra la ganancia que se había medido — no al TC de liquidación, que es lo
+ * que copia el contra-movimiento y lo que antes ensuciaba el promedio.
+ *
+ * Los dólares sin TC conocido (saldo inicial del corte) no tienen costo con qué
+ * compararse: salen sin realizar nada y se cuentan aparte. No se les inventa uno.
+ */
+function walkUsdCash(i: { opening: number; moves: UsdCashMove[] }) {
   let tracked = 0;
   let costMxn = 0;
   let untracked = Math.max(0, Number(i.opening) || 0);
+  const exits: UsdCashExit[] = [];
+  const noMedidos: UsdCashUnmeasured[] = [];
   for (const m of i.moves) {
     const amount = Number(m.amount) || 0;
-    // Una reversa deshace el movimiento original a SU TC (el contra-movimiento lo
-    // copia), nunca al promedio: el promedio queda como si el original no hubiera existido.
+    // REVERSA DE UNA SALIDA (importe POSITIVO: el contra-movimiento copia el
+    // original con signo opuesto). Deshace, no usa: los dólares vuelven **al
+    // costo con el que salieron** y la ganancia que se había medido se borra.
+    // Antes caía por la rama de entrada normal: entraba al TC de liquidación
+    // —no al costo— y dejaba publicada una ganancia de una operación que se
+    // deshizo. Lo atrapó el revisor de dinero con $5,000 de ejemplo.
+    if (m.reversal && amount > 0 && m.reversesId != null) {
+      const k = exits.findIndex((e) => e.id === m.reversesId);
+      if (k >= 0) {
+        const e = exits[k]!;
+        tracked += e.usd;
+        costMxn += e.usd * e.fxCost;
+        exits.splice(k, 1);
+        continue;
+      }
+    }
     if (m.reversal && isUsdFx(m.fxRate) && amount < 0) {
       const out = Math.min(-amount, tracked);
       costMxn -= out * Number(m.fxRate);
@@ -245,20 +327,75 @@ export function usdCashAverage(i: { opening: number; moves: Array<{ amount: numb
       let out = -amount;
       const fromTracked = Math.min(out, tracked);
       if (fromTracked > 0 && tracked > 0) {
-        costMxn -= (costMxn / tracked) * fromTracked;
+        // El promedio EN ESTE MOMENTO: lo que costaron los dólares que salen.
+        const avgNow = costMxn / tracked;
+        // UN TRASLADO ENTRE CUENTAS EN DÓLARES NO REALIZA NADA (Decisión 86):
+        // son los mismos dólares cambiados de cuenta. Sale del tipo, no de
+        // comparar números: el traslado se estampa con el promedio YA
+        // REDONDEADO a cuatro decimales, así que restarlo contra el promedio
+        // sin redondear publicaba centavos —y hasta $24 en un traslado grande—
+        // de ganancia inventada. Lo atrapó el revisor de dinero.
+        if (m.kind === "transferencia") {
+          // no realiza
+        } else if (isUsdFx(m.fxRate)) {
+          exits.push({
+            ref: m.ref ?? null,
+            date: m.date ?? null,
+            id: m.id ?? null,
+            usd: r2(fromTracked),
+            fxOut: r4(Number(m.fxRate)),
+            fxCost: r4(avgNow),
+            result: r2(fromTracked * (Number(m.fxRate) - avgNow)),
+          });
+        } else {
+          // Tenían costo, pero el movimiento no dice a qué TC salieron: no se
+          // inventa uno (regla 9) y no se esconde en un cero.
+          noMedidos.push({ ref: m.ref ?? null, date: m.date ?? null, usd: r2(fromTracked), motivo: "sin-tc" });
+        }
+        costMxn -= avgNow * fromTracked;
         tracked -= fromTracked;
         out -= fromTracked;
+      }
+      // Lo que salió de los dólares sin TC de entrada no realiza nada: no hay
+      // con qué comparar. Se dice con su fecha, para poder recortarlo al periodo.
+      if (out > 0.0000001) {
+        const sin = Math.min(out, untracked);
+        if (sin > 0.0000001 && m.kind !== "transferencia") {
+          noMedidos.push({ ref: m.ref ?? null, date: m.date ?? null, usd: r2(sin), motivo: "sin-costo" });
+        }
       }
       untracked = Math.max(0, untracked - out);
     }
   }
   const avgFx = tracked > 0.0000001 ? Math.round((costMxn / tracked) * 10000) / 10000 : null;
+  return { tracked, untracked, avgFx, exits, noMedidos };
+}
+
+export function usdCashAverage(i: { opening: number; moves: Array<{ amount: number | string; fxRate: number | string | null | undefined; reversal?: boolean }> }) {
+  const w = walkUsdCash(i);
   return {
-    usd: r2(tracked + untracked),
-    tracked: r2(tracked),
-    sinTc: r2(untracked),
-    avgFx,
-    mxn: avgFx != null ? r2(tracked * avgFx) : null,
+    usd: r2(w.tracked + w.untracked),
+    tracked: r2(w.tracked),
+    sinTc: r2(w.untracked),
+    avgFx: w.avgFx,
+    mxn: w.avgFx != null ? r2(w.tracked * w.avgFx) : null,
+  };
+}
+
+/**
+ * CUÁNTO SE GANÓ O SE PERDIÓ AL USAR LOS DÓLARES (Decisión 91).
+ *
+ * Mismo recorrido que el promedio, otra pregunta. Hay que recorrer SIEMPRE
+ * desde el principio —el costo de una salida depende de todo lo que entró
+ * antes—, y luego quedarse con las salidas del periodo que se pregunta.
+ */
+export function usdCashRealized(i: { opening: number; moves: UsdCashMove[] }) {
+  const w = walkUsdCash(i);
+  return {
+    exits: w.exits,
+    total: r2(w.exits.reduce((s, e) => s + e.result, 0)),
+    /** Salidas que no se pudieron medir, con su motivo y su fecha (para recortarlas al periodo). */
+    noMedidos: w.noMedidos,
   };
 }
 

@@ -692,6 +692,50 @@ Sin migración. **El precio de venta se captura en la moneda del documento y se 
 
 **Un aviso que estaba vencido:** § 12.6 decía que ~~el contra-movimiento de la reversa no copia `amount_fx`/`fx_rate`~~ (**vencido**: sí los copia desde A.1c, `reversal.ts:423-429`, con `amount_fx` negado — corregido el 19-sep-2026). Sí lo copia (`reversal.ts:423-429`, con `amount_fx` negado): se cerró en A.1c y el documento no se actualizó. Es lo que evita que el promedio de dólares en caja se ensucie al revertir.
 
+### 12.13 Construido — el kardex de los dólares y lo que costó el dólar en el periodo (Decisión 91), 19-sep-2026
+
+**El hallazgo que cambió el bloque.** Se iba a construir «el total del mes» leyendo el diferencial que ya se registra al pagar. La pasada de solo lectura encontró que ese registro **solo existe cuando el dólar es una DEUDA pagada con pesos**: de las cuatro maneras en que salen dólares de la caja —pagar una factura en dólares con dólares, pagar una en pesos con dólares, un gasto desde la cuenta en dólares, y **vender dólares**— ninguna dejaba rastro de lo que esos dólares habían costado. Cuatro salidas, un solo registro. Y la consecuencia era la peor posible: **la Decisión 90 pone como primera salida cubrirse comprando los dólares; si Azagro se cubre y paga desde la cuenta en dólares, el reporte habría dicho $0 justo cuando la operación se hizo bien.**
+
+**Los dólares en caja son como la mercancía en la bodega.** Entran con su tipo de cambio, se promedian, y **cuando salen salen a ese promedio**; la diferencia contra lo que valieron al usarse es una ganancia o una pérdida realizada, igual que el margen de una venta contra el costo del kardex. El promedio ya existía (Decisión 81); lo que faltaba era decir cuánto se ganó o se perdió al USARLOS.
+
+`walkUsdCash` (`fx.ts`, privada) es **el único recorrido**, y de él salen las dos preguntas: `usdCashAverage` (misma forma pública, mismos números, sus pruebas intactas) y `usdCashRealized`, que devuelve por salida `{usd, fxCost, fxOut, result}`. Una **reversa no realiza nada** —deshace, no usa— y un **traslado entre cuentas en dólares tampoco** (mismos dólares, mismo costo). Lo que salió del **saldo inicial del corte**, sin TC conocido, no realiza nada y se cuenta aparte: no se le inventa costo.
+
+**El reporte tiene dos mitades y se enseñan por separado** (`fx-cost-query.ts`, bloque «Lo que costó el dólar» en `/reportes`):
+
+| | Cuándo | Cómo se mide |
+|---|---|---|
+| **Al pagar en pesos lo que se debía en dólares** | La cuenta es de pesos y la factura de dólares: el banco convierte ese día | La misma resta que ya hizo `fxPaymentSplit`, sobre los dos números que el pago dejó escritos (`bank_moves.amount` y `payment_allocs.amount`) |
+| **Al usar dólares que ya se tenían** | Salen dólares de una cuenta en dólares | El recorrido: lo que valieron al usarse menos lo que costaron |
+
+**Disjuntas por construcción**, no por un filtro que alguien pueda quitar: la primera exige cuenta en MXN y no deja movimiento en la cuenta de dólares; la segunda solo ve salidas de cuentas en dólares. Ningún peso se cuenta dos veces.
+
+**Sin migración, y a propósito.** Nada se guarda: las dos mitades se derivan de lo que ya está escrito. Guardar el diferencial en una columna crearía una segunda verdad que un día deja de coincidir con sus propios insumos, y nacería vacía para todo lo capturado antes — el mismo criterio de las Decisiones 83 y 84. Del recorrido de la caja, además, el orden es **por id** (el de Bancos y el de la posición cambiaria): el costo de una salida lo fijan los movimientos capturados antes que ella, así que capturar algo retrofechado no mueve un resultado ya medido.
+
+**El bloque va FUERA del «Resultado» del P&L del periodo**, también a propósito: mientras no se decida si el ajuste por TC entra a la utilidad, meterlo ahí contestaría esa pregunta por omisión. La pantalla dice además por qué no cuadra contra «Compras» —son dos hechos con dos fechas: la compra se registra al llegar la mercancía, al TC pactado; esto ocurre el día que sale el dinero— y explica la diferencia entre «Pagado a proveedores» (pesos al pactado) y lo que de verdad salió del banco.
+
+`scripts/erp-compra-dolares.test.mjs` (+16, con los números del caso del dueño en los dos sentidos); `npm test` **974/974**, `tsc` limpio, **ninguna prueba existente cambió** (los números pinchados de `usdCashAverage` quedaron intactos).
+
+**Revisor de dinero: NO PASA a la primera; tres violaciones, las tres cerradas antes de commitear.**
+1. **Revertir un pago en dólares dejaba publicada la ganancia de una operación que se deshizo.** La rama de reversa solo miraba importes negativos, y el contra-movimiento de una SALIDA nace positivo: caía por la rama de entrada normal. Con el caso del propio ejemplo —10,000 comprados a 17.00 usados a 17.50 y luego revertidos— el reporte seguía diciendo **+$5,000 de ganancia**. Ahora una reversa de salida borra su realización y **devuelve los dólares al costo con el que salieron**, lo que de paso corrige un defecto que venía de la Decisión 81: el contra-movimiento copia el TC de liquidación, así que el promedio de la cuenta subía de 17.00 a 17.50 — **$5,000 de costo inventado** que leían Bancos y la posición cambiaria.
+2. **Un traslado entre cuentas en dólares publicaba centavos de ganancia por redondeo.** Se estampa con el promedio ya redondeado a cuatro decimales y se comparaba contra el promedio sin redondear: **−$24 en un traslado de US$487,000**. La prueba original usaba 18.4 → 18.4, un caso de redondeo exacto, y por eso pasaba. Ahora no realiza **por tipo de movimiento**, no por comparar números.
+3. **La frase «del banco salieron» mezclaba los dos lados.** «Pagado a proveedores» solo suma pagos salientes, pero se le restaba un total que incluía el diferencial de un cobro al CLIENTE: decía **$22,500 donde salieron $18,500**. Ahora compara solo contra el lado proveedor.
+
+Cerrados también dos avisos: lo que salió **sin costo conocido** se recorta al mismo periodo (antes decía el total de toda la vida de la cuenta), y lo que salió **con costo pero sin tipo de cambio** —un ajuste manual desde la cuenta en dólares— ya no cae en ningún número: se dice aparte, con su motivo.
+
+**Lo que el revisor confirmó con números:** no hay doble conteo en ninguno de los seis casos (verificados uno por uno, y la disjunción es una tautología, no un filtro que se pueda quitar); el refactor **no mueve un centavo** (lectura línea por línea más una corrida diferencial de 200,000 casos, cero diferencias); la reversa del lado deuda **se autocancela** en los dos lados; el pronto pago y el abono virtual de una devolución quedan fuera solos por no tener movimiento de banco; y ningún camino inventa un tipo de cambio.
+
+**Verificado en navegador (PGlite fresco), con los números del caso:** dos órdenes en dólares pactadas a **17.50** (US$10,000 y US$6,000) recibidas; compra de **6,000 dólares a 17.00** («TC promedio 17 · $102,000.00 en pesos»); FP-0001 pagada **desde la cuenta de pesos a 18.50** (salieron $185,000 contra una deuda de $175,000) y FP-0002 pagada **desde la cuenta en dólares** (el campo dice «Importe que sale (USD)» y no pide tipo de cambio: son dólares contra dólares). El reporte dijo:
+
+| | |
+|---|---|
+| **Lo que costó el dólar** | **−$7,000.00** |
+| Al pagar en pesos lo que se debía en dólares | −$10,000.00 · «Se pagó FP-0001 en pesos · AARFS · costó 17.5 · valió 18.5» |
+| Al usar dólares que ya se tenían | **+$3,000.00** · «Salieron USD 6,000.00 · pago FP-0002 · Banorte USD · costó 17 · valió 17.5» |
+
+Y la frase de arriba: «Pagado a proveedores $280,000.00 … son los pesos al tipo de cambio pactado; **del banco salieron $290,000.00** — la diferencia es el bloque de abajo. (Solo el lado proveedor: el diferencial de un cobro al cliente no sale de ahí.)» Los $3,000 son el número que antes **no existía**: ese día no hubo conversión, así que el sistema no anotaba nada.
+
+**Lo que NO va en este bloque:** meter el término al «Resultado» (depende de la decisión del ATC); pasarle el rango de fechas al Panorama, que hoy es del histórico; corregir «Pagado a proveedores» para que diga los pesos que de verdad salieron; y la NC de devolución y el contra-PAG fechados HOY en vez del día del hecho, que son la misma familia de defecto de periodo y conviene decidirlos juntos.
+
 ### 13.7 Lo que sigue después de A.1c: cerrar L4a — **CONSTRUIDO el 18-sep-2026 (§ 12.8)**
 
 **Cerrar L4a destraba 8 de las 16 casillas de la matriz — toda venta en dólares —, incluidas las dos dinámicas de cobertura del dueño (#13 dinámica 2, #15/#16 dinámica 1).** Es el espejo de A.1a del lado venta: el precio se captura **en la moneda del pedido, con la etiqueta puesta**, y se convierte a pesos con el `fx_rate` del documento al guardar (`mxnToCostCurrency` al revés), en los cinco nacimientos — `createQuote`, `quoteFromRequest`, `decideQuote`, `saveOrder`, `createSale` — y en la NC de devolución (`returnSale`, que hoy nace **sin `amount_fx` ni `fx_agreed`**: hallazgo nuevo, § 13.6). Los lectores en pesos (`creditExposure`, `byCurrency`, `dealPnlCore`, papel y estado de cuenta) no cambian de fórmula; la FV deja de poder nacer 18× mal. Es del tamaño de A.1a + A.1b juntos y conviene partirlo (captura y nacimientos primero; NC y lectores por fila después). Ver § 13.2.

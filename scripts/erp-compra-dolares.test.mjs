@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { exchangeLegs, receiptUnitCostMxn, usdCashAverage } from "../src/lib/erp/fx.ts";
+import { exchangeLegs, receiptUnitCostMxn, usdCashAverage, usdCashRealized } from "../src/lib/erp/fx.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(root, p), "utf8");
@@ -99,4 +99,194 @@ test("bancos e inicio por moneda: el promedio de dólares por cuenta, y caja / p
   assert.ok(ix.includes("en la cuenta en dólares") && ix.includes("en dólares` : \"\"}`}"), "las tarjetas del inicio lo enseñan");
   const bk = src("src/routes/banks.tsx");
   assert.ok(bk.includes('{ id: "compra-usd", label: "Compra de dólares" }') && bk.includes("TC promedio ${b.usd_avg_fx}"), "Bancos ofrece la compra y enseña el promedio");
+});
+
+// ---------------------------------------------------------------------------
+// DECISIÓN 91 — los dólares salen a su costo, como la mercancía del kardex.
+// El promedio ya existía; lo que faltaba era decir cuánto se ganó o se perdió
+// al USARLOS. Mismo recorrido, otra pregunta: nunca dos promedios distintos.
+// ---------------------------------------------------------------------------
+test("usdCashRealized: el caso del dueño — compras a 17.00 y pagas una deuda pactada a 17.50: ganas 50 centavos por dólar", () => {
+  const r = usdCashRealized({
+    opening: 0,
+    moves: [
+      { amount: 10000, fxRate: 17.0, ref: "compra" },
+      { amount: -10000, fxRate: 17.5, ref: "FP-0001" },
+    ],
+  });
+  assert.equal(r.exits.length, 1);
+  assert.equal(r.exits[0].usd, 10000);
+  assert.equal(r.exits[0].fxCost, 17, "lo que costaron");
+  assert.equal(r.exits[0].fxOut, 17.5, "lo que valieron al usarse");
+  assert.equal(r.exits[0].result, 5000, "10,000 × (17.50 − 17.00)");
+  assert.equal(r.total, 5000);
+  assert.equal(r.exits[0].ref, "FP-0001", "se puede nombrar en pantalla");
+});
+
+test("usdCashRealized: al revés — compras caro y usas barato, y el signo no se invierte", () => {
+  const r = usdCashRealized({ opening: 0, moves: [{ amount: 10000, fxRate: 18.5 }, { amount: -10000, fxRate: 17.5 }] });
+  assert.equal(r.total, -10000, "compraste a 18.50 y los usaste valiendo 17.50");
+});
+
+test("usdCashRealized: sale al PROMEDIO de lo que hay, no al TC de la última compra", () => {
+  // 1,000 a 18.00 y 1,000 a 19.00 → promedio 18.50. Salen 1,000 valiendo 19.00.
+  const r = usdCashRealized({
+    opening: 0,
+    moves: [{ amount: 1000, fxRate: 18 }, { amount: 1000, fxRate: 19 }, { amount: -1000, fxRate: 19 }],
+  });
+  assert.equal(r.exits[0].fxCost, 18.5, "promedio móvil, como el kardex");
+  assert.equal(r.exits[0].result, 500, "1,000 × (19.00 − 18.50)");
+});
+
+test("usdCashRealized: lo que sale del saldo inicial sin TC no realiza nada — no se le inventa costo", () => {
+  const r = usdCashRealized({ opening: 2000, moves: [{ amount: -1500, fxRate: 18.5 }] });
+  assert.equal(r.exits.length, 0, "no hay contra qué comparar");
+  assert.equal(r.total, 0);
+  assert.equal(r.noMedidos.length, 1, "pero se dice, con su fecha, para poder recortarlo al periodo");
+  assert.equal(r.noMedidos[0].usd, 1500);
+  assert.equal(r.noMedidos[0].motivo, "sin-costo");
+});
+
+test("usdCashRealized: una salida mixta realiza SOLO la parte con costo conocido", () => {
+  // 2,000 sin TC + 1,000 comprados a 18.00; salen 1,500 valiendo 18.50.
+  const r = usdCashRealized({ opening: 2000, moves: [{ amount: 1000, fxRate: 18 }, { amount: -1500, fxRate: 18.5 }] });
+  assert.equal(r.exits[0].usd, 1000, "solo los que tienen costo");
+  assert.equal(r.exits[0].result, 500, "1,000 × (18.50 − 18.00)");
+  assert.equal(r.noMedidos[0].usd, 500, "los otros 500 salieron sin costo conocido");
+  assert.equal(r.noMedidos[0].motivo, "sin-costo");
+});
+
+test("usdCashRealized: una reversa NO realiza nada — deshace, no usa", () => {
+  const r = usdCashRealized({
+    opening: 0,
+    moves: [{ amount: 1000, fxRate: 18.4 }, { amount: 500, fxRate: 18.6 }, { amount: -500, fxRate: 18.6, reversal: true }],
+  });
+  assert.equal(r.exits.length, 0, "revertir un cobro en dólares no es usarlos");
+  assert.equal(r.total, 0);
+  // Y el promedio queda como si el cobro revertido no hubiera existido.
+  assert.equal(usdCashAverage({ opening: 0, moves: [{ amount: 1000, fxRate: 18.4 }, { amount: 500, fxRate: 18.6 }, { amount: -500, fxRate: 18.6, reversal: true }] }).avgFx, 18.4);
+});
+
+test("usdCashRealized: un traslado entre dos cuentas en dólares no realiza nada (Decisión 86)", () => {
+  // Los mismos dólares cambiados de cuenta salen al promedio y entran con ese
+  // mismo costo: 1,000 comprados a 18.40, trasladados a 18.40.
+  const r = usdCashRealized({ opening: 0, moves: [{ amount: 1000, fxRate: 18.4 }, { amount: -1000, fxRate: 18.4 }] });
+  assert.equal(r.total, 0, "no se gana ni se pierde por cambiar de cuenta");
+});
+
+test("usdCashRealized: el promedio y la realización salen del MISMO recorrido", () => {
+  const fx = src("src/lib/erp/fx.ts");
+  assert.ok(fx.includes("function walkUsdCash("), "un solo recorrido");
+  assert.ok(fx.includes("const w = walkUsdCash(i);"), "los dos lo llaman");
+  assert.equal((fx.match(/costMxn \+= amount \* Number\(m\.fxRate\)/g) || []).length, 1, "la regla del promedio está escrita UNA vez");
+});
+
+test("el costo del dólar por periodo: dos mitades disjuntas, las dos derivadas, ninguna guardada", () => {
+  const q = src("src/lib/erp/fx-cost-query.ts");
+  // MITAD 1 — la deuda. La resta es la MISMA que hizo fxPaymentSplit, sobre
+  // los dos números que ese pago dejó escritos: no es una segunda fórmula.
+  assert.ok(q.includes("r.kind === \"customer\" ? banco - aplicado : banco + aplicado"), "signo por lado, como fxResultDeltaFor");
+  assert.ok(q.includes("and coalesce(i.currency,'MXN') = 'USD'") && q.includes("and coalesce(b.currency,'MXN') = 'MXN'"),
+    "factura en dólares y cuenta en PESOS: el único modo que convierte al pagar");
+  assert.ok(!q.includes("bm.amount_fx"), "nunca por amount_fx: está en null para todo lo anterior a la 0044");
+  assert.ok(!q.includes("p.reverses_id is null"), "sin filtro de reversa: el par contrario se cancela solo, en su mes");
+  // MITAD 2 — la caja. Recorrido completo y luego el periodo.
+  assert.ok(q.includes("const r = usdCashRealized({"), "el kardex de los dólares");
+  assert.ok(q.includes("where bank_id = ${c.id} and company_id = ${companyId} order by id"), "desde el principio y por id, como Bancos");
+  assert.ok(q.includes("if (!e.date || e.date < from || e.date > to) continue;"), "y solo después se recorta al periodo");
+  assert.ok(q.includes("and coalesce(currency,'MXN') = 'USD'"), "solo cuentas en dólares");
+  // Nada se guarda: no hay un solo insert ni update en todo el módulo.
+  assert.ok(!/insert into|update /.test(q), "se deriva, no se guarda: ninguna segunda verdad");
+  // Permisos: los mismos dos que el P&L por periodo.
+  assert.ok(q.includes('await assertCan(sql, context.userId, "credit", "view")'), "módulo cartera");
+  assert.ok(q.includes("if (!canSeeMargins(me.role))"), "y ver márgenes");
+  assert.ok(!q.includes("own_only"), "es un total de empresa: no tiene «mi parte»");
+});
+
+test("las dos mitades no se traslapan: una es con cuenta de pesos, la otra con cuenta de dólares", () => {
+  // Pagar una factura en dólares CON PESOS no deja movimiento en la cuenta de
+  // dólares, así que el recorrido de la caja no lo ve; y una salida de dólares
+  // nunca entra a la consulta de la deuda, que exige cuenta en MXN. Disjuntas
+  // por construcción, no por un filtro que alguien pueda quitar.
+  const fx = src("src/lib/erp/fx.ts");
+  assert.ok(fx.includes('if (i.usdInvoice) return i.bankUsd ? "usd-con-dolares" : "usd-con-pesos";'),
+    "settleMode separa los dos modos por la moneda de la cuenta");
+  const q = src("src/lib/erp/fx-cost-query.ts");
+  assert.ok(q.includes("disjuntas por construcción") || q.includes("**disjuntas por construcción**"), "y está dicho donde se lee");
+});
+
+test("la pantalla enseña las dos mitades por separado y dice por qué no cuadra contra Compras", () => {
+  const r = src("src/routes/reportes.tsx");
+  assert.ok(r.includes("Lo que costó el dólar"), "el bloque");
+  assert.ok(r.includes("Al pagar en pesos lo que se debía en dólares"), "mitad 1 con nombre");
+  assert.ok(r.includes("Al usar dólares que ya se tenían"), "mitad 2 con nombre");
+  assert.ok(r.includes("son dos hechos con dos fechas"), "por qué no cuadra contra Compras");
+  assert.ok(r.includes("como la mercancía del kardex"), "la explicación que el dueño ya entiende");
+  // Fuera del «Resultado» del P&L: meterlo ahí contestaría por omisión la
+  // pregunta abierta de si el ajuste por TC entra a la utilidad.
+  assert.ok(!r.includes("pnl.net + fx.total") && !r.includes("fx.total + pnl.net"), "no se mete al Resultado del periodo");
+});
+
+// ---------------------------------------------------------------------------
+// Las tres correcciones del revisor de dinero (NO PASA a la primera).
+// ---------------------------------------------------------------------------
+test("REVERSA DE UNA SALIDA: borra la ganancia y devuelve los dólares al costo con el que salieron", () => {
+  // El caso del revisor: compras 10,000 a 17.00, pagas una FP pactada a 17.50
+  // desde la cuenta en dólares (ganancia 5,000) y REVIERTEN el pago. El
+  // contra-movimiento nace POSITIVO, así que antes caía por la rama de entrada
+  // normal: la ganancia se quedaba publicada y el promedio subía a 17.50.
+  const moves = [
+    { amount: 10000, fxRate: 17, id: 1 },
+    { amount: -10000, fxRate: 17.5, id: 2, ref: "FP-0001" },
+    { amount: 10000, fxRate: 17.5, id: 3, reversal: true, reversesId: 2 },
+  ];
+  const r = usdCashRealized({ opening: 0, moves });
+  assert.equal(r.exits.length, 0, "la salida revertida ya no existe");
+  assert.equal(r.total, 0, "cero, no +5,000 de una operación que se deshizo");
+  // Y el promedio vuelve a 17.00: los dólares regresan a lo que COSTARON, no
+  // al TC al que se habían liquidado.
+  const a = usdCashAverage({ opening: 0, moves });
+  assert.equal(a.tracked, 10000);
+  assert.equal(a.avgFx, 17, "no 17.5: eso eran $5,000 de costo inventado");
+  assert.equal(a.mxn, 170000);
+});
+
+test("UN TRASLADO no realiza nada aunque el promedio no sea redondo (la ganancia por redondeo, cerrada)", () => {
+  // El traslado se estampa con el promedio YA REDONDEADO a 4 decimales; contra
+  // el promedio sin redondear publicaba hasta $24 de ganancia inventada en un
+  // traslado grande. Ahora no realiza por TIPO, no por comparar números.
+  const r = usdCashRealized({
+    opening: 0,
+    moves: [
+      { amount: 300000, fxRate: 19.01 },
+      { amount: 187000, fxRate: 19.031 },
+      { amount: -487000, fxRate: 19.018, kind: "transferencia" },
+    ],
+  });
+  assert.equal(r.total, 0, "mover dólares de cuenta no gana ni pierde un peso");
+  assert.equal(r.exits.length, 0);
+  assert.equal(r.noMedidos.length, 0, "y tampoco se reporta como «no medido»");
+});
+
+test("una salida CON costo pero SIN tipo de cambio no se mide, y se dice — no se esconde en un cero", () => {
+  const r = usdCashRealized({ opening: 0, moves: [{ amount: 1000, fxRate: 18 }, { amount: -1000, fxRate: null, ref: "ajuste" }] });
+  assert.equal(r.exits.length, 0, "no se le inventa un TC de salida (regla 9)");
+  assert.equal(r.total, 0);
+  assert.equal(r.noMedidos.length, 1);
+  assert.equal(r.noMedidos[0].motivo, "sin-tc");
+  assert.equal(r.noMedidos[0].usd, 1000);
+});
+
+test("lo no medido se recorta al periodo, igual que las salidas", () => {
+  const q = src("src/lib/erp/fx-cost-query.ts");
+  assert.ok(q.includes("if (!n.date || n.date < from || n.date > to) continue;"), "mismo recorte que las salidas");
+  assert.ok(!q.includes("cajaSinCosto += r.sinCosto"), "ya no se suma el total de toda la vida de la cuenta");
+});
+
+test("«del banco salieron» compara contra el lado PROVEEDOR, no contra la suma de los dos lados", () => {
+  const q = src("src/lib/erp/fx-cost-query.ts");
+  assert.ok(q.includes('deudaFilas.filter((r) => r.lado === "proveedor")'), "el total del lado proveedor, aparte");
+  const r = src("src/routes/reportes.tsx");
+  assert.ok(r.includes("money(pnl.paidOut - fx.deuda.proveedor)"), "«Pagado a proveedores» solo suma pagos salientes");
+  assert.ok(!r.includes("pnl.paidOut - fx.deuda.total"), "restarle el diferencial de un cobro al cliente inventaba la diferencia");
 });

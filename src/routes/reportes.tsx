@@ -4,8 +4,9 @@ import { AppShell } from "@/components/app-shell";
 import { Field, FinanceNav, StatusPill } from "@/components/erp";
 import { getCompanyPnl, getPanorama, listDealPnl } from "@/lib/erp/reports";
 import { circuitLabel } from "@/lib/erp/circuits";
+import { getFxCost } from "@/lib/erp/fx-cost-query";
 import { exportCsv } from "@/lib/export-csv";
-import { money, todayMx } from "@/lib/utils";
+import { dateDMY, money, moneyIn, todayMx } from "@/lib/utils";
 
 export const Route = createFileRoute("/reportes")({ component: Page });
 
@@ -19,6 +20,8 @@ function Page() {
   const [pnl, setPnl] = useState<Awaited<ReturnType<typeof getCompanyPnl>> | null>(null);
   const [deals, setDeals] = useState<Awaited<ReturnType<typeof listDealPnl>> | null>(null);
   const [pano, setPano] = useState<Awaited<ReturnType<typeof getPanorama>> | null>(null);
+  /** Decisión 91: lo que costó el dólar en el periodo, en sus dos mitades. */
+  const [fx, setFx] = useState<Awaited<ReturnType<typeof getFxCost>> | null>(null);
   // Paso 4: la protección (tasa de cobro − tasa de costo) se ve por separado.
   // Solo hay algo que mostrar si algún pedido corrió por la Línea Santa Rosa;
   // por ASR hay una sola tasa y la protección es cero: no se agrega una
@@ -29,14 +32,16 @@ function Page() {
   async function load() {
     setError(null);
     try {
-      const [c, d, p] = await Promise.all([
+      const [c, d, p, f] = await Promise.all([
         getCompanyPnl({ data: { from, to } }),
         listDealPnl({ data: { from, to } }),
         getPanorama(),
+        getFxCost({ data: { from, to } }),
       ]);
       setPnl(c);
       setDeals(d);
       setPano(p);
+      setFx(f);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error");
     }
@@ -81,7 +86,111 @@ function Page() {
       {pnl && (
         <p className="mb-5 text-[13px] text-muted">
           Cobrado {money(pnl.collected)} · Pagado a proveedores {money(pnl.paidOut)}. La mora no está en el precio; entra como ingreso de intereses.
+          {fx && fx.deuda.proveedor !== 0 ? (
+            <>
+              {" "}«Pagado a proveedores» son los pesos al tipo de cambio pactado; del banco salieron{" "}
+              {money(pnl.paidOut - fx.deuda.proveedor)} — la diferencia es el bloque de abajo. (Solo el lado proveedor: el diferencial de un cobro al cliente no sale
+              de ahí.)
+            </>
+          ) : null}
         </p>
+      )}
+
+      {/* DECISIÓN 91 — cuánto costó el dólar en el periodo, en sus DOS mitades.
+          Fuera del «Resultado» de arriba a propósito: mientras no se decida si
+          el ajuste por TC entra a la utilidad, meterlo ahí contestaría esa
+          pregunta por omisión. */}
+      {fx && (
+        <div className="mb-5 erp-card p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-sm font-semibold">Lo que costó el dólar</p>
+            <p className={`text-lg font-semibold tabular-nums ${fx.total < 0 ? "text-danger" : fx.total > 0 ? "text-ok" : ""}`}>{money(fx.total)}</p>
+          </div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-md border border-line px-3 py-2">
+              <p className="text-[12px] font-medium">Al pagar en pesos lo que se debía en dólares</p>
+              <p className={`text-base font-semibold tabular-nums ${fx.deuda.total < 0 ? "text-danger" : ""}`}>{money(fx.deuda.total)}</p>
+              <p className="mt-1 text-[11px] text-muted">
+                {fx.deuda.filas.length} movimiento(s). El banco convirtió ese día: la diferencia contra el tipo de cambio pactado es inmediata.
+              </p>
+            </div>
+            <div className="rounded-md border border-line px-3 py-2">
+              <p className="text-[12px] font-medium">Al usar dólares que ya se tenían</p>
+              <p className={`text-base font-semibold tabular-nums ${fx.caja.total < 0 ? "text-danger" : ""}`}>{money(fx.caja.total)}</p>
+              <p className="mt-1 text-[11px] text-muted">
+                {fx.caja.filas.length} salida(s). Los dólares salen al costo con el que entraron, como la mercancía del kardex: lo que valieron al usarse menos lo que
+                costaron.
+              </p>
+            </div>
+          </div>
+          {fx.deuda.filas.length + fx.caja.filas.length > 0 ? (
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-[13px]">
+                <thead className="border-b border-line text-[11px] uppercase tracking-wide text-muted">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Fecha</th>
+                    <th className="px-3 py-2 font-medium">Qué pasó</th>
+                    <th className="px-3 py-2 font-medium">Con quién / de dónde</th>
+                    <th className="px-3 py-2 text-right font-medium">Costó</th>
+                    <th className="px-3 py-2 text-right font-medium">Valió</th>
+                    <th className="px-3 py-2 text-right font-medium">Diferencia</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fx.deuda.filas.map((r) => (
+                    <tr key={`d-${r.pago}-${r.factura}`} className="border-t border-line">
+                      <td className="px-3 py-2">{dateDMY(r.fecha)}</td>
+                      <td className="px-3 py-2">
+                        Se pagó {r.factura} en pesos
+                        <span className="ml-2 text-[11px] text-muted">{r.lado === "proveedor" ? "al proveedor" : "cobro al cliente"}</span>
+                      </td>
+                      <td className="px-3 py-2">{r.socio}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.fxPactado ?? "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.fxPagado ?? "—"}</td>
+                      <td className={`px-3 py-2 text-right tabular-nums font-medium ${r.result < 0 ? "text-danger" : "text-ok"}`}>{money(r.result)}</td>
+                    </tr>
+                  ))}
+                  {fx.caja.filas.map((r, i) => (
+                    <tr key={`c-${i}-${r.fecha}`} className="border-t border-line">
+                      <td className="px-3 py-2">{dateDMY(r.fecha)}</td>
+                      <td className="px-3 py-2">
+                        Salieron {moneyIn(r.usd, "USD")}
+                        <span className="ml-2 text-[11px] text-muted">{r.ref}</span>
+                      </td>
+                      <td className="px-3 py-2">{r.cuenta}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.fxCost}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.fxOut}</td>
+                      <td className={`px-3 py-2 text-right tabular-nums font-medium ${r.result < 0 ? "text-danger" : "text-ok"}`}>{money(r.result)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-3 text-[12px] text-muted">En este periodo el dólar no costó ni dejó nada: no hubo pagos en dólares ni salidas de la cuenta en dólares.</p>
+          )}
+          <p className="mt-3 text-[12px] text-muted">
+            No cuadra contra «Compras» de arriba, y es correcto: son dos hechos con dos fechas. La compra se registra el día que llega la mercancía, al tipo de cambio
+            pactado; esto ocurre el día que sale el dinero.
+            {fx.caja.sinCosto > 0.009 ? (
+              <>
+                {" "}
+                <span className="text-warn">
+                  {moneyIn(fx.caja.sinCosto, "USD")} salieron en este periodo del saldo inicial, sin tipo de cambio de entrada: no tienen con qué compararse y no
+                  cuentan aquí.
+                </span>
+              </>
+            ) : null}
+            {fx.caja.sinTc > 0.009 ? (
+              <>
+                {" "}
+                <span className="text-warn">
+                  {moneyIn(fx.caja.sinTc, "USD")} salieron sin que el movimiento dijera a qué tipo de cambio: tenían costo, pero no se les inventa uno de salida.
+                </span>
+              </>
+            ) : null}
+          </p>
+        </div>
       )}
 
       <div className="mb-3 flex justify-end">

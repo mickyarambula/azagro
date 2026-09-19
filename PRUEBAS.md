@@ -535,6 +535,41 @@ sesiones.
 
 **Lo que el sistema NO hace, y es a propósito:** no te sugiere cuánto colchón ponerle al precio, ni le mete uno solo. El costo del dinero sí se mete solo en el precio porque hay una tasa y hay días; dónde va a estar el dólar en un mes no lo sabe nadie, y si el sistema lo adivinara, tu precio y tu margen reportado quedarían construidos sobre esa adivinanza — además de encarecerte las cotizaciones en las que ibas a comprar los dólares de todos modos. El número te lo pone enfrente; el colchón lo pones tú, subiendo el margen o el tipo de cambio.
 
+## ESCENARIO 16 — Cuánto te costó el dólar este mes, por los dos lados (Decisión 91, 19-sep-2026)
+
+**El número que más importa:** si compras **US$10,000 a 17.00** ($170,000) y con ellos le pagas al proveedor una factura que habías pactado a **17.50** ($175,000), **ganaste $5,000** — y el reporte tiene que decirlo. Antes decía **cero**, porque ese día no hubo ninguna conversión: salieron dólares y ya. La ganancia estaba escondida en lo que te habían costado los dólares.
+
+**La idea, en una frase:** los dólares de tu cuenta funcionan como la mercancía de la bodega. Tienen un costo promedio, y cuando salen, salen a ese costo. Lo que valieron al usarse menos lo que costaron es tu ganancia o tu pérdida.
+
+**Antes de empezar:** el dólar de hoy en Ajustes, una cuenta en pesos con saldo, una cuenta en dólares, un proveedor con "Plazo de pago (días)" capturado.
+
+### Parte A — La mitad que ya existía: pagas con pesos lo que debías en dólares
+
+1. Ve a "Compras" → "Nueva orden". Proveedor, "Moneda" `USD`, y en "Tipo de cambio" **corrígelo a `17.5`** (el que pactaste). Una partida de **10** a `1000`. "Colocar orden" → "Recibir" → "Recibir todo lo pendiente". Nace la factura por **"USD 10,000.00 · TC 17.5 · $175,000.00"**.
+2. Ve a "Cartera" → "Bancos" → "Pago". Cuenta: la de **pesos**. "Aplicar a factura": esa factura del proveedor. "TC del pago": **`18.5`**. Registra el pago completo.
+3. Ve a "Reportes". En el bloque **"Lo que costó el dólar"**, el recuadro de la izquierda —**"Al pagar en pesos lo que se debía en dólares"**— debe decir **−$10,000.00**: pactaste a 17.50 y pagaste a 18.50, por diez mil dólares.
+4. En la tabla de abajo tiene que aparecer el renglón, con "Costó **17.5**", "Valió **18.5**" y "Diferencia **−$10,000.00**".
+
+### Parte B — La mitad nueva: usas dólares que ya tenías
+
+5. Ve a "Bancos", tipo de movimiento **"Compra de dólares"**: de la cuenta de pesos a la de dólares, **6000** dólares al tipo de cambio **`17`**. Registra. La tarjeta de la cuenta en dólares debe decir **"USD 6,000.00 · TC promedio 17 · $102,000.00 en pesos"**.
+6. Levanta otra orden de compra igual (USD, TC `17.5`, 6 piezas a 1000), recíbela, y págala desde la **cuenta en dólares** esta vez. Fíjate que aquí el sistema no te pide tipo de cambio: son dólares contra dólares.
+7. Vuelve a "Reportes". El recuadro de la derecha —**"Al usar dólares que ya se tenían"**— debe decir **+$3,000.00**: seis mil dólares que te costaron 17.00 y que usaste valiendo 17.50, cincuenta centavos cada uno. **Ése es el número que antes no existía.**
+8. En la tabla, el renglón dice "Salieron **US$6,000.00**", "Costó **17**", "Valió **17.5**", "Diferencia **+$3,000.00**".
+
+### Parte C — Que no se cuente dos veces
+
+9. Arriba de todo, el número grande de **"Lo que costó el dólar"** debe ser la suma de los dos recuadros: **−$10,000 + $3,000 = −$7,000.00**. Ni un peso repetido: son dos hechos distintos, uno en cada camino de pago.
+10. Debajo de la tabla hay una nota que explica por qué esto **no cuadra** contra "Compras" del mismo mes. No es un error: la compra se registra el día que llega la mercancía, al tipo de cambio pactado; esto ocurre el día que sale el dinero, que casi siempre es otro mes.
+
+### Parte D — Los casos donde el sistema prefiere callar
+
+11. **Vender dólares que venían del saldo inicial.** Si tu cuenta en dólares arrancó con un saldo capturado a mano (sin tipo de cambio), esos dólares no tienen con qué compararse. Al usarlos, el reporte **no inventa una ganancia**: los deja fuera y te dice al pie cuántos dólares salieron sin costo conocido.
+12. **Revertir un cobro en dólares.** Revertir no es usar: el reporte no debe registrar ninguna ganancia por una reversa, y el promedio de la cuenta tiene que quedar como si el cobro nunca hubiera entrado.
+13. **Mover dólares entre dos cuentas en dólares.** Son los mismos dólares cambiados de lugar: la diferencia tiene que ser **cero**. Si ves una ganancia ahí, avísame.
+
+**Quién lo puede ver:** el bloque vive en Reportes, que pide permiso de cartera y de ver márgenes — administrador, gerencia y administración. No es un número por vendedor: es de toda la empresa.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no
