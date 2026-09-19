@@ -379,3 +379,26 @@ test("cableado: el ajuste por tipo de cambio imprime su fórmula, y esa fórmula
   limpio(plantilla, "la cuenta guardada del ajuste por tipo de cambio");
   assert.ok(plantilla.includes("TC pagado") && plantilla.includes("pactado"), "USD × (TC pagado − TC pactado)");
 });
+
+test("PARED DE PRIVACIDAD: el estado de cuenta del cliente trae SOLO sus facturas de venta", () => {
+  // Regla 5. `getStatement` elige socios con `is_customer = true`, pero sus
+  // cuatro consultas de facturas traían TODAS las del socio sin mirar `kind`.
+  // Un socio marcado a la vez cliente y proveedor metía sus facturas de COMPRA
+  // —con su `fx_result` y la columna impresa «Ut. cambiaria»— al papel que se
+  // le manda. El barrido de palabras de arriba no lo atrapa: sus prohibidas no
+  // incluyen «proveedor». Encontrado y cerrado el 19-sep-2026.
+  const ops = readFileSync(join(root, "src/lib/erp/ops.ts"), "utf8");
+  const cuerpo = ops.slice(ops.indexOf("export const getLiveStatement"), ops.indexOf("export const invoiceLiveMora"));
+  assert.ok(cuerpo.includes("and is_customer = true"), "los socios del estado de cuenta son clientes");
+  const porSocio = cuerpo.match(/partner_id = \$\{partner\.id\}/g) || [];
+  assert.ok(porSocio.length >= 4, "hay varias consultas por socio");
+  // Ninguna consulta de FACTURAS puede quedarse sin el filtro de lado.
+  for (const frag of [
+    "where company_id = ${cid} and partner_id = ${partner.id} and kind = 'customer'",
+    "and partner_id = ${partner.id} and kind = 'customer' and inv_class = 'interest'",
+    "where i.partner_id = ${partner.id} and i.company_id = ${cid} and i.kind = 'customer'",
+    "where i.company_id = ${cid} and i.partner_id = ${partner.id} and i.kind = 'customer'",
+  ]) {
+    assert.ok(cuerpo.includes(frag), `falta el filtro de lado en: ${frag}`);
+  }
+});

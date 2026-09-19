@@ -239,6 +239,10 @@ function Page() {
               <th className="px-3 py-3 text-right font-medium">Flete</th>
               <th className="px-3 py-3 text-right font-medium">Costo financiero</th>
               <th className="px-3 py-3 text-right font-medium">Margen</th>
+              {/* Decisión 87: la utilidad final lleva el diferencial del pago al
+                  proveedor. El Panorama y el Excel ya lo enseñan; esta tabla se
+                  había quedado sin la columna que lo explica. */}
+              <th className="px-3 py-3 text-right font-medium">Dif. TC pago</th>
               <th className="px-4 py-3 text-right font-medium">Utilidad final</th>
             </tr>
           </thead>
@@ -274,6 +278,9 @@ function Page() {
                 <td className="px-3 py-3 text-right tabular-nums">
                   {money(d.margin)}
                   <span className="ml-1 text-[11px] text-muted">{d.marginPct.toFixed(1)}%</span>
+                </td>
+                <td className={`px-3 py-3 text-right tabular-nums ${(d.fxCompra ?? 0) < -0.009 ? "text-danger" : ""}`}>
+                  {(d.fxCompra ?? 0) !== 0 ? money(d.fxCompra ?? 0) : <span className="text-muted">—</span>}
                 </td>
                 <td className="px-4 py-3 text-right tabular-nums font-medium">
                   {money(d.netProfit)}

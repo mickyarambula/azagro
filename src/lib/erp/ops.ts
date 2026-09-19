@@ -2554,13 +2554,20 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           coalesce(folio_fiscal, '') as folio_fiscal,
           coalesce(uuid_fiscal, '') as uuid_fiscal
         from invoices
-        where company_id = ${cid} and partner_id = ${partner.id}
+        -- PARED DE PRIVACIDAD (regla 5). El estado de cuenta es del CLIENTE y
+        -- sale de la empresa. Esta consulta traia TODAS las facturas del socio
+        -- sin mirar kind: un socio marcado a la vez cliente y proveedor metia
+        -- sus facturas de COMPRA -con su diferencial cambiario y la columna
+        -- impresa Ut. cambiaria- al papel que se le manda. El barrido de
+        -- palabras de erp-documento-limpio no lo atrapa: sus prohibidas no
+        -- incluyen proveedor. Cerrado el 19-sep-2026.
+        where company_id = ${cid} and partner_id = ${partner.id} and kind = 'customer'
         order by date, id
       `;
       const fis = await sql<{ origin: string; date: string; int_part: string; fega_part: string }>`
         select origin, date::text, coalesce(int_part,0)::text as int_part, coalesce(fega_part,0)::text as fega_part
         from invoices
-        where company_id = ${cid} and partner_id = ${partner.id} and inv_class = 'interest'
+        where company_id = ${cid} and partner_id = ${partner.id} and kind = 'customer' and inv_class = 'interest'
       `;
       const lines = await sql<{
         invoice_id: number;
@@ -2574,7 +2581,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         from invoice_lines il
         left join products p on p.id = il.product_id
         join invoices i on i.id = il.invoice_id
-        where i.partner_id = ${partner.id} and i.company_id = ${cid}
+        where i.partner_id = ${partner.id} and i.company_id = ${cid} and i.kind = 'customer'
       `;
       const contacts = await sql<{ name: string; email: string; phone: string; role: string; is_billing: boolean }>`
         select name, email, phone, role, is_billing from partner_contacts
@@ -2589,7 +2596,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         from payment_allocs pa
         join payments p on p.id = pa.payment_id
         join invoices i on i.id = pa.invoice_id
-        where i.company_id = ${cid} and i.partner_id = ${partner.id}
+        where i.company_id = ${cid} and i.partner_id = ${partner.id} and i.kind = 'customer'
         order by p.date, pa.id
       `;
 
