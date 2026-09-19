@@ -123,3 +123,32 @@ test("cableado: el Panorama exige permiso de márgenes y arma cobranza + ajustes
     assert.ok(fn.includes(campo), `el P&L por razón social lleva ${campo}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Dos cabos sueltos del hilo del dólar, cerrados el 19-sep-2026.
+// ---------------------------------------------------------------------------
+test("el Panorama respeta el «Desde / Hasta» debajo del cual vive", () => {
+  // Hasta hoy tomaba los últimos 500 pedidos sin mirar el rango: cambiabas las
+  // fechas de arriba y la tabla no se movía. Mismo molde que su vecina.
+  const rep = readFileSync(join(root, "src/lib/erp/reports.ts"), "utf8");
+  const fn = rep.slice(rep.indexOf("export const getPanorama"), rep.indexOf("export const getUpcomingDue"));
+  assert.ok(fn.includes("and s.date between ${from} and ${to}"), "filtra por el rango");
+  assert.ok(fn.includes('.validator(z.object({ from: z.string().optional(), to: z.string().optional() }))'), "rango opcional, como listDealPnl");
+  assert.ok(fn.includes('const from = (data.from || "2000-01-01").slice(0, 10);'), "sin rango, todo");
+  // Y la pantalla se lo pasa.
+  assert.ok(readFileSync(join(root, "src/routes/reportes.tsx"), "utf8").includes("getPanorama({ data: { from, to } })"), "la pantalla manda sus fechas");
+});
+
+test("las dos caras de «lo que viene» cuentan igual los ajustes por TC", () => {
+  const rep = readFileSync(join(root, "src/lib/erp/reports.ts"), "utf8");
+  const due = rep.slice(rep.indexOf("export const getUpcomingDue"), rep.indexOf("export const getUpcomingPayable"));
+  // Antes el lado cliente los excluía (`inv_class = 'product'`) y el lado
+  // proveedor los contaba: las dos caras decían cosas distintas del mismo
+  // hecho, y lo que viene a cobrar salía de menos.
+  assert.ok(due.includes("and coalesce(i.inv_class,'product') in ('product','fx')"), "el ajuste por TC también es dinero que va a entrar");
+  assert.ok(!due.includes("coalesce(i.inv_class,'product') = 'product'"), "ya no se excluye");
+  // Pero no se le estima interés: no tiene plazo financiero que correr.
+  assert.ok(due.includes('const esAjuste = inv.inv_class === "fx";'), "se distingue");
+  assert.ok(due.includes("const pick = esAjuste ? null : nearestRate(tiieTable, moraDue);"), "sin interés");
+  assert.ok(due.includes("if (!pick && !esAjuste) sinTiie += 1;"), "y tampoco cuenta como «sin TIIE»: no le falta un dato, es que no aplica");
+});

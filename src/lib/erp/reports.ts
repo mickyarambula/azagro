@@ -806,19 +806,26 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
  * cobranza de capital e intereses, ajustes de TC pendientes y las cuatro
  * visiones de utilidad (devengada / realizada / en caja / proporcional).
  */
-export const getPanorama = createServerFn({ method: "GET" })
+// El Panorama vive debajo del «Desde / Hasta» de Reportes y hasta el 19-sep-2026
+// lo ignoraba: cambiabas las fechas y la tabla no se movía, porque tomaba los
+// últimos 500 pedidos sin mirar el rango. El mismo molde que su vecina
+// `listDealPnl`: rango opcional, y sin él todo (para el que lo llame sin fechas).
+export const getPanorama = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .handler(async ({ context }) => {
+  .validator(z.object({ from: z.string().optional(), to: z.string().optional() }))
+  .handler(async ({ context, data }) => {
     const sql = await getSql();
     const me = await assertCan(sql, context.userId, "credit", "view");
     if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
     const own = await activeMember(sql, context.userId);
     const companyId = await cid(sql, context.userId);
+    const from = (data.from || "2000-01-01").slice(0, 10);
+    const to = (data.to || "2099-12-31").slice(0, 10);
     const orders = await sql<{ id: number; partner: string; group_name: string }>`
       select s.id, p.name as partner, coalesce(p.group_name, '') as group_name
       from sales_orders s
       join partners p on p.id = s.partner_id
-      where s.company_id = ${companyId}
+      where s.company_id = ${companyId} and s.date between ${from} and ${to}
         and (${own.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
       order by s.id desc
       limit 500
@@ -977,11 +984,20 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       currency: string;
       due_date: string;
       credit_due: string | null;
+      inv_class: string;
     }>`
-      select i.amount::text, i.residual::text, coalesce(i.currency,'MXN') as currency, i.due_date::text, i.credit_due::text
+      select i.amount::text, i.residual::text, coalesce(i.currency,'MXN') as currency, i.due_date::text, i.credit_due::text,
+        coalesce(i.inv_class,'product') as inv_class
       from invoices i
       join partners p on p.id = i.partner_id
-      where i.company_id = ${companyId} and i.kind = 'customer' and coalesce(i.inv_class,'product') = 'product'
+      -- Los AJUSTES POR TC entran (19-sep-2026): son dinero que de verdad va a
+      -- entrar, y dejarlos fuera hacía que «lo que viene» dijera de menos. Su
+      -- gemela del lado proveedor siempre los contó, así que además las dos
+      -- caras decían cosas distintas del mismo hecho. Lo que NO hacen es
+      -- generar interés: un ajuste no tiene plazo financiero que correr, y por
+      -- eso se saltan la estimación de abajo en vez de estimarles una.
+      where i.company_id = ${companyId} and i.kind = 'customer'
+        and coalesce(i.inv_class,'product') in ('product','fx')
         and i.state = 'open' and i.residual > 0.009 and i.amount > 0
         and (${own.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;
@@ -995,8 +1011,12 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
     for (const inv of open) {
       const moraDue = inv.credit_due || inv.due_date;
       const saldo = Number(inv.residual);
-      const pick = nearestRate(tiieTable, moraDue);
-      if (!pick) sinTiie += 1;
+      // Un ajuste por TC no tiene plazo financiero: entra al saldo pero no
+      // estima interés, y tampoco cuenta como «sin TIIE» (no le falta un dato,
+      // es que no aplica).
+      const esAjuste = inv.inv_class === "fx";
+      const pick = esAjuste ? null : nearestRate(tiieTable, moraDue);
+      if (!pick && !esAjuste) sinTiie += 1;
       const rate = pick ? pick.rate + pol.collectionSpread : 0;
       // El interés corre sobre el CARGO original una vez vencido el plazo; el
       // "× 30 / 360" es la unidad del reporte (interés de un mes de 30 días).
@@ -1035,6 +1055,9 @@ export const getUpcomingPayable = createServerFn({ method: "GET" })
     // sumaba ningún total del sistema — dinero a favor que no se veía en
     // ninguna pantalla. Ahora entra restando lo que se le debe a ese proveedor,
     // que es lo que de verdad va a salir del banco (18-sep-2026).
+    //
+    // Los ajustes por TC SÍ cuentan aquí, y desde el 19-sep-2026 también en
+    // `getUpcomingDue`: las dos caras dicen lo mismo del mismo hecho.
     const open = await sql<{ residual: string; due_date: string }>`
       select residual::text, due_date::text from invoices
       where company_id = ${companyId} and kind = 'supplier' and state = 'open' and abs(residual) > 0.009

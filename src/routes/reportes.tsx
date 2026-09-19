@@ -35,7 +35,7 @@ function Page() {
       const [c, d, p, f] = await Promise.all([
         getCompanyPnl({ data: { from, to } }),
         listDealPnl({ data: { from, to } }),
-        getPanorama(),
+        getPanorama({ data: { from, to } }),
         getFxCost({ data: { from, to } }),
       ]);
       setPnl(c);

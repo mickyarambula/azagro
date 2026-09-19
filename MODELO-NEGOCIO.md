@@ -734,7 +734,7 @@ Cerrados también dos avisos: lo que salió **sin costo conocido** se recorta al
 
 Y la frase de arriba: «Pagado a proveedores $280,000.00 … son los pesos al tipo de cambio pactado; **del banco salieron $290,000.00** — la diferencia es el bloque de abajo. (Solo el lado proveedor: el diferencial de un cobro al cliente no sale de ahí.)» Los $3,000 son el número que antes **no existía**: ese día no hubo conversión, así que el sistema no anotaba nada.
 
-**Lo que NO va en este bloque:** ~~meter el término al «Resultado»~~ y ~~las fechas de la NC y del contra-PAG~~ — las dos quedaron resueltas al día siguiente (§ 12.14, Decisión 92). Sigue fuera: pasarle el rango de fechas al Panorama, que hoy es del histórico, y corregir «Pagado a proveedores» para que diga los pesos que de verdad salieron (hoy se enseñan los dos con la diferencia nombrada).
+**Lo que NO va en este bloque:** ~~meter el término al «Resultado»~~ y ~~las fechas de la NC y del contra-PAG~~ — las dos quedaron resueltas al día siguiente (§ 12.14, Decisión 92). ~~pasarle el rango de fechas al Panorama~~ (cerrado el 19-sep-2026, § 12.15). Sigue fuera: corregir «Pagado a proveedores» para que diga los pesos que de verdad salieron — hoy se enseñan los dos con la diferencia nombrada, que es defendible: cambiarlo rompería el cuadre contra cartera, que se abona al TC pactado por diseño.
 
 ### 12.14 Construido — el diferencial dentro del Resultado del periodo (Decisión 92), 19-sep-2026
 
@@ -756,6 +756,14 @@ Cerrados también: la tarjeta «Diferencial cambiario» se dibujaba por el total
 
 **Lo que el revisor confirmó con números:** el corte da bien en los cuatro casos y en sus cuatro espejos; **no hay doble conteo** contra «Compras» (un término lleva el valor en libros y el otro solo el movimiento contra ese valor: −17,500 + −1,000 = los −18,500 que de verdad salieron del banco) ni contra la caja; el `count(*) filter` corre en PGlite; y `getCompanyPnl` conserva sus dos candados.
 
+### 12.15 Dos cabos del hilo del dólar, cerrados — 19-sep-2026
+
+**El Panorama ignoraba el «Desde / Hasta» debajo del cual vive.** Tomaba los últimos 500 pedidos sin mirar el rango: cambiabas las fechas de arriba y la tabla no se movía. Ahora lleva el mismo molde que su vecina `listDealPnl` — rango opcional, y sin rango, todo.
+
+**Las dos caras de «lo que viene» contaban distinto el mismo hecho.** El lado proveedor contaba los ajustes por TC; el lado cliente los excluía por `inv_class = 'product'`. Esa exclusión era técnica, no conceptual: la consulta del cliente **estima interés** y un ajuste no tiene plazo financiero que correr. Ahora entran en las dos —son dinero que de verdad va a entrar o a salir— y del lado cliente **se saltan la estimación** en vez de que se les invente una; tampoco cuentan como «sin TIIE», porque no les falta un dato: es que no aplica.
+
+`npm test` **984/984**, `tsc` limpio, ninguna prueba existente cambió.
+
 ### 13.7 Lo que sigue después de A.1c: cerrar L4a — **CONSTRUIDO el 18-sep-2026 (§ 12.8)**
 
 **Cerrar L4a destraba 8 de las 16 casillas de la matriz — toda venta en dólares —, incluidas las dos dinámicas de cobertura del dueño (#13 dinámica 2, #15/#16 dinámica 1).** Es el espejo de A.1a del lado venta: el precio se captura **en la moneda del pedido, con la etiqueta puesta**, y se convierte a pesos con el `fx_rate` del documento al guardar (`mxnToCostCurrency` al revés), en los cinco nacimientos — `createQuote`, `quoteFromRequest`, `decideQuote`, `saveOrder`, `createSale` — y en la NC de devolución (`returnSale`, que hoy nace **sin `amount_fx` ni `fx_agreed`**: hallazgo nuevo, § 13.6). Los lectores en pesos (`creditExposure`, `byCurrency`, `dealPnlCore`, papel y estado de cuenta) no cambian de fórmula; la FV deja de poder nacer 18× mal. Es del tamaño de A.1a + A.1b juntos y conviene partirlo (captura y nacimientos primero; NC y lectores por fila después). Ver § 13.2.
@@ -766,5 +774,5 @@ Con A.1a, A.1b, A.1c, L4a y A.2 cerrados, la cadena entera declara moneda y tipo
 
 1. ~~**El `fx_result` de la FP dentro del P&L del pedido** (transversal (i), § 13.4).~~ **CONSTRUIDO el 18-sep-2026 (§ 12.10, Decisiones 87-89).** Hoy `netProfit = margin + mora + fxIncome − finance − discount` está congelada y `fxIncome` lee solo la factura de venta: una compra en dólares pagada con pesos registra su diferencial en la factura del proveedor y en el ajuste por TC, pero la utilidad del pedido no lo resta. Toca las casillas #9, #10, #13 y #14. Es una columna del P&L, no un saldo mal.
 2. ~~**El spread cambiario cuando la compra es en dólares y la venta en pesos** (transversal (ii)).~~ **Contestada por la Decisión 90 (§ 12.11):** en una venta en pesos no hay «spread» que enseñar —no existe un TC del cliente con el cual comparar—, hay una **exposición al cotizar** (el aviso, § 12.11) y un **diferencial realizado al pagar** (`fxCompra`, § 12.10). Las dos están construidas. `fxSpread` se queda como lo que siempre fue: el tramo entre el TC del cliente y el del proveedor cuando las dos puntas son en dólares.
-3. **Lo anotado en la pasada de A.2**: la transferencia entre dos cuentas en dólares sale al promedio y entra sin TC; una factura de venta en dólares nacida antes de L4a solo se distingue por su fecha; `getUpcomingPayable` cuenta los ajustes por TC de proveedor mientras `getUpcomingDue` los filtra.
+3. ~~**Lo anotado en la pasada de A.2**~~ — los tres cerrados o caducados: la transferencia entre cuentas en dólares **ya arrastra su costo** (Decisión 86) y ya no realiza nada (Decisión 91); `getUpcomingDue` **ya cuenta los ajustes por TC** igual que su gemela (§ 12.15); y lo de distinguir una factura en dólares anterior a L4a por su fecha quedó sin objeto — no hay datos reales, todo es recapturable.
 4. **Lo que el dueño no ha decidido**: 8.2-5 (8.2-4 quedó cerrada el 19-sep-2026, Decisión 90), y si la mora de una factura en dólares debe poder cobrarse en dólares — el Excel dice que en su momento se hizo (`EXCEL_VS_SISTEMA.md` § 4), el sistema la cobra siempre en pesos sobre el cargo al tipo de cambio pactado.
