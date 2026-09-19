@@ -10,6 +10,7 @@ import { getSettings } from "@/lib/erp/ops";
 import { quoteStillBlocks } from "@/lib/erp/request-lock";
 import { addDays, missingRateMessage, nearestRate } from "@/lib/erp/credit";
 import { saveRfqBid } from "@/lib/erp/rfq";
+import { quoteFxExposure, utilityAfterFxMove } from "@/lib/erp/fx-exposure";
 import { annualRate, financeUnit, priceSale } from "@/lib/erp/pricing";
 import { marginInvalidMessage, marginOf, marginUnit as marginUnitOf, marginValid, OFFER_LABEL, SIN_MARGEN, type Offer } from "@/lib/erp/margins";
 import { ladderFor, termLabel } from "@/lib/erp/ladder";
@@ -30,7 +31,7 @@ import { CancelButton } from "@/components/cancel-doc";
 import { destText, RequestFields, type RequestDraft } from "@/components/request-form";
 import { Expediente } from "@/components/expediente";
 import { listDeliveryPoints } from "@/lib/erp/locations";
-import { money, num, qty, humanError, todayMx } from "@/lib/utils";
+import { money, moneyIn, num, qty, humanError, todayMx } from "@/lib/utils";
 import { circuitLabel, financingCircuit, inheritCircuit, nearestFunding, requestCircuitLabel, type CreditCircuit, type FundingPick } from "@/lib/erp/circuits";
 import { CircuitSelect } from "@/components/circuit-select";
 
@@ -168,6 +169,12 @@ function Page() {
   // Escalera de plazos (Ajustes): columnas de precio de la herramienta interna.
   const [terms, setTerms] = useState<number[]>([]);
   const [currency, setCurrency] = useState<"USD" | "MXN">("USD");
+  /** En qué moneda se le pide el precio al PROVEEDOR (la lista SC), que es
+   *  cosa distinta de la moneda en que se le cotiza al CLIENTE. */
+  const [rfqCurrency, setRfqCurrency] = useState<"MXN" | "USD">("MXN");
+  /** Con precios ya capturados la moneda de la lista se congela: cambiarla
+   *  después movería costos que ya se convirtieron a pesos. */
+  const conPrecio = (data?.lines ?? []).some((l) => num(l.cost) > 0);
   const [fxRate, setFxRate] = useState(0);
   const [fxFrom, setFxFrom] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -197,6 +204,8 @@ function Page() {
     const termFx = d.quote ? d.quote.fx_rate : d.request.fx_rate;
     if (termDays != null) setDays(termDays);
     if (termCur === "USD" || termCur === "MXN") setCurrency(termCur);
+    // La moneda de la lista a proveedores se lee de la lista, no se supone.
+    if (d.rfq?.currency === "USD" || d.rfq?.currency === "MXN") setRfqCurrency(d.rfq.currency);
     // Un TC ya pactado en la solicitud manda sobre la propuesta de la tabla.
     if (termFx != null && Number(termFx) > 0) {
       setFxRate(Number(termFx));
@@ -507,7 +516,25 @@ function Page() {
             </tbody>
           </table>
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {/* En qué moneda le pides el precio al proveedor. Hasta hoy esta lista
+              nacía siempre en pesos y un proveedor que cotiza en dólares no se
+              podía capturar por aquí — solo por la cotización a proveedores
+              levantada aparte. Se puede corregir mientras nadie haya escrito
+              un precio; después movería costos ya convertidos. */}
+          <label className="flex items-center gap-2 text-[12px] text-muted">
+            Les pides precio en
+            <select
+              className="erp-input h-9 w-24"
+              value={rfqCurrency}
+              disabled={busy || locked || conPrecio}
+              onChange={(e) => setRfqCurrency(e.target.value as "MXN" | "USD")}
+            >
+              <option value="MXN">MXN</option>
+              <option value="USD">USD</option>
+            </select>
+          </label>
+          {conPrecio ? <span className="text-[11px] text-muted">Ya hay precios capturados: la moneda de la lista se queda.</span> : null}
           <button
             type="button"
             className="erp-btn-primary"
@@ -522,7 +549,7 @@ function Page() {
                     const [productId, supplierId] = k.split(":").map(Number);
                     return { productId: productId!, supplierId: supplierId! };
                   });
-                const r = await sendVendorRfq({ data: { requestId: id, targets: list } });
+                const r = await sendVendorRfq({ data: { requestId: id, targets: list, currency: rfqCurrency } });
                 setMsg(`Lista ${r.name} lista para enviar a proveedores`);
                 await load();
               } catch (e) {
@@ -928,6 +955,56 @@ function Page() {
               {days > 0 ? " (contado y crédito)" : ""}. Sin margen no hay precio: escríbelo arriba y el precio se arma solo.
             </p>
           ) : null;
+        })()}
+        {/* DECISIÓN 90 — el costo viene en dólares y se está cotizando en pesos.
+            El precio al cliente queda congelado hoy; la deuda con el proveedor
+            sigue siendo en dólares hasta que se le pague. Lo que se mueva el
+            dólar en ese tramo sale entero del margen, y lo absorbe Azagro — el
+            cliente compró un precio en pesos. Aquí no se sugiere ningún
+            colchón: no se sabe dónde va a estar el dólar. Se dice la
+            aritmética y la persona decide. */}
+        {(() => {
+          if (locked) return null;
+          const exp = quoteFxExposure(
+            lines.map((l) => ({ qty: num(l.qty), costMxn: num(l.cost), costCurrency: l.cost_currency, costFx: num(l.cost_fx) })),
+            currency,
+          );
+          if (!exp.aplica) return null;
+          // La utilidad que se está ofreciendo: la del plazo acordado si hay
+          // crédito, la de contado si no. La misma que ve la persona arriba.
+          const util = lines.reduce((sum, l) => {
+            const m = marginOf(l, days > 0 ? "credit" : "cash");
+            if (!m || !marginValid(m)) return sum;
+            // Mismo costo puesto y mismo financiamiento que la fila de arriba.
+            const landed = num(l.cost) + num(l.freight);
+            const fin = days > 0
+              ? financeUnit({ cost: landed, days, tiie: ratePct / 100, costSpread: spreadPct / 100, commissionRate: commissionPct / 100 })
+              : 0;
+            return sum + marginUnitOf(m, landed, fin) * num(l.qty);
+          }, 0);
+          return (
+            <div className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px]">
+              <p className="font-semibold text-warn">
+                El costo de esta cotización es en dólares: {moneyIn(exp.usd, "USD")}
+                {exp.tc ? ` al tipo de cambio ${exp.tc}` : ""} — y le estás cotizando en pesos.
+              </p>
+              <p className="mt-1 text-muted">
+                Por cada peso que se mueva el dólar antes de pagarle al proveedor, tu utilidad se mueve{" "}
+                <span className="font-semibold text-ink tabular-nums">{money(exp.porPeso)}</span>
+                {util > 0.009 ? (
+                  <>
+                    {" "}— de {money(util)} a{" "}
+                    <span className="font-semibold text-ink tabular-nums">{money(utilityAfterFxMove(util, exp.usd, 1))}</span> si sube un peso
+                  </>
+                ) : null}
+                . Lo absorbe Azagro: el cliente compró un precio en pesos y este riesgo nace de pagarle al proveedor en dólares, no de la venta.
+              </p>
+              <p className="mt-1 text-muted">
+                Si lo vas a <span className="font-semibold">cubrir</span> —pactándole el tipo de cambio al proveedor, o comprando los dólares— no hay nada que hacer
+                aquí. Si lo vas a dejar abierto, súbele el margen o el tipo de cambio arriba: el sistema no lo hace solo porque nadie sabe dónde va a estar el dólar.
+              </p>
+            </div>
+          );
         })()}
         {quoteDead ? (
           <p className="mt-3 rounded-md border border-warn bg-cream px-3 py-2 text-[12px] text-warn">

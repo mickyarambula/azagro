@@ -512,6 +512,29 @@ sesiones.
 14. Repite el paso 9 pero al revés: paga una factura del proveedor en dólares a un TC **más bajo** que el pactado (por ejemplo, pactaste 18.5 y pagas a 18.00) y elige el tratamiento **"Ajustar al pactado"**. Nace un documento de ajuste a **tu favor** contra ese proveedor.
 15. Ve al inicio y mira el bloque de lo que vence por pagar. Ese ajuste a tu favor debe estar **restando** de lo que le debes a ese proveedor. Antes no aparecía en ningún total del sistema: era dinero a tu favor invisible.
 
+## ESCENARIO 15 — Cuando compras en dólares y vendes en pesos, el sistema te dice cuánto te puede costar (Decisión 90, 19-sep-2026)
+
+**El número que más importa:** si compras **US$10,000** con el dólar en **17.50** y le cotizas al cliente en pesos, la pantalla tiene que decirte que **por cada peso que se mueva el dólar, tu utilidad se mueve $10,000** — de $43,750 a $33,750 si sube uno. Ese número no estaba en ningún lado: te enterabas cuando pagabas.
+
+**Antes de empezar:** el dólar de hoy en "Ajustes" → "Tipo de cambio" en **17.5**, la "Política de crédito" completa, un cliente y un proveedor.
+
+1. Ve a "Ventas" → "Solicitudes" → "Nueva". Elige el cliente, busca el producto y pon **10** de cantidad. "Registrar solicitud".
+2. En "A quién se pide cotización", marca a tu proveedor. **Antes de pulsar el botón**, fíjate en el selector nuevo que dice **"Les pides precio en"** y cámbialo a **USD** — así le estás pidiendo el precio en dólares. Pulsa "Armar lista a proveedores".
+3. En "Comparativa", en la columna de tu proveedor escribe **1000** y pulsa **"Usar este"**. El renglón se pone verde con "Ganador".
+4. Baja a "Cotización al cliente". En "Costo puesto" debe decir **$17,500.00** y abajo **"proveedor en USD × TC 17.5"**: mil dólares convertidos con el dólar del día.
+5. En "Moneda" elige **MXN** — le vas a cotizar en pesos. En "Plazo días" escribe `0` (contado, para que la cuenta sea sencilla). En "Margen contado" escribe **20**.
+6. Debe salir precio **$21,875.00**, utilidad **$4,375.00 por litro · total $43,750.00 (20.0%)**, importe **$218,750.00**.
+7. **Éste es el punto.** Justo debajo de la tabla tiene que aparecer un recuadro ámbar que diga:
+
+   > El costo de esta cotización es en dólares: USD 10,000.00 al tipo de cambio 17.5 — y le estás cotizando en pesos.
+   > Por cada peso que se mueva el dólar antes de pagarle al proveedor, tu utilidad se mueve **$10,000.00** — de $43,750.00 a **$33,750.00** si sube un peso. Lo absorbe Azagro: el cliente compró un precio en pesos y este riesgo nace de pagarle al proveedor en dólares, no de la venta.
+   > Si lo vas a **cubrir** —pactándole el tipo de cambio al proveedor, o comprando los dólares— no hay nada que hacer aquí. Si lo vas a dejar abierto, súbele el margen o el tipo de cambio arriba: el sistema no lo hace solo porque nadie sabe dónde va a estar el dólar.
+
+8. **Prueba que el aviso sabe cuándo callarse:** cambia "Moneda" a **USD**. El recuadro tiene que **desaparecer**. Cotizando en dólares el precio viaja con el tipo de cambio y el riesgo es del cliente, no tuyo — es lo que ya habías decidido. Regrésalo a MXN y el aviso vuelve.
+9. **Prueba el candado de la moneda de la lista:** con el precio del proveedor ya capturado, el selector "Les pides precio en" tiene que estar **bloqueado**, con el texto "Ya hay precios capturados: la moneda de la lista se queda". Cambiarla después movería un costo que ya se convirtió a pesos.
+
+**Lo que el sistema NO hace, y es a propósito:** no te sugiere cuánto colchón ponerle al precio, ni le mete uno solo. El costo del dinero sí se mete solo en el precio porque hay una tasa y hay días; dónde va a estar el dólar en un mes no lo sabe nadie, y si el sistema lo adivinara, tu precio y tu margen reportado quedarían construidos sobre esa adivinanza — además de encarecerte las cotizaciones en las que ibas a comprar los dólares de todos modos. El número te lo pone enfrente; el colchón lo pones tú, subiendo el margen o el tipo de cambio.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

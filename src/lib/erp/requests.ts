@@ -297,18 +297,20 @@ export const getRequest = createServerFn({ method: "POST" })
     let rfq: {
       id: number;
       name: string;
+      /** En qué moneda se le pidió el precio al proveedor. */
+      currency: string;
       targets: Array<{ product_id: number; partner_id: number }>;
       bids: Array<{ partner_id: number; product_id: number; unit_price: string }>;
     } | null = null;
     if (head[0].rfq_id) {
-      const r = await sql<{ id: number; name: string }>`select id, name from vendor_rfqs where id = ${head[0].rfq_id}`;
+      const r = await sql<{ id: number; name: string; currency: string }>`select id, name, coalesce(currency,'MXN') as currency from vendor_rfqs where id = ${head[0].rfq_id}`;
       const targets = await sql<{ product_id: number; partner_id: number }>`
         select product_id, partner_id from vendor_rfq_targets where rfq_id = ${head[0].rfq_id}
       `;
       const bids = await sql<{ partner_id: number; product_id: number; unit_price: string }>`
         select partner_id, product_id, unit_price::text from vendor_rfq_bids where rfq_id = ${head[0].rfq_id}
       `;
-      if (r[0]) rfq = { id: r[0].id, name: r[0].name, targets, bids };
+      if (r[0]) rfq = { id: r[0].id, name: r[0].name, currency: r[0].currency, targets, bids };
     }
     // Costos por proveedor, fletes y márgenes: solo quien puede verlos.
     if (!canSeeCosts(me.role)) {
@@ -565,6 +567,13 @@ export const sendVendorRfq = createServerFn({ method: "POST" })
     z.object({
       requestId: z.number(),
       targets: z.array(z.object({ productId: z.number(), supplierId: z.number() })).min(1),
+      // En qué moneda se le pide el precio al proveedor. Hasta el 19-sep-2026
+      // la lista armada desde la solicitud nacía siempre en pesos y no había
+      // forma de capturar un precio en dólares por este camino — el único que
+      // lo permitía era la cotización a proveedores levantada aparte. Con eso,
+      // el aviso de exposición al dólar (Decisión 90) casi nunca podía saltar
+      // donde de verdad se cotiza.
+      currency: z.enum(["MXN", "USD"]).optional(),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -590,13 +599,22 @@ export const sendVendorRfq = createServerFn({ method: "POST" })
       const mode = req[0].delivery_mode === "campo" ? "Puesta en campo" : req[0].delivery_mode === "pickup" ? "Recolección" : "En bodega";
       const notes = `${mode}${req[0].delivery_to ? ` · ${req[0].delivery_to}` : ""}`;
       const row = await sql<{ id: number }>`
-        insert into vendor_rfqs (company_id, name, request_id, notes, state)
-        values (${companyId}, ${name}, ${data.requestId}, ${notes}, 'open')
+        insert into vendor_rfqs (company_id, name, request_id, notes, state, currency)
+        values (${companyId}, ${name}, ${data.requestId}, ${notes}, 'open', ${data.currency ?? "MXN"})
         returning id
       `;
       rfqId = row[0]!.id;
       for (const line of lines) {
         await sql`insert into vendor_rfq_lines (rfq_id, product_id, qty, uom) values (${rfqId}, ${line.product_id}, ${Number(line.qty)}, ${line.uom})`;
+      }
+    } else if (data.currency) {
+      // La lista ya existía: cambiar la moneda solo mientras nadie haya
+      // capturado un precio. Cambiarla después movería costos ya convertidos.
+      const conPrecio = await sql<{ c: number }>`
+        select count(*)::int as c from customer_request_lines where request_id = ${data.requestId} and cost > 0
+      `;
+      if (!Number(conPrecio[0]?.c ?? 0)) {
+        await sql`update vendor_rfqs set currency = ${data.currency} where id = ${rfqId} and company_id = ${companyId}`;
       }
       await sql`update customer_requests set rfq_id = ${rfqId}, state = 'rfq' where id = ${data.requestId}`;
     }
