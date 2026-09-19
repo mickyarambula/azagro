@@ -71,8 +71,8 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 | Estado | Preguntas |
 |---|---|
 | **ABIERTA** (8) | L8a (ajuste de inventario: ¿pide costo?) · H3 (Sesión D) · H4c (devolución a proveedor) · H4f (candado sin salida en la reversa de devolución) · H5 (lotes y caducidad) · H6 (unidades de medida) · D-B (tasa del pronto pago) · D-C (plazo de Santa Rosa a Azagro) |
-| Resuelta en documento, **no construida** (5) | L3b (Decisión 10: la mora no se ajusta al devolver) · L3c (11) · L5 (12 y 13: el anticipo — del que cuelga L3c) · H2 (tres columnas muertas, no mueven dinero) · **N1 (5: la mora sigue con la tasa vieja — la única de estas cinco que mueve dinero hoy)** |
-| Resuelta en documento **y ya construida** (7) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) |
+| Resuelta en documento, **no construida** (4) | L3b (Decisión 10: la mora no se ajusta al devolver) · L3c (11) · L5 (12 y 13: el anticipo — del que cuelga L3c) · H2 (tres columnas muertas, no mueven dinero) |
+| Resuelta en documento **y ya construida** (8) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) · **N1 (5, 19-sep-2026: la mora a tasa de cobro, por circuito)** |
 | Parcial | H7 (el flete ya viaja por partida; repartir **un** flete de viaje entre productos sigue sin regla) |
 | Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2; captura: Decisión 82) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
 | En construcción / construida | H4d (Decisiones 46 a 54; pasos 0-3 de `PARCIALES.md` hechos) · H4e (Decisión 48; construida el 15-sep-2026) |
@@ -786,17 +786,46 @@ código de hoy sigue usando una sola tasa de la tabla (`ops.ts:1954`,
 `credit.ts:156`); falta construir la tabla de dos columnas y aplicar esta
 regla.
 
-**Verificado el 19-sep-2026 — la mitad se construyó y la otra mitad no, y eso
-es peor que ninguna.** La tabla de dos columnas SÍ existe (E2, migración 0024)
-y el motor de precios del circuito lineal SÍ lee la tasa de cobro. La **mora
-no**: `issueMoraInvoice` sigue leyendo `tiie_rates` (`ops.ts:2637`,
-`nearestRate(tiieTable, moraDue)`). Y las dos tablas se capturan por separado
-en Ajustes, sin nada que las amarre (`saveTiie` escribe `tiie_rates`,
-`ops.ts:517`; `saveFundingRate` escribe `funding_rates`, `circuits.ts:336`),
-así que **el precio y la mora del mismo documento pueden correr con dos tasas
-distintas** y nadie se entera. La decisión ya está tomada (Decisión 5): la
-mora usa la tasa de **cobro** + spread de mora, sin excepción. Lo que falta es
-construirla.
+**CONSTRUIDA el 19-sep-2026.** Lo que se encontró al verificar: la mitad
+estaba hecha y esa mitad era peor que ninguna. La tabla de dos columnas existía
+(E2, migración 0024) y el motor de precios del lineal ya leía la tasa de cobro;
+la **mora no** — seguía en `tiie_rates` para todos los circuitos. Y las dos
+tablas se capturan por separado en Ajustes sin nada que las amarre, así que el
+precio y la mora del mismo documento podían correr con dos tasas distintas.
+
+**La regla, en un solo lugar** (`src/lib/erp/doc-rate.ts`, puro): un documento
+se mide con la tabla de la que salió su precio. ASR → la TIIE (ese circuito
+nunca tuvo dos tasas, y la que tiene es la del precio). Lineal →
+`funding_rates`: lo que se le COBRA al cliente a tasa de cobro (mora,
+interés), lo que mide COSTO a tasa de costo (pronto pago). **Sin renglón en la
+tabla que le toca, null y el llamador se detiene** — nunca cae a la otra, que
+es justo el número equivocado (regla 9).
+
+Siete lugares cableados: la mora del estado de cuenta, su columna «Pronto
+pago (est.)», la FI (`issueMoraInvoice`, con candado), el pronto pago del
+cobro, «lo que viene» del inicio, el P&L del pedido y la vista previa de la
+pantalla de cobro — esa última importa: enseña la mora antes de confirmar, y
+si eligiera otra tabla quien cobra vería un número y el cliente recibiría
+otro. **Los tres del pronto pago van a tasa de COSTO** y tienen que coincidir
+entre sí: el revisor de dinero encontró que dos se habían quedado en la TIIE —
+sobre $111,876.11 con 30 días sin consumir, la pantalla estimaba $1,081.47 y
+el cobro perdonaba $1,002.22, **$79.25 de diferencia entre lo que se enseña y
+lo que se da**. Una mitad construida es peor que ninguna, que es justo el
+defecto que este bloque vino a cerrar. Un documento ASR no se movió un
+centavo.
+
+**Aclaración de alcance:** el circuito Línea Santa Rosa está en el catálogo
+pero **apagado** (`isSelectableCircuit` solo admite Contado y ASR, en pantalla
+y en servidor), así que hoy no existe ni puede existir un documento al que le
+tocara la tabla nueva. El error era **latente**, no vivo: muerde el día que se
+encienda el lineal. Esto es prerrequisito de ese encendido, no un incendio
+apagado.
+
+Con los números de la Decisión 5 (capital $111,876.11, tasa de cobro 7.05 %,
+spread de mora 9 %): mora a 30 días **$1,496.34**. Con la TIIE capturada aparte
+en 7.60 % salían **$1,547.62** — $51.28 de más en una factura en un mes, y el
+signo se invierte solo si la TIIE queda por debajo.
+`scripts/erp-tasa-del-documento.test.mjs`.
 
 **ABIERTAS en esta lista: 9** (llegaron a ser 19, luego 17 con N1 abierta; el
 5-sep-2026 se cerraron D-A, H8b, E2 y, más tarde el mismo día, N1 — las

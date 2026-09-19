@@ -7,12 +7,13 @@ import { SendButton } from "@/components/send-doc";
 import { getDealTrail } from "@/lib/erp/deal";
 import { listInvoices, registerPayment, saveInvoiceReference } from "@/lib/azagro";
 import { invoiceLiveMora, listBanks, getSettings } from "@/lib/erp/ops";
-import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, invoiceStillOwed, missingChargesMessage, missingRateMessage, nearestRate, noMoraMessage, policyChargesInterest, validateDueDates } from "@/lib/erp/credit";
+import { chargeRates, chargesCaptured, computeMora, exactClock, explainInterest, invoiceStillOwed, missingChargesMessage, nearestRate, noMoraMessage, policyChargesInterest, validateDueDates } from "@/lib/erp/credit";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, fxAdjustmentNote, interestInvoiceFallback, invoiceLineLabel, invoicePaperTitle } from "@/lib/erp/doc-text";
 import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 import { invoiceShown } from "@/lib/erp/fx";
-import { circuitLabel } from "@/lib/erp/circuits";
+import { circuitLabel, nearestFunding } from "@/lib/erp/circuits";
+import { docRate, rateTableName } from "@/lib/erp/doc-rate";
 import { ReversalButton } from "@/components/cancel-doc";
 import { reversalPreview, reversePayment } from "@/lib/erp/reversal";
 
@@ -469,13 +470,24 @@ function Page() {
                   </div>
                 );
               }
+              // La tasa de COBRO del circuito de ESTA factura (Decisión 5,
+              // `doc-rate.ts`): en doble facturación la TIIE, en lineal la
+              // columna de cobro. La pantalla tiene que enseñar la misma que
+              // va a cobrar el servidor — si enseñara la otra, quien cobra
+              // vería un número y el cliente recibiría otro.
               const tiieTable = settings.tiie.map((t) => ({ date: t.date, rate: Number(t.rate) }));
-              const pick = nearestRate(tiieTable, inv.due_date);
+              const baseDoc = settings.circuits.find((c) => c.code === inv.circuit_code)?.financingBase ?? null;
+              const pick = docRate({
+                base: baseDoc,
+                which: "cobro",
+                tiie: nearestRate(tiieTable, inv.due_date),
+                funding: nearestFunding(settings.fundingRates, inv.due_date),
+              });
               if (!pick) {
                 return (
                   <div className="mt-2 text-[12px] text-muted">
                     <p>Vence {dateDMY(inv.due_date)} · {exactClock(inv.due_date, pay.date).label}.</p>
-                    <p className="mt-1 text-danger">{missingRateMessage(inv.due_date, `mora de ${inv.name}`)}</p>
+                    <p className="mt-1 text-danger">No hay tasa en {rateTableName(baseDoc)} con fecha igual o anterior al {dateDMY(inv.due_date)} (mora de {inv.name}). Captúrala en Ajustes antes de continuar.</p>
                   </div>
                 );
               }

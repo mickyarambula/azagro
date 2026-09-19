@@ -579,6 +579,55 @@ sesiones.
 
 **Quién lo puede ver:** el bloque vive en Reportes, que pide permiso de cartera y de ver márgenes — administrador, gerencia y administración. No es un número por vendedor: es de toda la empresa.
 
+## ESCENARIO 17 — La mora no se movió ni un centavo (N1, Decisión 5, 19-sep-2026)
+
+**Léelo antes de probar, porque cambia qué hay que mirar.** Este cambio NO
+agrega nada que puedas ver. Arregla una tubería que todavía no lleva agua: la
+mora de un documento del circuito **Línea Santa Rosa** se calculaba con la
+tabla de tasas equivocada. Ese circuito está en el catálogo pero **apagado** —
+hoy solo puedes elegir Contado y Circuito ASR, así que en tu base no existe
+ningún documento al que le tocara. El arreglo es para el día que lo
+enciendas; hasta entonces, lo único que importa es que **nada de lo que sí
+usas haya cambiado**.
+
+**El número que más importa:** una factura vencida a crédito tiene que
+facturar **exactamente la misma mora que facturaba ayer**. Si cambió un
+centavo, algo se rompió.
+
+**Antes de empezar:** una factura de venta a crédito, ya vencida, con la TIIE
+capturada en Ajustes para la fecha de su plazo financiero. Si vienes del
+Escenario 3, sirve esa.
+
+1. Ve a "Cartera" → "Estado de cuenta" y elige el cliente. Anota, del renglón
+   de esa factura, los tres números tal cual: **"Días vencidos"**,
+   **"Interés s/ días"** y **"Total int + FEGA"**. Escríbelos en un papel.
+2. Ve a "Cartera" → la pestaña de facturas, abre esa factura y pulsa el botón
+   **"Mora"**. En el recuadro que aparece antes de confirmar, el interés tiene
+   que ser **el mismo número que anotaste** en el paso 1.
+3. Confirma. Nace la factura de interés (FI). Ábrela: la fórmula guardada debe
+   decir **"TIIE X.XX% vigente al …"** con la misma tasa que tienes capturada
+   en Ajustes → "Tabla TIIE". **No** debe decir otra tasa, ni mencionar la
+   "Tabla de tasas (costo / cobro)": esa es la del circuito que está apagado.
+4. Ve al inicio. El recuadro de lo que está vencido tiene que seguir diciendo
+   los mismos pesos que antes de este cambio.
+
+### La parte que sí es nueva, y por qué no la puedes probar todavía
+
+5. Ve a "Ajustes". Vas a ver **dos** tablas de tasas: "Tabla TIIE" (una sola
+   columna) y "Tabla de tasas" (dos columnas, costo y cobro). **Las dos se
+   capturan a mano y nada las amarra.** Hasta hoy, el precio de un documento
+   Línea Santa Rosa salía de la segunda y su mora de la primera: dos tasas
+   distintas gobernando el mismo documento. Ahora cada documento usa de punta
+   a punta la tabla de la que salió su precio.
+6. Si algún día enciendes Línea Santa Rosa y se te olvida capturar un renglón
+   en "Tabla de tasas", el sistema **no** va a rellenar con la TIIE: se
+   detiene y te dice, con esas palabras, que captures en **"Tabla de tasas
+   (costo / cobro)"**. Antes te habría cobrado con el número equivocado sin
+   avisar.
+
+**Lo que todavía NO se prueba aquí:** nada del circuito Línea Santa Rosa, que
+sigue apagado. Cuando se encienda, esa prueba se escribe entera.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

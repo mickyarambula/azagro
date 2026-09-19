@@ -196,7 +196,10 @@ test("lineal: sin tasa de costo congelada la protección NO se estima (null), y 
 test("cableado: el P&L usa comisión, base y las dos tasas congeladas en la factura; si no, en la cotización; nunca Ajustes", () => {
   const r = src("src/lib/erp/reports.ts");
   assert.ok(r.includes("snap.commissionRate ?? (so[0].q_commission != null ? Number(so[0].q_commission) : null)"), "comisión: foto → cotización → (catálogo solo si hace falta)");
-  assert.ok(r.includes("const financingBase: FinancingBase = snap.financingBase ??"), "base: foto primero");
+  // 19-sep-2026 (N1): la base se resuelve ANTES que la tasa, porque decide de
+  // qué tabla sale; `financingBase` queda como el alias que leen los cálculos.
+  assert.ok(r.includes("const baseOfDoc: FinancingBase = snap.financingBase ??"), "base: foto primero");
+  assert.ok(r.includes("const financingBase: FinancingBase = baseOfDoc;"), "y una sola base para todo el cálculo");
   assert.ok(r.includes("const costRate = snap.costRate ?? (so[0].q_cost_rate != null ? Number(so[0].q_cost_rate) : null);"), "tasa de costo: foto → cotización, sin respaldo");
   assert.ok(r.includes("const collectionRate = snap.collectionRate ?? (so[0].q_collection_rate != null ? Number(so[0].q_collection_rate) : null);"), "tasa de cobro: foto → cotización, sin respaldo");
   assert.ok(!r.includes("pol.asrCommission"), "ninguna comisión de Ajustes");

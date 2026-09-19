@@ -19,6 +19,7 @@ import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 import { nextDocFolio } from "@/lib/erp/folios";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
+import { docRate, rateTableName, type RateUse } from "@/lib/erp/doc-rate";
 import {
   circuitForTerm,
   circuitLabel,
@@ -251,6 +252,44 @@ async function tiieTableOf(sql: Sql, cid: number) {
     select date::text, rate::text from tiie_rates where company_id = ${cid} order by date
   `;
   return rows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+}
+
+/**
+ * LOS DOS LIBROS DE TASAS más el mapa circuito → base de financiamiento: lo
+ * que hace falta para preguntarle a `docRate` (`doc-rate.ts`) qué renglón le
+ * toca a cada documento. Se cargan UNA vez por pantalla porque el estado de
+ * cuenta recorre cientos de facturas, no una.
+ */
+async function rateBooksOf(sql: Sql, cid: number) {
+  // En serie a propósito, no en `Promise.all`: esto corre DENTRO de la
+  // transacción de un cobro o de la emisión de una FI (`withTx`, con `for
+  // update` sobre la factura). El pool de Neon encola por conexión, pero no
+  // vale la pena depender de eso —ni de lo que haga PGLite— para ahorrarse
+  // dos viajes de tres consultas chicas.
+  const tiie = await tiieTableOf(sql, cid);
+  const funding = await fundingTableOf(sql, cid);
+  const circuits = await readCircuits(sql, cid);
+  return { tiie, funding, base: new Map(circuits.map((c) => [c.code as string, c.financingBase as string | null])) };
+}
+type RateBooks = Awaited<ReturnType<typeof rateBooksOf>>;
+
+/**
+ * La tasa que le toca a ESTE documento en ESTA fecha. Un solo renglón de
+ * código para no volver a tener dos tablas gobernando el mismo documento.
+ */
+function pickDocRate(books: RateBooks, circuitCode: string | null | undefined, asOf: string, which: RateUse) {
+  return docRate({
+    base: books.base.get(circuitCode ?? "") ?? null,
+    which,
+    tiie: nearestRate(books.tiie, asOf),
+    funding: nearestFunding(books.funding, asOf),
+  });
+}
+
+/** Qué tabla hay que ir a capturar, nombrada como se llama en Ajustes. */
+function missingDocRateMessage(books: RateBooks, circuitCode: string | null | undefined, asOf: string, what: string) {
+  const tabla = rateTableName(books.base.get(circuitCode ?? "") ?? null);
+  return `No hay tasa en ${tabla} con fecha igual o anterior al ${dateDMY(asOf)} (${what}). Captúrala en Ajustes antes de continuar.`;
 }
 
 async function rateTables(sql: Sql, cid: number) {
@@ -2184,22 +2223,24 @@ export async function applyInvoicePayment(
     policyChargesInterest(inv[0].policy_code) && inv[0].credit_days > 0
   ) {
     const pol = await policy(sql, opts.companyId);
-    // La TIIE solo hace falta si el pago cae antes del umbral (Ajustes). Si
+    // La tasa solo hace falta si el pago cae antes del umbral (Ajustes). Si
     // hace falta y la tabla no tiene renglón para la fecha de emisión, el cobro
     // se detiene con aviso: nunca se bonifica con una tasa inventada.
+    //
+    // Va a tasa de COSTO (`CLAUDE.md` regla 1: «lo que se le regresa al
+    // cliente por pagar antes es la bonificación de pronto pago, a tasa de
+    // costo»), y de la tabla que le toca al circuito de ESTA factura
+    // (Decisión 5, `doc-rate.ts`): en doble facturación la TIIE; en lineal la
+    // columna de COSTO — no la de cobro, que llevaría la protección adentro y
+    // regalaría de más.
     const early = daysBetween(inv[0].date, payDate) < pol.earlyPayDays;
-    const tiieRows = early
-      ? await sql<{ date: string; rate: string }>`
-          select date::text, rate::text from tiie_rates where company_id = ${opts.companyId} order by date
-        `
-      : [];
-    const tiieAtIssue = early
-      ? requireRate(
-          tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
-          inv[0].date,
-          `pronto pago de ${inv[0].name}`,
-        ).rate
-      : 0;
+    let tiieAtIssue = 0;
+    if (early) {
+      const books = await rateBooksOf(sql, opts.companyId);
+      const pick = pickDocRate(books, inv[0].circuit_code, inv[0].date, "costo");
+      if (!pick) throw new Error(missingDocRateMessage(books, inv[0].circuit_code, inv[0].date, `pronto pago de ${inv[0].name}`));
+      tiieAtIssue = pick.rate;
+    }
     const bono = earlyPayBonus({
       cargo: Number(inv[0].amount),
       issueDate: inv[0].date,
@@ -2489,6 +2530,9 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       select date::text, rate::text from tiie_rates where company_id = ${cid} order by date
     `;
     const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+    // Un documento se mide con la tabla de la que salió su precio (Decisiones
+    // 1 y 5, `doc-rate.ts`): ASR con la TIIE, lineal con la tasa de COBRO.
+    const books = await rateBooksOf(sql, cid);
     // Comisión y FEGA se negocian por cliente: cada documento trae la política
     // con la que nació y de ahí salen sus dos interruptores. Sin capturar, la
     // fila se marca y no se cobra nada — no se decide por el dueño.
@@ -2631,10 +2675,12 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         const fechaPagoCalc = paidForCalc && paidForCalc <= asOf ? paidForCalc : asOf;
         const diasVencidos = daysBetween(moraDue, fechaPagoCalc);
         const vencido = productDoc && diasVencidos > 0;
-        // TIIE del renglón de la tabla vigente al plazo financiero. Sin renglón
-        // no se calcula interés: la fila sale marcada "sin TIIE" y con el aviso,
-        // nunca con una tasa inventada.
-        const tiiePick = nearestRate(tiieTable, moraDue);
+        // La tasa de COBRO del documento, vigente al plazo financiero — de la
+        // tabla que le toca a SU circuito (Decisión 5: la mora es algo que se
+        // le cobra al cliente, así que va a tasa de cobro, sin excepción). Sin
+        // renglón no se calcula interés: la fila sale marcada y con el aviso,
+        // nunca con una tasa inventada ni con la de la otra tabla.
+        const tiiePick = pickDocRate(books, inv.circuit_code, moraDue, "cobro");
         const tiie = tiiePick?.rate ?? 0;
         // COMISIÓN Y FEGA SEGÚN LA POLÍTICA DEL DOCUMENTO. El porcentaje sigue
         // saliendo de Ajustes; la política solo dice cuál de las dos mitades se
@@ -2726,7 +2772,11 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // ESTIMACIÓN: cuánto se bonificaría si pagara en la fecha del corte.
         const fechaBono = paidForCalc ?? asOf;
         const bonoEstimado = productDoc && paidForCalc == null;
-        const tiieIssuePick = productDoc && cobraInteres ? nearestRate(tiieTable, inv.date) : null;
+        // A tasa de COSTO, y de la tabla del circuito de ESTE documento — la
+        // misma que va a aplicar el cobro (`applyInvoicePayment`). Si aquí se
+        // leyera otra, la pantalla estimaría una bonificación y el sistema
+        // perdonaría otra.
+        const tiieIssuePick = productDoc && cobraInteres ? pickDocRate(books, inv.circuit_code, inv.date, "costo") : null;
         const bono = productDoc && cobraInteres && tiieIssuePick
           ? earlyPayBonus({
               cargo,
@@ -2750,7 +2800,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           ? {
               short: "Sin TIIE en la tabla: interés no calculado.",
               lines: [
-                missingRateMessage(moraDue, `plazo financiero de ${inv.name}`),
+                missingDocRateMessage(books, inv.circuit_code, moraDue, `plazo financiero de ${inv.name}`),
                 "Interés y comisión/FEGA no calculados: esta fila queda fuera del total de mora hasta que haya TIIE.",
               ],
             }
@@ -2783,17 +2833,16 @@ export const getLiveStatement = createServerFn({ method: "POST" })
               : `Pronto pago: pagó al día ${bono.lived} (antes del umbral de ${pol.earlyPayDays} d). Bonificación = cargo × (${tasa}) × ${bono.days} d no usados / 360 = ${u(bono.bonus).toFixed(2)}.`,
           );
         } else if (sinTiieBono) {
-          formula.lines.push(`Pronto pago no estimado: ${missingRateMessage(inv.date, `emisión de ${inv.name}`)}`);
+          formula.lines.push(`Pronto pago no estimado: ${missingDocRateMessage(books, inv.circuit_code, inv.date, `emisión de ${inv.name}`)}`);
         } else if (productDoc && !vencido && bono.lived >= pol.earlyPayDays) {
           formula.lines.push(
             `Sin bonificación por pronto pago: al ${dateDMY(fechaBono)} ya pasaron ${bono.lived} d desde la emisión y el umbral es ${pol.earlyPayDays} d.`,
           );
         }
-        // Desde el paso 3 el circuito ya gobierna la comisión y la base del
-        // financiamiento del precio (congeladas al cotizar). Lo que sigue
-        // leyendo Ajustes es este interés de mora: la TIIE y el spread de
-        // cobro, porque la mora todavía no lee el circuito (Fase 3, pendiente).
-        formula.lines.push(`Circuito de financiamiento: ${circuitLabel(inv.circuit_code)} (la comisión y la base del financiamiento del precio ya salen de aquí; este interés de mora sigue leyendo la TIIE y el spread de Ajustes).`);
+        // Desde el 19-sep-2026 (N1, Decisión 5) el circuito gobierna TAMBIÉN la
+        // tasa de la mora: sale de la tabla de la que salió el precio de este
+        // documento. El spread de mora sigue siendo el de Ajustes.
+        formula.lines.push(`Circuito de financiamiento: ${circuitLabel(inv.circuit_code)} (de aquí salen la comisión, la base del financiamiento del precio y de qué tabla sale la tasa; el spread de mora es el de Ajustes).`);
         if (sinMora) {
           formula.lines.push(noMoraMessage(politica?.name));
           formula.lines.push(
@@ -2970,14 +3019,14 @@ export async function issueMoraInvoice(
     if (opts?.requireCharge !== false) throw new Error("No hay mora nueva por facturar");
     return { name: null as string | null, charge: 0, formula: `Sin días vencidos al ${asOf} (plazo financiero ${moraDue}).` };
   }
-  const tiieRows = await sql<{ date: string; rate: string }>`
-    select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
-  `;
-  const pick = requireRate(
-    tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })),
-    moraDue,
-    `plazo financiero de ${inv[0].name}`,
-  );
+  // La tasa de COBRO del circuito de ESTA factura, vigente a su plazo
+  // financiero (Decisión 5, `doc-rate.ts`): en doble facturación la TIIE, en
+  // lineal la columna de cobro de la tabla de tasas. Sin renglón en la tabla
+  // que le toca, la FI NO se emite: es dinero, y caer a la otra tabla sería
+  // cobrarle al cliente con un número que no es el suyo.
+  const books = await rateBooksOf(sql, companyId);
+  const pick = pickDocRate(books, inv[0].circuit_code, moraDue, "cobro");
+  if (!pick) throw new Error(missingDocRateMessage(books, inv[0].circuit_code, moraDue, `plazo financiero de ${inv[0].name}`));
   const tiie = pick.rate;
   // La política del documento decide si esta FI lleva comisión y si lleva
   // FEGA (los porcentajes siguen siendo los de Ajustes). Sin los dos
@@ -3021,7 +3070,7 @@ export async function issueMoraInvoice(
   // los parámetros, este número sigue siendo explicable tal como se emitió.
   const calc = [
     formula,
-    `${rateLabel(pick)} vigente al ${moraDue} + spread ${(pol.collectionSpread * 100).toFixed(2)}%`,
+    `${rateLabel(pick, "cobro")} vigente al ${moraDue} + spread ${(pol.collectionSpread * 100).toFixed(2)}%`,
     `capital (cargo original) ${Number(inv[0].amount).toFixed(2)} · ${bill.daysOverdue} d vencidos`,
     `interés nuevo ${bill.interestNew.toFixed(2)} (ya facturado antes: ${Number(inv[0].interest_invoiced).toFixed(2)})`,
     `comisión + FEGA ${bill.fegaNew.toFixed(2)} (tasa ${pctRate(tasas.fegaRate)}${inv[0].fega_charged ? ", ya cobrado antes" : ""})`,

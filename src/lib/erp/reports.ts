@@ -11,7 +11,8 @@ import { mergeDealPnl } from "@/lib/erp/parciales";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
-import { circuitTerms, financingCircuit } from "@/lib/erp/circuits";
+import { circuitTerms, financingCircuit, fundingTableOf, nearestFunding, readCircuits } from "@/lib/erp/circuits";
+import { docRate, usesFundingTable } from "@/lib/erp/doc-rate";
 import { linealMarginFromPrice, type FinancingBase } from "@/lib/erp/pricing";
 import { YEAR_DAYS } from "@/lib/erp/rules";
 
@@ -246,9 +247,24 @@ async function dealPnlCore(
   // renglón de la tabla vigente a la emisión. Sin renglón NO se inventa: si
   // el pedido la necesita (crédito, días excedidos o pronto pago) queda fuera
   // del cálculo, marcado con el motivo.
+  // El circuito del documento se resuelve ANTES que la tasa: decide de qué
+  // tabla sale (Decisión 5, `doc-rate.ts`). Con foto de la factura no hace
+  // falta —ahí ya viene congelada la que se usó—, pero sin foto el respaldo
+  // tiene que ir a la tabla correcta y no a la TIIE por costumbre.
+  const circuitOfDoc = snap.circuit ?? so[0].circuit_code;
+  const baseOfDoc: FinancingBase = snap.financingBase ?? (financingCircuit(circuitOfDoc) === "SANTA_ROSA" ? "costo_margen" : "costo_comision");
   const tiiePick = snap.tiieIssue != null
     ? { rate: snap.tiieIssue, date: snap.tiieDate ?? issueDate }
-    : nearestRate(tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })), issueDate);
+    : docRate({
+        base: baseOfDoc,
+        which: "cobro",
+        tiie: nearestRate(tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) })), issueDate),
+        // Solo se va a la tabla de tasas si al documento le toca. El Panorama
+        // llama a este cálculo hasta 500 veces por carga: una consulta que no
+        // se va a usar, 500 veces, es la clase de cosa que la Decisión 89
+        // acababa de limpiar.
+        funding: usesFundingTable(baseOfDoc) ? nearestFunding(await fundingTableOf(sql, companyId), issueDate) : null,
+      });
   const costSpread = snap.costSpread ?? pol.asrSpread;
   // Los días financiados son los de ESTE pedido (los mismos que se cobraron
   // dentro del precio), no un plazo fijo. Al contado no hay circuito.
@@ -257,8 +273,8 @@ async function dealPnlCore(
   // si no, lo congelado en la cotización; si no, el catálogo del circuito que
   // financia. Solo se resuelve si hace falta (crédito o días excedidos): un
   // pedido de contado no se detiene por un catálogo incompleto.
-  const circuitCode = snap.circuit ?? so[0].circuit_code;
-  const financingBase: FinancingBase = snap.financingBase ?? (financingCircuit(circuitCode) === "SANTA_ROSA" ? "costo_margen" : "costo_comision");
+  const circuitCode = circuitOfDoc;
+  const financingBase: FinancingBase = baseOfDoc;
   let commissionRate = snap.commissionRate ?? (so[0].q_commission != null ? Number(so[0].q_commission) : null);
   if (commissionRate == null && (financialDays > 0 || daysExceededPreview(fv[0], today) > 0)) {
     commissionRate = (await circuitTerms(sql, companyId, circuitCode)).commissionRate;
@@ -503,14 +519,19 @@ async function dealPnlCore(
   const freight = freightQuote + expPedido;
   // Descuento por pronto pago: si la factura se liquidó antes del umbral,
   // se bonifican los días hasta el plazo financiero a la tasa de costo.
-  const bono = fv[0]?.paid_date && tiieIssue != null && !sinTiie
+  // La tasa de COSTO del documento (N1, Decisión 5): en ASR es la TIIE —ese
+  // circuito solo tiene una—, en lineal es la columna de costo congelada, NO
+  // la de cobro, que lleva la protección adentro y estimaría de más. Es la
+  // misma que aplica `applyInvoicePayment` al perdonar de verdad.
+  const bonoRate = usesFundingTable(financingBase) ? costRate : tiieIssue;
+  const bono = fv[0]?.paid_date && bonoRate != null && !sinTiie
     ? earlyPayBonus({
         cargo: Number(fv[0].amount),
         issueDate: fv[0].date,
         payDate: fv[0].paid_date,
         thresholdDays: earlyPayDays,
         financialDays,
-        tiieAtIssue: tiieIssue,
+        tiieAtIssue: bonoRate,
         costSpread,
       })
     : { applies: false, bonus: 0, days: 0, lived: 0, rate: 0 };
@@ -978,6 +999,10 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       select date::text, rate::text from tiie_rates where company_id = ${companyId} order by date
     `;
     const tiieTable = tiieRows.map((r) => ({ date: r.date, rate: Number(r.rate) }));
+    // Cada factura se estima con la tabla de la que salió su precio (Decisión
+    // 5, `doc-rate.ts`): ASR con la TIIE, lineal con la columna de COBRO.
+    const fundingTable = await fundingTableOf(sql, companyId);
+    const baseOf = new Map((await readCircuits(sql, companyId)).map((c) => [c.code as string, c.financingBase as string | null]));
     const open = await sql<{
       amount: string;
       residual: string;
@@ -985,9 +1010,10 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       due_date: string;
       credit_due: string | null;
       inv_class: string;
+      circuit_code: string | null;
     }>`
       select i.amount::text, i.residual::text, coalesce(i.currency,'MXN') as currency, i.due_date::text, i.credit_due::text,
-        coalesce(i.inv_class,'product') as inv_class
+        coalesce(i.inv_class,'product') as inv_class, i.circuit_code
       from invoices i
       join partners p on p.id = i.partner_id
       -- Los AJUSTES POR TC entran (19-sep-2026): son dinero que de verdad va a
@@ -1015,7 +1041,14 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       // estima interés, y tampoco cuenta como «sin TIIE» (no le falta un dato,
       // es que no aplica).
       const esAjuste = inv.inv_class === "fx";
-      const pick = esAjuste ? null : nearestRate(tiieTable, moraDue);
+      const pick = esAjuste
+        ? null
+        : docRate({
+            base: baseOf.get(inv.circuit_code ?? "") ?? null,
+            which: "cobro",
+            tiie: nearestRate(tiieTable, moraDue),
+            funding: nearestFunding(fundingTable, moraDue),
+          });
       if (!pick && !esAjuste) sinTiie += 1;
       const rate = pick ? pick.rate + pol.collectionSpread : 0;
       // El interés corre sobre el CARGO original una vez vencido el plazo; el

@@ -38,8 +38,17 @@ test("editar un pedido deja bitácora con anterior → nuevo, y marca los confir
 test("la FI guarda TIIE, spread, días, capital y FEGA, con autor y desglose", () => {
   const ops = src("src/lib/erp/ops.ts");
   const mora = ops.slice(ops.indexOf("export async function issueMoraInvoice"));
-  assert.ok(mora.includes("${rateLabel(pick)} vigente al ${moraDue}"), "la FI guarda la TIIE usada y de qué renglón de la tabla salió");
-  assert.ok(mora.includes("requireRate("), "sin renglón de TIIE no se emite FI (error claro), no se estima");
+  // 19-sep-2026 (N1): la FI guarda la tasa usada, de qué renglón salió Y de
+  // qué tabla — escribir "TIIE" sobre un número de la tabla de tasas dejaría
+  // una fórmula que quien la lea iría a verificar al lugar equivocado.
+  assert.ok(mora.includes('${rateLabel(pick, "cobro")} vigente al ${moraDue}'), "la FI guarda la tasa usada, su renglón y su tabla");
+  // 19-sep-2026 (N1, Decisión 5): el candado sigue, y ahora además nombra la
+  // tabla correcta. La FI va a la tasa de COBRO del circuito del documento —
+  // TIIE en doble facturación, columna de cobro en lineal — y sin renglón en
+  // LA QUE LE TOCA no se emite: caer a la otra tabla sería cobrarle al cliente
+  // con un número que no es el suyo.
+  assert.ok(mora.includes('pickDocRate(books, inv[0].circuit_code, moraDue, "cobro")'), "la FI usa la tasa de cobro del circuito de la factura");
+  assert.ok(mora.includes("if (!pick) throw new Error(missingDocRateMessage("), "sin renglón en la tabla que le toca no se emite FI (error claro), no se estima");
   assert.ok(mora.includes("spread ${(pol.collectionSpread * 100).toFixed(2)}%"), "la FI guarda el spread");
   assert.ok(mora.includes("d vencidos"), "la FI guarda los días");
   assert.ok(mora.includes("capital (cargo original)"), "la FI guarda el capital base");

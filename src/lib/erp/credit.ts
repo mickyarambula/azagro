@@ -56,8 +56,13 @@ export function requireRate(table: Array<{ date: string; rate: number }>, asOf: 
 }
 
 /** "TIIE 6.9% (tabla, 01/05/26)": la tasa y de qué renglón salió. */
-export function rateLabel(pick: RatePick) {
-  return `TIIE ${pctRate(pick.rate)} (tabla, ${dateDMY(pick.date)})`;
+export function rateLabel(pick: RatePick & { source?: "tiie" | "tasas" }, which: "cobro" | "costo" = "cobro") {
+  // Cómo se llama la tasa depende de la tabla de la que salió (N1, Decisión 5,
+  // `doc-rate.ts`). Escribir "TIIE" sobre un número que vino de la tabla de
+  // tasas deja una fórmula guardada que no se puede seguir: quien la lea iría
+  // a buscar ese número a la tabla equivocada.
+  const nombre = pick.source === "tasas" ? (which === "costo" ? "Tasa de costo" : "Tasa de cobro") : "TIIE";
+  return `${nombre} ${pctRate(pick.rate)} (tabla, ${dateDMY(pick.date)})`;
 }
 
 /** Serie + folio al estilo Compaq (A / 292). FV-0001 → serie FV, folio 0001. */

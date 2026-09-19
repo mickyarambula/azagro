@@ -149,6 +149,9 @@ test("las dos caras de «lo que viene» cuentan igual los ajustes por TC", () =>
   assert.ok(!due.includes("coalesce(i.inv_class,'product') = 'product'"), "ya no se excluye");
   // Pero no se le estima interés: no tiene plazo financiero que correr.
   assert.ok(due.includes('const esAjuste = inv.inv_class === "fx";'), "se distingue");
-  assert.ok(due.includes("const pick = esAjuste ? null : nearestRate(tiieTable, moraDue);"), "sin interés");
+  assert.ok(due.includes("const pick = esAjuste\n        ? null"), "un ajuste por TC no estima interés: no tiene plazo financiero que correr");
+  // 19-sep-2026 (N1): y lo que sí estima, lo estima con la tabla de la que
+  // salió su precio — TIIE en doble facturación, columna de cobro en lineal.
+  assert.ok(due.includes('which: "cobro"'), "la estimación de mora va a tasa de cobro (Decisión 5)");
   assert.ok(due.includes("if (!pick && !esAjuste) sinTiie += 1;"), "y tampoco cuenta como «sin TIIE»: no le falta un dato, es que no aplica");
 });
