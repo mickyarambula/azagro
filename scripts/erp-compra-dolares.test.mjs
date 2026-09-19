@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { exchangeLegs, receiptUnitCostMxn, usdCashAverage, usdCashRealized } from "../src/lib/erp/fx.ts";
+import { exchangeLegs, receiptUnitCostMxn, splitFxCost, usdCashAverage, usdCashRealized } from "../src/lib/erp/fx.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(root, p), "utf8");
@@ -289,4 +289,108 @@ test("«del banco salieron» compara contra el lado PROVEEDOR, no contra la suma
   const r = src("src/routes/reportes.tsx");
   assert.ok(r.includes("money(pnl.paidOut - fx.deuda.proveedor)"), "«Pagado a proveedores» solo suma pagos salientes");
   assert.ok(!r.includes("pnl.paidOut - fx.deuda.total"), "restarle el diferencial de un cobro al cliente inventaba la diferencia");
+});
+
+// ---------------------------------------------------------------------------
+// DECISIÓN 92 — el diferencial entra al Resultado del periodo, pero solo lo
+// ABSORBIDO. Lo que se convirtió en documento de ajuste es cartera.
+// ---------------------------------------------------------------------------
+test("la fórmula del Resultado del periodo lleva el diferencial, y SOLO lo absorbido", () => {
+  const r = src("src/lib/erp/reports.ts");
+  assert.ok(r.includes("const net = operating - expFin + moraIn + fx.absorbido;"), "el término nuevo, y es el absorbido");
+  assert.ok(!r.includes("+ fx.total;"), "nunca el total: lo que quedó en documento de ajuste es cartera");
+  // Sale del MISMO lugar que la pantalla: una sola cuenta del mismo hecho.
+  assert.ok(r.includes("const fx = await fxCostOfPeriod(sql, companyId, from, to);"), "el P&L lo lee de la función compartida");
+  assert.ok(r.includes("fxAbsorbido: fx.absorbido,") && r.includes("fxEnAjuste: fx.enAjuste,"), "y publica las dos partes para que la pantalla cuadre");
+});
+
+test("NÚMEROS: elegir «ajuste» no deja pérdida; elegir «utilidad» sí — los dos lados", () => {
+  // (a) Cliente: FV pactada a 19.00, el cliente deposita $186,000 (TC 18.60).
+  //     El resultado derivado es −4,000 y el ajuste nace en +4,000.
+  const a = splitFxCost({ deuda: -4000, caja: 0, ajustes: [{ kind: "customer", nacidos: 4000, revertidos: 0 }] });
+  assert.equal(a.total, -4000);
+  assert.equal(a.enAjuste, -4000);
+  assert.equal(a.absorbido, 0, "no hubo pérdida: hay $4,000 por cobrar");
+  // (b) Lo mismo con tratamiento «utilidad»: no nace ajuste.
+  const b = splitFxCost({ deuda: -4000, caja: 0, ajustes: [] });
+  assert.equal(b.absorbido, -4000, "aquí sí es pérdida del periodo");
+  // (c) Proveedor: FP pactada a 17.50 pagada a 18.50. El ajuste nace en −1,000.
+  const c = splitFxCost({ deuda: -1000, caja: 0, ajustes: [{ kind: "supplier", nacidos: -1000, revertidos: 0 }] });
+  assert.equal(c.absorbido, 0, "los $1,000 quedan por cobrar al proveedor");
+  // (d) Y con «utilidad».
+  assert.equal(splitFxCost({ deuda: -1000, caja: 0, ajustes: [] }).absorbido, -1000);
+});
+
+test("NÚMEROS: los dos lados y los dos tratamientos en el mismo periodo", () => {
+  const m = splitFxCost({
+    deuda: -10000,
+    caja: 0,
+    ajustes: [
+      { kind: "customer", nacidos: 4000, revertidos: 0 },
+      { kind: "supplier", nacidos: -1000, revertidos: 0 },
+    ],
+  });
+  assert.equal(m.total, -10000);
+  assert.equal(m.enAjuste, -5000, "los dos ajustes, cada uno con su signo");
+  assert.equal(m.absorbido, -5000, "solo los dos de «utilidad»");
+});
+
+test("NÚMEROS: la caja SIEMPRE se absorbe — usar dólares propios nunca abre un documento", () => {
+  const r = splitFxCost({ deuda: -10000, caja: 3000, ajustes: [{ kind: "supplier", nacidos: -1000, revertidos: 0 }] });
+  assert.equal(r.total, -7000);
+  assert.equal(r.enAjuste, -1000);
+  assert.equal(r.absorbido, -6000, "−7,000 menos el ajuste; los +3,000 de caja entran enteros");
+});
+
+test("NÚMEROS: revertir un ajuste NO mueve el mes en que nació — cada mes cierra por su cuenta", () => {
+  // Éste es el hallazgo del revisor de dinero. Septiembre: nace el ajuste.
+  const sep = splitFxCost({ deuda: -4000, caja: 0, ajustes: [{ kind: "customer", nacidos: 4000, revertidos: 0 }] });
+  assert.equal(sep.absorbido, 0);
+  // Octubre: se revierte el cobro. El contra-pago aporta +4,000 y el ajuste
+  // revertido lo compensa. Septiembre, reimpreso, sigue diciendo 0 — porque no
+  // se filtra por el estado de HOY, se cuenta por la fecha de cada hecho.
+  const oct = splitFxCost({ deuda: 4000, caja: 0, ajustes: [{ kind: "customer", nacidos: 0, revertidos: 4000 }] });
+  assert.equal(oct.total, 4000);
+  assert.equal(oct.enAjuste, 4000);
+  assert.equal(oct.absorbido, 0, "un hecho que se deshizo no deja resultado en ningún mes");
+  // Y si nace y se revierte dentro del MISMO periodo, se cancela solo.
+  const mismo = splitFxCost({ deuda: 0, caja: 0, ajustes: [{ kind: "customer", nacidos: 4000, revertidos: 4000 }] });
+  assert.equal(mismo.absorbido, 0);
+  assert.equal(mismo.enAjuste, 0);
+});
+
+test("la consulta cuenta el ajuste por FECHA de nacimiento y de reversa, nunca por su estado de hoy", () => {
+  const q = src("src/lib/erp/fx-cost-query.ts");
+  assert.ok(q.includes("coalesce(sum(amount) filter (where date between ${from} and ${to}), 0)::text as nacidos"), "los que nacieron en el periodo");
+  assert.ok(
+    q.includes("coalesce(sum(amount) filter (where state = 'reversed' and cancelled_at::date between ${from} and ${to}), 0)::text as revertidos"),
+    "y los que se revirtieron en el periodo, que reversal.ts sí fecha",
+  );
+  assert.ok(!q.includes("inv_class = 'fx' and state <> 'reversed'"), "filtrar por estado movía hacia atrás un mes cerrado");
+  assert.ok(q.includes("const { total, enAjuste, absorbido } = splitFxCost({"), "y la aritmética vive en una función pura, con prueba de números");
+});
+
+test("la pantalla dice qué entra al Resultado y qué no", () => {
+  const p = src("src/routes/reportes.tsx");
+  assert.ok(p.includes('label="Diferencial cambiario"'), "tarjeta propia en el P&L, para que el Resultado cuadre con lo de arriba");
+  // La tarjeta se dibuja por lo ABSORBIDO, no solo por el total: un mes con un
+  // ajuste de +4,000 y una pérdida absorbida de −4,000 da total 0, y sin esta
+  // condición el Resultado bajaba 4,000 sin renglón que lo explicara.
+  assert.ok(p.includes("pnl.fxTotal !== 0 || pnl.fxAbsorbido !== 0 ?"), "se dibuja también cuando el total se cancela pero algo se absorbió");
+  // Y el inicio, que enseña la misma utilidad neta, lleva su renglón.
+  assert.ok(src("src/routes/index.tsx").includes('<span className="text-muted">Diferencial cambiario</span>'), "el inicio también cuadra a la vista");
+  assert.ok(p.includes("money(pnl.fxAbsorbido)"), "la tarjeta enseña lo absorbido, que es lo que entró");
+  assert.ok(p.includes("eso es cartera"), "y el bloque explica por qué lo otro no entra");
+  assert.ok(p.includes("NO entra al «Resultado» de arriba"), "con esas palabras");
+});
+
+test("una nota de crédito resta del importe pero NO se cuenta como una venta más", () => {
+  const r = src("src/lib/erp/reports.ts");
+  assert.ok(r.includes("count(*) filter (where name not like 'NC-%')::int as n"), "el conteo deja fuera las notas de crédito");
+  assert.ok(r.includes("coalesce(sum(amount),0)::text as amount"), "el importe sigue sumando todo: la NC resta, que es lo correcto");
+  // Excluir por el prefijo de la NC y no incluir por el de la FV: las facturas
+  // del corte Compaq traen su propio folio y filtrar por FV las habría dejado
+  // de contar sin que nadie lo pidiera.
+  assert.ok(!r.includes("filter (where name like 'FV-%')"), "nunca por FV: el corte no usa ese prefijo");
+  assert.ok(src("src/lib/erp/cutover-core.ts").includes("${o.companyId}, ${r.kind}, ${r.folio}, ${partner[0].id}"), "el corte inserta el folio de Compaq tal cual");
 });

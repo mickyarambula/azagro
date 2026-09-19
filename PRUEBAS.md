@@ -568,6 +568,15 @@ sesiones.
 12. **Revertir un cobro en dólares.** Revertir no es usar: el reporte no debe registrar ninguna ganancia por una reversa, y el promedio de la cuenta tiene que quedar como si el cobro nunca hubiera entrado.
 13. **Mover dólares entre dos cuentas en dólares.** Son los mismos dólares cambiados de lugar: la diferencia tiene que ser **cero**. Si ves una ganancia ahí, avísame.
 
+### Parte E — Que el «Resultado» del periodo cuadre
+
+14. Arriba, en las tarjetas del P&L, debe aparecer una tarjeta **"Diferencial cambiario"**. Con el ejemplo de arriba dice **−$7,000.00**, y debajo, si algo quedó como ajuste, cuánto.
+15. **Comprueba la suma a mano:** Ventas − Compras − Flete − Gastos operativos − Gastos financieros + Mora + Diferencial cambiario tiene que dar exactamente el **"Resultado"**. Si no cuadra, avísame: significa que algo entra al resultado sin tarjeta que lo explique, y ése es justo el error que estábamos corrigiendo.
+16. **El caso del ajuste.** Paga una factura en dólares con pesos a otro tipo de cambio y esta vez elige **"Ajustar al pactado"** en vez de dejarlo como utilidad. Vuelve a Reportes: el bloque "Lo que costó el dólar" **sí** lo cuenta en su total, pero la tarjeta "Diferencial cambiario" y el "Resultado" **no** — y el texto lo dice: eso es cartera, todavía lo puedes cobrar, no es una pérdida. Es la misma regla que ya usabas en tu Excel.
+17. **El conteo de facturas.** Registra una devolución. En "Ventas facturadas", el importe tiene que **bajar** (correcto: devolviste mercancía), pero el conteo de abajo, "N facturas producto", **no debe subir**: una nota de crédito no es una venta más. Antes sí subía.
+18. **Que un mes cerrado no cambie.** Apunta el "Resultado" del mes en curso. Ahora revierte el pago del paso 16 (en "Bancos", el botón "Revertir" del movimiento). Vuelve a Reportes con **el mismo rango de fechas**: el Resultado tiene que ser **el mismo de antes**. Un mes ya cerrado no se mueve porque después deshagas algo — la reversa cuenta en el mes en que la haces, no hacia atrás. Si el número cambió, avísame: es el error más grave que puede tener este reporte.
+19. **El inicio también cuadra.** Ve al inicio. En el bloque del mes debe aparecer un renglón "Diferencial cambiario" junto a "Utilidad neta", con el mismo número que la tarjeta de Reportes.
+
 **Quién lo puede ver:** el bloque vive en Reportes, que pide permiso de cartera y de ver márgenes — administrador, gerencia y administración. No es un número por vendedor: es de toda la empresa.
 
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)

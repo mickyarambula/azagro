@@ -382,6 +382,14 @@ function InicioBody() {
                   <span className="text-muted">Ventas ({pnl.salesN})</span>
                   <span className="tabular-nums">{money(pnl.revenue)}</span>
                 </li>
+                {/* Decisión 92: la utilidad neta lleva el diferencial cambiario
+                    absorbido. Si no se enseña, la lista no cuadra a la vista. */}
+                {pnl.fxAbsorbido !== 0 ? (
+                  <li className="flex justify-between">
+                    <span className="text-muted">Diferencial cambiario</span>
+                    <span className="tabular-nums">{money(pnl.fxAbsorbido)}</span>
+                  </li>
+                ) : null}
                 <li className="flex justify-between">
                   <span className="text-muted">Utilidad neta</span>
                   <span className="tabular-nums">{money(pnl.net)}</span>

@@ -35,7 +35,7 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { activeMember, assertCan, canSeeMargins } from "@/lib/erp/acl";
-import { usdCashRealized } from "@/lib/erp/fx";
+import { splitFxCost, usdCashRealized } from "@/lib/erp/fx";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -45,19 +45,11 @@ async function cid(sql: Sql, userId: string) {
   return rows[0].company_id;
 }
 
-export const getFxCost = createServerFn({ method: "POST" })
-  .middleware([authMiddleware])
-  .validator(z.object({ from: z.string(), to: z.string() }))
-  .handler(async ({ context, data }) => {
-    const sql = await getSql();
-    // Los mismos dos candados que el P&L por periodo: es un total de empresa,
-    // no tiene «mi parte», y enseña resultado.
-    await assertCan(sql, context.userId, "credit", "view");
-    const me = await activeMember(sql, context.userId);
-    if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
-    const companyId = await cid(sql, context.userId);
-    const from = data.from.slice(0, 10);
-    const to = data.to.slice(0, 10);
+/**
+ * El cálculo, aparte de la puerta, para que el P&L del periodo lea EXACTAMENTE
+ * el mismo número que la pantalla enseña — nunca dos cuentas del mismo hecho.
+ */
+export async function fxCostOfPeriod(sql: Sql, companyId: number, from: string, to: string) {
 
     // -----------------------------------------------------------------------
     // MITAD 1 — sobre la DEUDA: factura en dólares, cuenta en PESOS.
@@ -177,6 +169,39 @@ export const getFxCost = createServerFn({ method: "POST" })
     cajaFilas.sort((a, b) => (a.fecha === b.fecha ? a.cuenta.localeCompare(b.cuenta) : a.fecha.localeCompare(b.fecha)));
     const cajaTotal = Math.round(cajaFilas.reduce((s, r) => s + r.result, 0) * 100) / 100;
 
+    // -----------------------------------------------------------------------
+    // LO QUE SE ABSORBIÓ, que es lo único que es RESULTADO (Decisión 92).
+    //
+    // Al pagar se elige entre dejar la diferencia como utilidad/pérdida o
+    // convertirla en un documento de ajuste (ATC). Lo segundo NO es pérdida:
+    // es una cuenta por cobrar o por pagar todavía viva — cartera. Es la regla
+    // que el Excel del dueño ya fijaba del lado cliente («lo que se convirtió
+    // en documento ATC es cartera, no utilidad», `reports.ts` en dealPnlCore),
+    // y aquí se aplica igual del lado proveedor.
+    //
+    // El ATC nace con `amount = −fxDiff`, mientras que el resultado derivado
+    // lleva el signo de `fxResultDeltaFor` — que solo invierte del lado
+    // proveedor. De ahí el `kind` en la resta: no es un ajuste, es la misma
+    // cantidad vista desde los dos lados.
+    // El ajuste cuenta el día que NACE y se descuenta el día que se REVIERTE
+    // (`cancelled_at`, que `reversal.ts` sí escribe), nunca por su estado de
+    // hoy: filtrar por estado movería hacia atrás el Resultado de un mes ya
+    // cerrado. El porqué completo está en `splitFxCost`.
+    const atcs = await sql<{ kind: string; nacidos: string; revertidos: string }>`
+      select kind,
+        coalesce(sum(amount) filter (where date between ${from} and ${to}), 0)::text as nacidos,
+        coalesce(sum(amount) filter (where state = 'reversed' and cancelled_at::date between ${from} and ${to}), 0)::text as revertidos
+      from invoices
+      where company_id = ${companyId} and inv_class = 'fx'
+      group by kind
+    `;
+    // La caja siempre se absorbe: usar dólares propios nunca abre un documento.
+    const { total, enAjuste, absorbido } = splitFxCost({
+      deuda: deudaTotal,
+      caja: cajaTotal,
+      ajustes: atcs.map((a) => ({ kind: a.kind, nacidos: Number(a.nacidos), revertidos: Number(a.revertidos) })),
+    });
+
     return {
       from,
       to,
@@ -188,6 +213,24 @@ export const getFxCost = createServerFn({ method: "POST" })
         sinCosto: Math.round(cajaNoMedido.filter((n) => n.motivo === "sin-costo").reduce((s, n) => s + n.usd, 0) * 100) / 100,
         sinTc: Math.round(cajaNoMedido.filter((n) => n.motivo === "sin-tc").reduce((s, n) => s + n.usd, 0) * 100) / 100,
       },
-      total: Math.round((deudaTotal + cajaTotal) * 100) / 100,
+      total,
+      /** Lo que de verdad se absorbió: lo único que entra al Resultado. */
+      absorbido,
+      /** Lo que se convirtió en documento de ajuste: cartera, todavía recuperable. */
+      enAjuste,
     };
+}
+
+export const getFxCost = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ from: z.string(), to: z.string() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    // Los mismos dos candados que el P&L por periodo: es un total de empresa,
+    // no tiene «mi parte», y enseña resultado.
+    await assertCan(sql, context.userId, "credit", "view");
+    const me = await activeMember(sql, context.userId);
+    if (!canSeeMargins(me.role)) throw new Error("Sin permiso para ver márgenes");
+    const companyId = await cid(sql, context.userId);
+    return await fxCostOfPeriod(sql, companyId, data.from.slice(0, 10), data.to.slice(0, 10));
   });

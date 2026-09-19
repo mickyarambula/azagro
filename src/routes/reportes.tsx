@@ -80,6 +80,17 @@ function Page() {
           <Kpi label="Gastos operativos" value={money(pnl.operativo)} />
           <Kpi label="Gastos financieros" value={money(pnl.financiero)} />
           <Kpi label="Mora facturada" value={money(pnl.mora)} />
+          {/* Decisión 92: el movimiento del dólar es resultado del periodo.
+              Entra solo lo absorbido; lo que se volvió documento de ajuste es
+              cartera. La tarjeta aparece siempre que haya algo que decir, para
+              que «Resultado» cuadre con lo que está encima. */}
+          {pnl.fxTotal !== 0 || pnl.fxAbsorbido !== 0 ? (
+            <Kpi
+              label="Diferencial cambiario"
+              value={money(pnl.fxAbsorbido)}
+              hint={pnl.fxEnAjuste !== 0 ? `${money(pnl.fxEnAjuste)} quedó en documento de ajuste: cartera, no pérdida` : "lo que costó el dólar, abajo"}
+            />
+          ) : null}
           <Kpi label="Resultado" value={money(pnl.net)} />
         </div>
       )}
@@ -97,15 +108,25 @@ function Page() {
       )}
 
       {/* DECISIÓN 91 — cuánto costó el dólar en el periodo, en sus DOS mitades.
-          Fuera del «Resultado» de arriba a propósito: mientras no se decida si
-          el ajuste por TC entra a la utilidad, meterlo ahí contestaría esa
-          pregunta por omisión. */}
+          Desde la Decisión 92 la parte ABSORBIDA sí entra al «Resultado» de
+          arriba, con su tarjeta; lo que quedó en documento de ajuste no, porque
+          es cartera. Este bloque enseña el detalle de las dos mitades y dice
+          cuánto de todo eso entró. */}
       {fx && (
         <div className="mb-5 erp-card p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <p className="text-sm font-semibold">Lo que costó el dólar</p>
             <p className={`text-lg font-semibold tabular-nums ${fx.total < 0 ? "text-danger" : fx.total > 0 ? "text-ok" : ""}`}>{money(fx.total)}</p>
           </div>
+          {fx.enAjuste !== 0 ? (
+            <p className="mt-1 text-[12px] text-muted">
+              De esto, <span className="font-semibold text-ink tabular-nums">{money(fx.enAjuste)}</span> se convirtió en documento de ajuste al pagar: eso es cartera
+              —todavía se puede cobrar o se va a pagar—, no pérdida, y por eso NO entra al «Resultado» de arriba. Lo que sí entra son{" "}
+              <span className="font-semibold text-ink tabular-nums">{money(fx.absorbido)}</span>.
+            </p>
+          ) : (
+            <p className="mt-1 text-[12px] text-muted">Entra completo al «Resultado» de arriba: nada de esto quedó como documento de ajuste por cobrar o por pagar.</p>
+          )}
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div className="rounded-md border border-line px-3 py-2">
               <p className="text-[12px] font-medium">Al pagar en pesos lo que se debía en dólares</p>

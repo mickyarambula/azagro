@@ -272,6 +272,44 @@ export type UsdCashUnmeasured = {
 };
 
 /**
+ * EL CORTE ENTRE LO ABSORBIDO Y LO QUE QUEDÓ EN CARTERA (Decisión 92), puro.
+ *
+ * Al pagar se elige entre dejar la diferencia como utilidad/pérdida o
+ * convertirla en un ajuste por TC. Lo segundo **no es pérdida**: es una cuenta
+ * viva, por cobrar o por pagar. Solo lo absorbido entra al resultado.
+ *
+ * El ajuste nace con `amount = −fxDiff`, mientras que el resultado derivado
+ * lleva el signo de `fxResultDeltaFor`, que solo invierte del lado proveedor:
+ * de ahí el `kind`. No es un ajuste de signo, es el mismo número visto desde
+ * los dos lados.
+ *
+ * **Por qué `nacidos − revertidos` y no «los que siguen vivos»:** filtrar por
+ * estado movería un mes ya cerrado. Si un ajuste de septiembre se revierte en
+ * octubre, septiembre dejaría de contarlo —y su Resultado cambiaría hacia
+ * atrás—, mientras el contra-pago cae en octubre sin nada que lo compense. Los
+ * dos meses se moverían por un hecho que en neto no fue ni ganancia ni
+ * pérdida. Contando el ajuste el día que NACE y descontándolo el día que se
+ * REVIERTE, cada mes cierra en cero por su cuenta, igual que se autocancela el
+ * par de pagos. Lo atrapó el revisor de dinero con $4,000 de ejemplo.
+ */
+export function splitFxCost(i: {
+  /** Total de la mitad «deuda»: pagar en pesos lo que se debía en dólares. */
+  deuda: number;
+  /** Total de la mitad «caja»: usar dólares que ya se tenían. Siempre se absorbe. */
+  caja: number;
+  ajustes: Array<{ kind: string; nacidos: number; revertidos: number }>;
+}) {
+  const total = r2(i.deuda + i.caja);
+  const enAjuste = r2(
+    i.ajustes.reduce((s, a) => {
+      const neto = Number(a.nacidos) - Number(a.revertidos);
+      return s + (a.kind === "customer" ? -neto : neto);
+    }, 0),
+  );
+  return { total, enAjuste, absorbido: r2(total - enAjuste) };
+}
+
+/**
  * EL RECORRIDO, uno solo (Decisión 91). De aquí salen las dos preguntas que se
  * le hacen a la caja en dólares —cuánto vale hoy y cuánto se ganó o se perdió
  * al usarla— para que nunca haya dos promedios distintos.

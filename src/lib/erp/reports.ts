@@ -6,6 +6,7 @@ import { getSql } from "@/lib/db";
 import { activeMember, assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { purchaseFxOfDeal } from "@/lib/erp/deal-supplier";
+import { fxCostOfPeriod } from "@/lib/erp/fx-cost-query";
 import { mergeDealPnl } from "@/lib/erp/parciales";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy } from "@/lib/erp/ops";
@@ -709,7 +710,15 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
     const to = data.to.slice(0, 10);
 
     const sales = await sql<{ n: number; amount: string }>`
-      select count(*)::int as n, coalesce(sum(amount),0)::text as amount
+      -- El importe suma TODO lo del lado cliente (una nota de crédito resta,
+      -- que es lo correcto), pero el CONTEO es de facturas: una NC no es una
+      -- venta más. Antes «3 facturas producto» podían ser dos ventas y una
+      -- devolución (19-sep-2026).
+      --
+      -- Se excluye por el prefijo de la NC, no se incluye por el de la FV: las
+      -- facturas del corte Compaq traen SU folio de Compaq, no uno FV-, y
+      -- filtrar por FV las habria dejado de contar sin que nadie lo pidiera.
+      select count(*) filter (where name not like 'NC-%')::int as n, coalesce(sum(amount),0)::text as amount
       from invoices
       where company_id = ${companyId} and kind = 'customer' and coalesce(inv_class,'product') = 'product'
         and state <> 'reversed' and reverses_id is null
@@ -761,9 +770,15 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
     const revenue = Number(sales[0]?.amount ?? 0);
     const cogs = Number(purchases[0]?.amount ?? 0);
     const moraIn = Number(mora[0]?.amount ?? 0);
+    // DECISIÓN 92 — el movimiento del dólar es resultado del periodo, y faltaba.
+    // Entra solo lo ABSORBIDO: lo que se convirtió en documento de ajuste sigue
+    // siendo cartera, no pérdida (la regla del Excel, la misma que aplica
+    // `dealPnlCore` del lado cliente). Sale del MISMO lugar que la pantalla:
+    // nunca dos cuentas del mismo hecho.
+    const fx = await fxCostOfPeriod(sql, companyId, from, to);
     const gross = revenue - cogs - expPedido;
     const operating = gross - expOp;
-    const net = operating - expFin + moraIn;
+    const net = operating - expFin + moraIn + fx.absorbido;
     return {
       from,
       to,
@@ -774,6 +789,9 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
       operativo: expOp,
       financiero: expFin,
       mora: moraIn,
+      fxAbsorbido: fx.absorbido,
+      fxEnAjuste: fx.enAjuste,
+      fxTotal: fx.total,
       gross,
       operating,
       net,
