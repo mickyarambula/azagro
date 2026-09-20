@@ -325,7 +325,13 @@ export const getDashboard = createServerFn({ method: "GET" })
         coalesce(sum(case when i.due_date < ${today}::date then i.residual else 0 end),0)::text as overdue
       from invoices i
       join partners p on p.id = i.partner_id
-      where i.company_id = ${cid} and i.kind = 'customer' and i.state = 'open'
+      -- SOLO LO QUE EL CLIENTE DEBE (19-sep-2026). Una nota de crédito nace
+      -- con importe NEGATIVO y queda open mientras su crédito no se aplique,
+      -- así que entraba aquí y restaba de lo que el cliente debe sin que nadie
+      -- lo hubiera decidido — y en el conteo de vencidas se contaba como UNA
+      -- FACTURA VENCIDA MÁS. Lo que el cliente tiene a su favor se enseña
+      -- aparte (aFavor del estado de cuenta), no escondido dentro del saldo.
+      where i.company_id = ${cid} and i.kind = 'customer' and i.state = 'open' and i.amount > 0
         and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;
     const ap = await sql<{ total: string }>`
@@ -376,7 +382,10 @@ export const getDashboard = createServerFn({ method: "GET" })
             else '61+'
           end as bucket
         from invoices
-        where company_id = ${cid} and kind = 'customer' and state = 'open'
+        -- Sin las notas de crédito, por lo mismo de arriba: una NC caía en
+        -- «Por vencer» el día que nacía y migraba a «1-30», «31-60» y «61+»
+        -- como un importe negativo dentro de la antigüedad de la cartera.
+        where company_id = ${cid} and kind = 'customer' and state = 'open' and amount > 0
       ) x
       group by bucket
     `;
@@ -417,7 +426,7 @@ export const getDashboard = createServerFn({ method: "GET" })
           where so.company_id = ${cid} and so.state not in ('done','cancelled')
             and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)) as so,
         (select count(*)::int from invoices i join partners p on p.id = i.partner_id
-          where i.company_id = ${cid} and i.kind = 'customer' and i.state = 'open' and i.due_date < ${today}::date
+          where i.company_id = ${cid} and i.kind = 'customer' and i.state = 'open' and i.amount > 0 and i.due_date < ${today}::date
             and (${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)) as overdue_n
     `;
     // Cada cuenta lleva SU moneda (A.1b/A.1c): la caja se suma por moneda, nunca pesos con dólares en un número.
@@ -438,6 +447,9 @@ export const getDashboard = createServerFn({ method: "GET" })
         coalesce(sum(case when i.kind = 'supplier' then i.residual / i.fx_agreed else 0 end), 0)::text as ap_usd
       from invoices i
       join partners p on p.id = i.partner_id
+      -- Una NC en dólares sí baja la exposición (es saldo a favor del cliente
+      -- en esa moneda), así que aquí NO se filtra el signo: lo que se filtra es
+      -- lo mismo de siempre, que haya TC usable.
       where i.company_id = ${cid} and i.state = 'open' and coalesce(i.currency,'MXN') = 'USD' and i.fx_agreed > 1
         and (i.kind = 'supplier' or ${me.own_only} = false or p.seller_id = ${context.userId} or p.seller_id is null)
     `;

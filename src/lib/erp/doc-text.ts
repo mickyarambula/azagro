@@ -74,6 +74,21 @@ export function expedienteFor(line: string | null | undefined, audience: DocAudi
 // ---------------------------------------------------------------------------
 
 /** Notas al pie del estado de cuenta: solo lo que el cliente necesita para comprobar la cuenta. */
+/**
+ * El saldo a favor del cliente, para el PAPEL que se le manda (L5,
+ * 19-sep-2026). Hasta hoy vivía solo en pantalla y en el correo: el PDF le
+ * cobraba de más a quien había pagado de más, y él sí sabe lo que depositó.
+ *
+ * Dice lo que el cliente necesita para comprobar su cuenta y nada de cómo
+ * funciona el sistema por dentro (regla 7).
+ */
+export function statementCreditNote(aFavor: string, neto: string) {
+  return [
+    `Saldo a su favor: ${aFavor}. Son pagos suyos que ya recibimos y que todavía no se han aplicado a una factura.`,
+    `Saldo neto a cargo: ${neto}.`,
+  ].join("\n");
+}
+
 export function statementNotes(rates: { annual: string; commission: string; fega: string; total: string }) {
   return [
     "Vence es la fecha de pago convenida. Interés desde es el día a partir del cual corre el interés; los días vencidos se cuentan desde esa fecha.",

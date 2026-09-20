@@ -302,6 +302,22 @@ export const sendPaymentReminder = createServerFn({ method: "POST" })
       where i.id = ${data.invoiceId} and i.company_id = ${companyId}
     `;
     if (!inv[0]) throw new Error("Factura no encontrada");
+    // NO SE LE MANDA RECORDATORIO DE PAGO A UNA NOTA DE CRÉDITO (19-sep-2026).
+    // Una NC nace con importe NEGATIVO y, mientras su crédito no se aplique,
+    // queda `open` — así que caía aquí y salía un correo al cliente con asunto
+    // «Recordatorio de pago NC-000N», cuerpo «Importe −$X · Saldo −$X» y el
+    // cierre «Agradecemos su pronto pago», firmado con la razón social. A dos
+    // clics desde Cartera. Se le pedía al cliente que pagara un documento que
+    // dice que ALGO SE LE DEBE A ÉL.
+    //
+    // Lo mismo vale para una factura de interés sin saldo o un ajuste por TC a
+    // favor: el recordatorio es para cobrar lo que el cliente debe, y si no
+    // debe nada no hay nada que recordarle.
+    if (Number(inv[0].amount) <= 0 || Number(inv[0].residual) <= 0.009) {
+      throw new Error(
+        `${inv[0].name} no es un documento por cobrar (importe ${Number(inv[0].amount).toFixed(2)}, saldo ${Number(inv[0].residual).toFixed(2)}): no se le manda recordatorio de pago. Una nota de crédito dice lo que se le debe AL cliente, no lo que él debe.`,
+      );
+    }
     const shown = invoiceShown({ amount: inv[0].amount, residual: inv[0].residual, currency: inv[0].currency, amountFx: inv[0].amount_fx, fxAgreed: inv[0].fx_agreed });
     const clock = exactClock(inv[0].due_date);
     const subject =

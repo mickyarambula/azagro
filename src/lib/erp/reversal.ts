@@ -353,7 +353,7 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
   const residualAfter = rev.residualAfter;
   const debt = await sql<{ total: string }>`
     select coalesce(sum(residual),0)::text as total from invoices
-    where company_id = ${companyId} and partner_id = ${p.partner_id} and kind = ${i.kind} and state = 'open'
+    where company_id = ${companyId} and partner_id = ${p.partner_id} and kind = ${i.kind} and state = 'open' and amount > 0
   `;
   const debtBefore = Number(debt[0]?.total ?? 0);
   const debtAfter = r2(debtBefore + (residualAfter - residualNow) - (atc ? atc.amount : 0));

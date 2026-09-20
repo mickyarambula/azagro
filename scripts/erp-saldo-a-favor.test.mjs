@@ -242,8 +242,11 @@ test("el estado de cuenta del cliente enseña su saldo a favor — en pantalla Y
   const st = src("src/routes/statements.tsx");
   assert.ok(ops.includes("const aFavor = Math.round(Number(favorRows[0]?.total ?? 0) * 100) / 100;"), "el servidor lo calcula");
   assert.ok(ops.includes("and pm.date <= ${asOf}"), "a la fecha del corte, como todo lo demás");
-  assert.ok(st.includes("Saldo a su favor: ${money(block.aFavor)}"), "sale en el papel que se le manda");
-  assert.ok(st.includes("`Saldo neto: ${money(block.arNeto)}`"), "con el neto");
+  // En el PDF Y en el correo, y el texto vive en doc-text.ts (regla 7): hasta
+  // el 19-sep solo estaba en pantalla, así que el papel le cobraba de más a
+  // quien había pagado de más — y él sí sabe lo que depositó.
+  assert.equal((st.match(/statementCreditNote\(money\(block\.aFavor\), money\(block\.arNeto\)\)/g) ?? []).length, 2, "en el papel y en el correo");
+  assert.ok(src("src/lib/erp/doc-text.ts").includes("Saldo neto a cargo:"), "con el neto, desde doc-text");
   // Callarlo le cobraría de más, y el cliente sí sabe lo que depositó.
   assert.ok(st.includes("Callarlo le cobraría de más"), "y queda dicho por qué");
 });
@@ -366,4 +369,52 @@ test("la bonificación se calcula DESPUÉS de escribir el abono, en las dos puer
   assert.ok(moraCredito > 0 && moraCredito < abonoCredito, "la mora ANTES del abono");
   const moraCobro = cobro.indexOf("mora = await issueMoraInvoice(sql, opts.companyId, inv[0].id, {");
   assert.ok(moraCobro > 0 && moraCobro < abonoCobro, "igual en el cobro");
+});
+
+// ---------------------------------------------------------------------------
+// 12. Lo que encontró el crítico de completitud (pasada de L3c, 19-sep-2026):
+//     cosas ya rotas HOY, algunas del propio bloque L5.
+// ---------------------------------------------------------------------------
+test("no se le manda RECORDATORIO DE PAGO a una nota de crédito", () => {
+  const a = src("src/lib/erp/alerts.ts");
+  // Una NC nace con importe negativo y queda `open` mientras su crédito no se
+  // aplique, así que caía en el recordatorio: al cliente le llegaba un correo
+  // «Recordatorio de pago NC-000N · Importe −$X · Agradecemos su pronto pago».
+  // A dos clics desde Cartera. Se le pedía pagar un documento que dice que
+  // algo se le debe A ÉL.
+  assert.ok(a.includes("if (Number(inv[0].amount) <= 0 || Number(inv[0].residual) <= 0.009) {"), "se detiene antes de mandar");
+  assert.ok(a.includes("no se le manda recordatorio de pago"), "y dice por qué");
+  const i = a.indexOf("if (Number(inv[0].amount) <= 0");
+  const j = a.indexOf("sendMail");
+  assert.ok(i > 0 && (j < 0 || i < j), "el candado va ANTES de mandar el correo");
+});
+
+test("el inicio no cuenta una nota de crédito como deuda ni como factura vencida", () => {
+  const az = src("src/lib/azagro.ts");
+  const dash = az.slice(az.indexOf("export const getDashboard"), az.indexOf("export const listPartners"));
+  // Cuatro lectores: por cobrar/vencido, la escalera de antigüedad, el conteo
+  // de vencidas y la exposición en dólares.
+  assert.ok(dash.includes("and i.kind = 'customer' and i.state = 'open' and i.amount > 0\n"), "por cobrar y vencido");
+  assert.ok(dash.includes("where company_id = ${cid} and kind = 'customer' and state = 'open' and amount > 0"), "la escalera de antigüedad");
+  assert.ok(dash.includes("and i.state = 'open' and i.amount > 0 and i.due_date < ${today}::date"), "el conteo de vencidas");
+  // La de dólares SÍ la cuenta: una NC en dólares es saldo a favor del cliente
+  // en esa moneda y baja la exposición de verdad.
+  assert.ok(dash.includes("coalesce(i.currency,'MXN') = 'USD' and i.fx_agreed > 1"), "la exposición USD no filtra el signo, a propósito");
+});
+
+test("las tres pantallas de reversa no cuentan una NC como deuda del socio", () => {
+  for (const f of ["src/lib/erp/return-reversal.ts", "src/lib/erp/reversal.ts", "src/lib/erp/delivery-reversal.ts"]) {
+    const t = src(f);
+    const total = (t.match(/state = 'open'/g) ?? []).length;
+    const conFiltro = (t.match(/state = 'open' and amount > 0/g) ?? []).length;
+    assert.ok(conFiltro > 0, `${f}: la deuda del socio filtra el signo`);
+    assert.ok(conFiltro <= total);
+  }
+});
+
+test("la bitácora nombra los verbos del saldo a favor en vez de enseñar el slug", () => {
+  const b = src("src/routes/bitacora.tsx");
+  for (const a of ["saldo-a-favor", "aplicar-saldo-a-favor", "quitar-saldo-a-favor"]) {
+    assert.ok(b.includes(`"${a}":`), `falta la etiqueta de ${a}`);
+  }
 });

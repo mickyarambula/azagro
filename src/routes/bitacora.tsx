@@ -12,6 +12,13 @@ const ACTION: Record<string, string> = {
   devolver: "Devolución",
   cobro: "Cobro",
   pago: "Pago",
+  // Saldo a favor del socio (L5, 19-sep-2026). Sin estas tres, la bitácora
+  // enseñaba el slug crudo: quien la lee para entender qué pasó con un
+  // cobro veía "saldo-a-favor" en vez de una frase.
+  "saldo-a-favor": "Sobrante a favor",
+  "aplicar-saldo-a-favor": "Aplicó saldo a favor",
+  "quitar-saldo-a-favor": "Quitó saldo a favor",
+  "revertir-saldo-a-favor": "Revirtió saldo a favor",
   traslado: "Traslado",
   ajuste: "Ajuste de stock",
   archivo: "Archivo",

@@ -241,7 +241,7 @@ async function chainForDelivery(sql: Sql, companyId: number, soId: number, role:
 
   const debt = await sql<{ total: string }>`
     select coalesce(sum(residual),0)::text as total from invoices
-    where company_id = ${companyId} and partner_id = ${s.partner_id} and kind = 'customer' and state = 'open'
+    where company_id = ${companyId} and partner_id = ${s.partner_id} and kind = 'customer' and state = 'open' and amount > 0
   `;
   const before = Number(debt[0]?.total ?? 0);
   preview.partnerDebt = { name: s.partner, before, after: r2(before - fv.residual - fis.reduce((a, d) => a + d.residual, 0) - atcs.reduce((a, d) => a + d.residual, 0)) };
@@ -523,7 +523,7 @@ async function chainForDeliveryEvent(sql: Sql, companyId: number, soId: number, 
 
   const debt = await sql<{ total: string }>`
     select coalesce(sum(residual),0)::text as total from invoices
-    where company_id = ${companyId} and partner_id = ${s.partner_id} and kind = 'customer' and state = 'open'
+    where company_id = ${companyId} and partner_id = ${s.partner_id} and kind = 'customer' and state = 'open' and amount > 0
   `;
   const before = Number(debt[0]?.total ?? 0);
   preview.partnerDebt = { name: s.partner, before, after: r2(before - (fv?.residual ?? 0) - fis.reduce((a, d) => a + d.residual, 0) - atcs.reduce((a, d) => a + d.residual, 0)) };

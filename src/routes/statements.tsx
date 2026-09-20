@@ -8,7 +8,7 @@ import { SendButton } from "@/components/send-doc";
 import { getLiveStatement, saveDocument } from "@/lib/erp/ops";
 import { pctRate } from "@/lib/erp/credit";
 import { statementByProduct, statementOutsideDocs } from "@/lib/erp/statement-products";
-import { CONSOLIDADO_NOTE, STATEMENT_PAPER_HEADERS, statementNotes, statementPaperHeaders, statementPaperRow, statementPaperTotals, statementSendHeader, statementSendLine } from "@/lib/erp/doc-text";
+import { CONSOLIDADO_NOTE, STATEMENT_PAPER_HEADERS, statementCreditNote, statementNotes, statementPaperHeaders, statementPaperRow, statementPaperTotals, statementSendHeader, statementSendLine } from "@/lib/erp/doc-text";
 import { logoSrc, printHtml, statementSheet } from "@/lib/print-doc";
 import { listPartners } from "@/lib/azagro";
 import { dateDMY, money, moneyIn, todayMx } from "@/lib/utils";
@@ -163,8 +163,12 @@ function printStatement(block: Block, asOf: string, legal: string, st: Live | nu
       rates: ratesOf(st),
       sections,
       // Texto que sale de la empresa: solo lo que el cliente necesita para
-      // comprobar la cuenta (src/lib/erp/doc-text.ts).
-      notes: statementNotes(ratesOf(st)),
+      // comprobar la cuenta (src/lib/erp/doc-text.ts). El saldo a favor va
+      // ARRIBA de todo: callarlo en el papel le cobra de más a quien ya pagó.
+      notes: [
+        ...(block.aFavor > 0.009 ? [statementCreditNote(money(block.aFavor), money(block.arNeto))] : []),
+        statementNotes(ratesOf(st)),
+      ].join("\n"),
     }),
     {
       module: "statements",
@@ -301,9 +305,7 @@ function Page() {
       // El saldo a favor sale en el papel: es dinero del cliente que ya entró y
       // todavía no se aplica a ninguna factura. Callarlo le cobraría de más, y
       // él sí sabe lo que depositó (L5, Decisión 12).
-      ...(block.aFavor > 0.009
-        ? [`Saldo a su favor: ${money(block.aFavor)} (pagos recibidos sin aplicar todavía a una factura)`, `Saldo neto: ${money(block.arNeto)}`]
-        : []),
+      ...(block.aFavor > 0.009 ? [statementCreditNote(money(block.aFavor), money(block.arNeto))] : []),
       ``,
       STATEMENT_PAPER_HEADERS.join(" | "),
       ...productRows(block, hidePaid).map((r) => statementPaperRow(r, r.currency || "MXN", false).join(" | ")),

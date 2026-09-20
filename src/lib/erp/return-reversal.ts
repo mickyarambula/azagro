@@ -217,7 +217,7 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
 
   const debt = await sql<{ total: string }>`
     select coalesce(sum(residual),0)::text as total from invoices
-    where company_id = ${companyId} and partner_id = ${n.so_partner_id ?? 0} and kind = 'customer' and state = 'open'
+    where company_id = ${companyId} and partner_id = ${n.so_partner_id ?? 0} and kind = 'customer' and state = 'open' and amount > 0
   `;
   const before = Number(debt[0]?.total ?? 0);
   // La NC abierta con saldo negativo (crédito a favor) deja de contar; la FV vuelve a deber lo del abono virtual.

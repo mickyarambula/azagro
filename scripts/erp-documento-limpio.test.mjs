@@ -218,7 +218,13 @@ test("cableado: estado de cuenta", () => {
     ec.includes('STATEMENT_PAPER_HEADERS.join(" | ")') && ec.includes('statementPaperRow(r, r.currency || "MXN", false).join(" | ")'),
     "el documento guardado es el mismo papel",
   );
-  assert.ok(ec.includes("notes: statementNotes(ratesOf(st)),"), "las notas salen de doc-text");
+  // 19-sep-2026 (L5): al papel se le antepone el saldo a favor del cliente,
+  // que también sale de doc-text. Callarlo le cobra de más a quien ya pagó.
+  assert.ok(ec.includes("statementNotes(ratesOf(st)),"), "las notas salen de doc-text");
+  assert.ok(ec.includes("statementCreditNote(money(block.aFavor), money(block.arNeto))"), "y el saldo a favor también, desde doc-text");
+  const docText = src("src/lib/erp/doc-text.ts");
+  assert.ok(docText.includes("export function statementCreditNote("), "la nota del saldo a favor vive en doc-text");
+  assert.ok(docText.includes("Son pagos suyos que ya recibimos"), "y habla del dinero del cliente, no del sistema");
   assert.ok(ec.includes("notes: CONSOLIDADO_NOTE,"), "el consolidado también");
   assert.ok(ec.includes('extra={[statementSendHeader(rates), ...rows.map((r) => statementSendLine(r))].join("\\n")}'), "el mensaje también, con la regla para comprobar cada renglón");
   assert.ok(ec.includes("TIIE a la fecha de interés +"), "la tasa se nombra por la fecha desde la que corre");
