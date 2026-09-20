@@ -790,6 +790,8 @@ export type ReturnReversalView = {
   so: { id: number; name: string; partner: string; currency: string; direct: boolean };
   fv: { id: number; name: string; residualNow: number; residualAfter: number; dueDate: string } | null;
   virtualPayment: { id: number; name: string; amount: number } | null;
+  /** El saldo a favor que dejó esta devolución y que la reversa extingue (L3c). */
+  advance: { id: number; name: string; amount: number } | null;
   stock: Array<{ code: string; product: string; uom: string; qty: number; unitCost: number; value: number; location: string; qtyBefore: number; qtyAfter: number; avg: number; moveRef: string; matchedBy: "nc" | "legacy" }>;
   keeps: RLine[];
   partnerDebt: { name: string; before: number; after: number };
@@ -899,6 +901,16 @@ export function ReturnReversalButton(props: {
                     <li>
                       {chain.virtualPayment.name} · abono de la devolución {m(chain.virtualPayment.amount, chain.so.currency)} aplicado a {chain.fv?.name} → contra-abono{" "}
                       {m(-chain.virtualPayment.amount, chain.so.currency)}, sin banco (nunca lo tuvo)
+                    </li>
+                  ) : null}
+                  {/* El saldo a favor que se EXTINGUE. Sin este renglón, quien
+                      confirma aprueba borrar dinero a favor del cliente sin
+                      verlo: la cadena se enseña COMPLETA o no se enseña. */}
+                  {chain.advance ? (
+                    <li>
+                      <span className="font-medium">{chain.advance.name}</span> · saldo a favor que dejó esta devolución{" "}
+                      {m(chain.advance.amount, chain.so.currency)} → contra-abono {m(-chain.advance.amount, chain.so.currency)}, sin banco.
+                      <span className="text-danger"> El cliente deja de tener esos {m(chain.advance.amount, chain.so.currency)} a su favor.</span>
                     </li>
                   ) : null}
                 </ul>

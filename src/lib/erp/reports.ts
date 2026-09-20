@@ -9,10 +9,11 @@ import { purchaseFxOfDeal } from "@/lib/erp/deal-supplier";
 import { fxCostOfPeriod } from "@/lib/erp/fx-cost-query";
 import { mergeDealPnl } from "@/lib/erp/parciales";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
-import { policy } from "@/lib/erp/ops";
+import { policy, returnedOfInvoices } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { circuitTerms, financingCircuit, fundingTableOf, nearestFunding, readCircuits } from "@/lib/erp/circuits";
 import { docRate, usesFundingTable } from "@/lib/erp/doc-rate";
+import { earlyPayBase } from "@/lib/erp/advance";
 import { linealMarginFromPrice, type FinancingBase } from "@/lib/erp/pricing";
 import { YEAR_DAYS } from "@/lib/erp/rules";
 
@@ -32,6 +33,7 @@ function daysExceededPreview(fv: { credit_due: string | null; due_date: string; 
 }
 
 type DealFvRow = {
+  id: number;
   date: string;
   due_date: string;
   credit_due: string | null;
@@ -53,7 +55,7 @@ export async function computeDealPnl(sql: Sql, companyId: number, soId: number) 
   // La factura de venta manda: su fecha de emisión fija la TIIE de costo, y
   // sus fechas de pago/plazo financiero fijan la Capa 2 y el pronto pago.
   const fv = await sql<DealFvRow>`
-    select date::text, due_date::text, credit_due::text, paid_date::text,
+    select id, date::text, due_date::text, credit_due::text, paid_date::text,
       amount::text, residual::text, coalesce(fx_result,0)::text as fx_result,
       coalesce(params_snap,'') as params_snap, coalesce(credit_days,0)::int as credit_days
     from invoices
@@ -524,9 +526,17 @@ async function dealPnlCore(
   // la de cobro, que lleva la protección adentro y estimaría de más. Es la
   // misma que aplica `applyInvoicePayment` al perdonar de verdad.
   const bonoRate = usesFundingTable(financingBase) ? costRate : tiieIssue;
+  // La MISMA base que usa el que OTORGA (L3c): lo devuelto no se financió
+  // hasta el final. Sin esto, la tarjeta RESTABA de la utilidad del pedido una
+  // bonificación que nunca se otorgó — $4,979.26 contra $222.53 en la factura
+  // de referencia. Los tres del pronto pago tienen que coincidir.
+  // Solo si hay fecha de pago: sin ella el bono ni se calcula, y el Panorama
+  // llama a esto hasta 500 veces por carga (Decisión 89: ni una consulta de más
+  // en ese bucle).
+  const devueltoFv = fv[0]?.paid_date ? (await returnedOfInvoices(sql, companyId, [fv[0].id])).get(fv[0].id) ?? 0 : 0;
   const bono = fv[0]?.paid_date && bonoRate != null && !sinTiie
     ? earlyPayBonus({
-        cargo: Number(fv[0].amount),
+        cargo: earlyPayBase(Number(fv[0].amount), devueltoFv),
         issueDate: fv[0].date,
         payDate: fv[0].paid_date,
         thresholdDays: earlyPayDays,
@@ -778,15 +788,22 @@ export const getCompanyPnl = createServerFn({ method: "POST" })
     } catch {
       /* empty */
     }
+    // COBRADO Y PAGADO SON DINERO QUE SE MOVIÓ EN EL BANCO (19-sep-2026). Hay
+    // PAG virtuales que no tocan la cuenta —el abono de una devolución, la
+    // bonificación de pronto pago, el saldo a favor que deja una devolución—:
+    // son crédito, no cobranza. Sumarlos decía que entró dinero que nunca
+    // entró, y el número se compara contra el estado de cuenta del banco.
     const collections = await sql<{ amount: string }>`
-      select coalesce(sum(amount),0)::text as amount
-      from payments
-      where company_id = ${companyId} and kind = 'inbound' and date between ${from} and ${to}
+      select coalesce(sum(p.amount),0)::text as amount
+      from payments p
+      where p.company_id = ${companyId} and p.kind = 'inbound' and p.date between ${from} and ${to}
+        and exists (select 1 from bank_moves m where m.payment_id = p.id)
     `;
     const payouts = await sql<{ amount: string }>`
-      select coalesce(sum(amount),0)::text as amount
-      from payments
-      where company_id = ${companyId} and kind = 'outbound' and date between ${from} and ${to}
+      select coalesce(sum(p.amount),0)::text as amount
+      from payments p
+      where p.company_id = ${companyId} and p.kind = 'outbound' and p.date between ${from} and ${to}
+        and exists (select 1 from bank_moves m where m.payment_id = p.id)
     `;
     const revenue = Number(sales[0]?.amount ?? 0);
     const cogs = Number(purchases[0]?.amount ?? 0);

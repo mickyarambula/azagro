@@ -71,8 +71,8 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 | Estado | Preguntas |
 |---|---|
 | **ABIERTA** (8) | L8a (ajuste de inventario: ¿pide costo?) · H3 (Sesión D) · H4c (devolución a proveedor) · H4f (candado sin salida en la reversa de devolución) · H5 (lotes y caducidad) · H6 (unidades de medida) · D-B (tasa del pronto pago) · D-C (plazo de Santa Rosa a Azagro) |
-| Resuelta en documento, **no construida** (3) | L3b (Decisión 10: la mora no se ajusta al devolver) · **L3c (11: la NC atrapada — ya tiene con qué, le faltan tres lectores)** · H2 (tres columnas muertas, no mueven dinero) |
-| Resuelta en documento **y ya construida** (9) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) · **L5 (12 y 13, 19-sep-2026: el saldo a favor, en pesos)** |
+| Resuelta en documento, **no construida** (2) | L3b (Decisión 10: la mora no se ajusta al devolver) · H2 (tres columnas muertas, no mueven dinero) |
+| Resuelta en documento **y ya construida** (10) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) · L5 (12 y 13) · **L3c (11, 19-sep-2026: la NC atrapada)** |
 | Parcial | H7 (el flete ya viaja por partida; repartir **un** flete de viaje entre productos sigue sin regla) |
 | Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2; captura: Decisión 82) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
 | En construcción / construida | H4d (Decisiones 46 a 54; pasos 0-3 de `PARCIALES.md` hechos) · H4e (Decisión 48; construida el 15-sep-2026) |
@@ -457,41 +457,50 @@ recurrente lo normal es aplicarlo a lo que sigue debiendo; devolver el dinero
 queda como opción disponible, no como regla. HANDOFF "Qué falta" lo listaba
 entre los INCOMPLETOS "sin tocar" — sigue sin construirse: hoy la NC sobre una
 factura pagada queda atrapada, sin aplicarse a nada (LOGICA h.10, Sesión D).
-**Sigue sin construir — y ahora ya tiene con qué.** El crédito de una NC que
-no cupo en ninguna factura viva se escribe en la propia NC como `residual`
-**negativo**, y ahí queda atrapado: `applyInvoicePayment` lo rechaza con «esta
-factura ya está saldada» (cualquier negativo cumple `residual <= 0.009`, y el
-mensaje además miente) y `refreshInvoiceResidual` lo colapsaría a $0 la primera
-vez que algo legítimo lo tocara (`Math.max(0, …)`).
+**CONSTRUIDA el 19-sep-2026.** El crédito de una NC que no cupo en ninguna
+factura viva se escribía en la propia NC como `residual` **negativo** y ahí
+quedaba atrapado. Ahora nace como **saldo a favor**: un PAG virtual —sin banco,
+como el abono de la devolución— sin aplicar, y la NC queda `residual = 0,
+state = 'paid'`. Ningún documento vuelve a llevar saldo negativo.
 
-**HAY UN INTENTO COMPLETO EN LA RAMA `l3c-en-pausa`** (19-sep-2026). Está
-construido y con 1052 pruebas en verde, pero **no se subió a `main`**: el
-revisor de dinero lo rechazó tres pasadas seguidas y la tercera encontró una
-REGRESIÓN introducida por el arreglo de la segunda — al excluir el crédito de
-devolución del `max(p.date)` de `refreshInvoiceResidual`, si la factura ya
-traía un abono real anterior la fecha de pago **retrocede** a un día en que
-todavía debía: la FI cobra 21 días ($1,037.65) mientras el estado de cuenta lee
-0, y la tarjeta de utilidad resta $4,174.44 de bono que nadie otorgó (en `main`
-es $0.00).
+**El memo hace tres trabajos** (`"Saldo a favor (devolución NC-000N)"`):
+empieza con «Saldo a favor» para que `unapplyCredit` lo acepte —la salida si se
+aplica a la factura equivocada— y lleva el folio de la NC para que
+`reverseReturn` se lo lleve consigo y para que `reversal.ts` lo bloquee
+nombrando ese camino. Revertirlo solo extinguiría el crédito dejando vivos la
+NC, el movimiento de kardex y `qty_returned`: media reversa desde la pantalla
+equivocada.
 
-La regla correcta no es «excluir el crédito de devolución de la fecha» sino
-«la fecha es la del último abono que de verdad PAGÓ, y un crédito de devolución
-no paga pero tampoco hace retroceder el reloj» — un tercer caso que el motor de
-`paid_date` hoy no distingue. **Lo que sí hay que rescatar de esa rama** está
-listado en su mensaje de commit; lo más importante es `returnedOfInvoices` y
-que los tres lectores del pronto pago usen la misma base, porque **ese defecto
-existe HOY en `main`** y es independiente de L3c ($4,756.73 por factura con
-devolución parcial).
+**La pasada de lectura (cuatro lectores en paralelo + un crítico) encontró más
+cosas rotas HOY que sobre L3c**, y se arreglaron primero porque son
+prerrequisito: el **recordatorio de pago sobre una nota de crédito** (un correo
+al cliente pidiéndole que pague un documento que dice que algo se le debe a
+él), los cuatro lectores del inicio que contaban la NC como deuda —incluido el
+conteo de «facturas vencidas»—, los tres `partnerDebt` de las reversas, el
+saldo a favor que no salía en el PDF del estado de cuenta (de L5, esa mañana) y
+las etiquetas de bitácora.
 
-El **mecanismo** para arreglarlo se construyó el 19-sep-2026 con L5: el saldo a
-favor (`advance.ts`). Se intentó cerrar L3c el mismo día y **se sacó del
-alcance** porque mover ese crédito a un saldo a favor cambia TRES lectores que
-hay que resolver juntos: el estado de cuenta del cliente, la posición cambiaria
-de una NC en dólares (`fx-position-query.ts` cuenta con ese negativo) y la
-reversa de devolución (paso 8, que tendría que llevarse el crédito consigo).
-A medias, el cliente vería un estado de cuenta más alto de lo que debe — lo
-encontró el revisor de dinero. El motivo queda escrito junto al código
-(`azagro.ts`, `returnSale`).
+**Segundo intento, 20-sep-2026, con migración 0046** (`payment_allocs.applied_at`):
+la aplicación lleva su propia fecha, y de ahí leen `paid_date`, la mora, el
+pronto pago y el saldo a favor a fecha de corte con la misma expresión
+(`coalesce(pa.applied_at, p.date)`), sin decidir nada por memo. El revisor de
+dinero lo verificó con su propio caso al centavo: $3,092.44 con 62 días, no
+$2,244.51 — y las dos vistas del estado de cuenta miden con la misma fecha.
+**PASA CON AVISOS.** Quedan tres avisos no bloqueantes, anotados para no
+perderlos: la columna «Pronto pago (est.)» a fecha de corte pasada descuenta
+devoluciones posteriores al corte (`returnedOfInvoices` no recibe `asOf`; es
+estimación de pantalla); la fila de una NC en el papel ya no cuadra sola
+(cargo −X, saldo 0) y el sobrante sale abajo como «Saldo a su favor» — el
+«Saldo neto» no cambia; y el ORDER BY de la lista de abonos y
+`returnedOfInvoices` están fijados por texto, sin prueba numérica propia.
+
+**Tres decisiones más** (96, 97 y 98): devolver mercancía no gana bonificación
+de pronto pago y lo devuelto sale de la base del bono ($4,979.26 que se
+regalaban por la puerta de al lado); **la aplicación lleva su propia fecha** (`payment_allocs.applied_at`,
+migración 0046) y la del crédito de una devolución es el día en que se aplica
+— no una exclusión por memo, que fue lo que hizo retroceder el reloj en el
+primer intento ($5,486.59 que se dejaban de cobrar por un lado, $4,174.44 de
+bono fantasma por el otro); y una devolución con sobrante en dólares se detiene con salida.
 
 ### L4a. En un pedido en dólares, ¿el precio se captura en dólares o en pesos? (LOGICA h.14)
 **Cerrada el 18-sep-2026, Decisión 82:** el precio se captura en la moneda del pedido (campo con etiqueta «USD») y se guarda en pesos al TC del documento; pantalla y papel enseñan dólares. Construcción: bloque L4a (`MODELO-NEGOCIO.md` § 13.7).

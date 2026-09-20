@@ -170,16 +170,53 @@ test("la línea de crédito mide deuda NETA: el saldo a favor la baja, y nunca p
 // ---------------------------------------------------------------------------
 // 7. L3c NO entra en esta pieza — y la nota dice por qué
 // ---------------------------------------------------------------------------
-test("L3c sigue sin construir: la NC atrapada se queda, con el motivo escrito donde está", () => {
+test("L3c: el crédito de una NC que no cupo ya no queda atrapado en un residual negativo", () => {
   const az = src("src/lib/azagro.ts");
-  // El mecanismo para arreglarla ya existe (el saldo a favor de L5). Lo que
-  // falta son TRES lectores que hay que mover juntos: el estado de cuenta, la
-  // posición cambiaria de una NC en dólares y la reversa de devolución. Sin
-  // los tres, el cliente vería un estado de cuenta más alto de lo que debe.
-  assert.ok(az.includes("set residual = ${-leftover}"), "la NC sigue como estaba: no se cambió a medias");
-  assert.ok(az.includes("NOTA (L3c, Decisión 11 — sigue SIN construir"), "y queda escrito ahí mismo que falta");
-  assert.ok(az.includes("El mecanismo para arreglarlo YA EXISTE"), "con la pista de por dónde va");
-  assert.ok(az.includes("TRES cosas a la vez"), "y qué hay que resolver junto");
+  // Estaba atrapado: `applyInvoicePayment` lo rechazaba con «esta factura ya
+  // está saldada» (cualquier negativo cumple `residual <= 0.009`) y
+  // `refreshInvoiceResidual` lo habría colapsado a $0 (`Math.max(0, …)`).
+  assert.ok(!az.includes("set residual = ${-leftover}"), "ningún documento lleva ya un saldo negativo");
+  assert.ok(az.includes("`Saldo a favor (devolución ${ncName})`"), "nace como saldo a favor del cliente");
+  assert.ok(az.includes("favorName ? ` · saldo a favor ${favorName}"), "y queda en la bitácora de la devolución");
+  // EL MEMO HACE TRES TRABAJOS: empieza con «Saldo a favor» (para que
+  // `unapplyCredit` lo acepte) y lleva el folio de la NC (para que la reversa
+  // lo encuentre y para que no se revierta solo).
+  assert.ok(az.includes("EL MEMO HACE TRES TRABAJOS"), "y está dicho por qué el memo es así");
+});
+
+test("L3c: el crédito de una devolución no se revierte solo — se va con su devolución", () => {
+  const r = src("src/lib/erp/reversal.ts");
+  const rr = src("src/lib/erp/return-reversal.ts");
+  // Revertirlo solo extinguiría el crédito dejando vivos la NC, el movimiento
+  // de kardex y el `qty_returned`: media reversa desde la pantalla equivocada.
+  assert.ok(r.includes('if (p.memo.startsWith("Saldo a favor (devolución ")) {'), "bloqueado en el paso 5");
+  assert.ok(r.includes("se deshace revirtiendo esa devolución, no solo"), "y el mensaje nombra el camino");
+  assert.ok(r.includes("usa «Quitar de esta factura»"), "y la otra salida, si lo que está mal es a qué factura se aplicó");
+  // Y el paso 8 se lo lleva: si no, el cliente se queda la mercancía Y el dinero.
+  assert.ok(rr.includes('p.memo = ${"Saldo a favor (devolución " + n.name + ")"}'), "el paso 8 lo busca por su memo");
+  assert.ok(rr.includes("ya se aplicó a otra factura"), "si ya se gastó, no revierte a ciegas");
+  assert.ok(rr.includes("Quítalo de esa factura primero"), "y nombra la salida");
+  assert.ok(rr.includes("if (pv.advance) {"), "y cuando procede, nace su contrario");
+});
+
+test("L3c: devolver mercancía NO gana bonificación de pronto pago", () => {
+  const a = src("src/lib/erp/advance-query.ts");
+  // El pronto pago devuelve el financiamiento que el precio cobró y que no se
+  // usó POR HABER PAGADO ANTES. Devolver mercancía no es pagar antes: es
+  // deshacer una venta. Sobre la factura de referencia eran hasta $5,081.04.
+  // UN SOLO PREDICADO para las dos reglas que cuelgan de él (la fecha de la
+  // mora, Decisión 97; y que no gane pronto pago, Decisión 96). Escribirlo dos
+  // veces es cómo empiezan a divergir: un día alguien cambia una cadena y no
+  // la otra, y el mismo cobro es devolución para una cosa y no para la otra.
+  assert.ok(a.includes("const esDevolucion = isReturnCredit(pay[0].memo);"), "se distingue el crédito de una devolución");
+  assert.equal((a.match(/isReturnCredit\(/g) ?? []).length, 1, "y una sola vez");
+  assert.ok(!a.includes('startsWith("Saldo a favor (devolución '), "sin una segunda copia de la cadena");
+  assert.ok(a.includes("const bono = esDevolucion"), "y no se le otorga bonificación");
+  assert.ok(a.includes("? { discount: 0, detail: \"\", residual }"), "el crédito de devolución pasa de largo");
+  assert.ok(a.includes("Devolver mercancía no"), "y queda dicho por qué");
+  // La mora sí se factura, como con cualquier abono: el dinero de esa otra
+  // factura llegó cuando llegó.
+  assert.ok(a.includes("mora = await issueMoraInvoice(sql, companyId, data.invoiceId, {"), "la mora sí");
 });
 
 test("el saldo a favor NO nace en una operación con tipo de cambio: se detiene antes de escribir", () => {
@@ -223,7 +260,7 @@ test("el contrario de un abono contraría LO QUE ESA FACTURA RECIBIÓ, no el imp
 test("desaplicar NO borra: contraría (Decisión 16) y solo sobre un saldo a favor", () => {
   const a = src("src/lib/erp/advance-query.ts");
   assert.ok(!a.includes("delete from payment_allocs"), "nada se borra");
-  assert.ok(a.includes("insert into payment_allocs (payment_id, invoice_id, amount) values (${data.paymentId}, ${data.invoiceId}, ${-quitado})"), "se contraría");
+  assert.ok(a.includes("insert into payment_allocs (payment_id, invoice_id, amount, applied_at) values (${data.paymentId}, ${data.invoiceId}, ${-quitado}, ${todayMx()})"), "se contraría, con fecha de hoy");
   // Y no se puede usar para deshacer con `credit:edit` lo que es de admin.
   assert.ok(a.includes('if (Number(ligado[0]?.n ?? 0) > 0 || !pay[0].memo.startsWith("Saldo a favor")) {'), "solo sobre un saldo a favor");
   // Y no solo por el memo, que lo teclea la persona: la marca estructural es
@@ -262,7 +299,7 @@ test("saldar con saldo a favor factura la mora, igual que un cobro", () => {
   assert.ok(a.includes("mora = await issueMoraInvoice(sql, companyId, data.invoiceId, {"), "la FI nace antes de abonar");
   assert.ok(a.includes("requireCharge: false,"), "sin días vencidos no truena: simplemente no nace FI");
   const i = a.indexOf("issueMoraInvoice(sql, companyId, data.invoiceId");
-  const j = a.indexOf("insert into payment_allocs (payment_id, invoice_id, amount) values (${data.paymentId}");
+  const j = a.indexOf("insert into payment_allocs (payment_id, invoice_id, amount, applied_at) values (${data.paymentId}");
   assert.ok(i > 0 && j > i, "y nace ANTES de la aplicación, como en el cobro");
   assert.ok(src("src/routes/credit.tsx").includes("const m = r.mora ? ` Mora ${r.mora}"), "y la pantalla lo dice");
 });
@@ -304,7 +341,19 @@ test("una factura queda pagada el día en que el dinero estuvo disponible PARA E
   assert.ok(stock.includes("having sum(pa.amount) > 0.009"), "una aplicación quitada no manda la fecha");
   assert.ok(stock.includes("${todayMx()}::date)"), "y el respaldo de siempre sigue alcanzable");
   // Y la mora se mide con esa misma fecha.
-  assert.ok(a.includes("const fechaEfectiva = pay[0].date > inv[0].date ? pay[0].date : inv[0].date;"), "la más tarde de las dos");
+  assert.ok(a.includes("const fechaEfectiva = origen > inv[0].date ? origen : inv[0].date;"), "la más tarde de las dos");
+  // Y la fecha que se ESCRIBE en la aplicación es la misma que mide la mora:
+  // un solo hecho (migración 0046).
+  assert.ok(a.includes("const appliedAt: string | null = esDevolucion ? todayMx() : null;"), "la aplicación lleva su fecha");
+  assert.ok(a.includes("const origen = appliedAt ?? pay[0].date;"), "y la mora mide con esa misma");
+  assert.ok(a.includes("amount, applied_at) values (${data.paymentId}, ${data.invoiceId}, ${amount}, ${appliedAt})"), "y se escribe al aplicar");
+  assert.ok(a.includes("${-quitado}, ${todayMx()})"), "quitar es un hecho de hoy");
+  // Salvo el crédito de una DEVOLUCIÓN: mercancía devuelta nunca fue dinero
+  // disponible para OTRA factura, así que su fecha es el día en que se aplica.
+  // Si no, un crédito guardado meses se llevaba consigo toda la mora corrida
+  // ($5,486.59 sobre la factura de referencia) y además ya no se podía
+  // facturar, porque al quedar `paid` desaparece el botón «Mora».
+  assert.ok(a.includes("esDevolucion ? todayMx() : null"), "el crédito de una devolución se aplica con fecha de hoy");
   assert.ok(a.includes("asOf: fechaEfectiva,") && a.includes("paidDate: fechaEfectiva,"), "la mora la usa");
   assert.ok(a.includes("cobrar intereses sobre"), "y queda dicho por qué");
 });
@@ -315,7 +364,13 @@ test("el pronto pago vale lo mismo por las dos puertas: una sola función lo dec
   assert.ok(ops.includes("export async function earlyPayDiscount("), "existe en un solo lugar");
   // Las dos puertas lo llaman: el cobro por banco y el saldo a favor.
   assert.ok(ops.includes("const bonoRes = await earlyPayDiscount(sql, {"), "el cobro por banco");
-  assert.ok(a.includes("const bono = await earlyPayDiscount(sql, {"), "y la aplicación de saldo a favor");
+  // El invariante de la Decisión 94 sigue en pie con UNA excepción decidida y
+  // nombrada (L3c): el crédito de una devolución. Se fija que la excepción sea
+  // EXACTAMENTE ésa y ninguna otra — si mañana alguien agrega una segunda
+  // condición al ternario, esta prueba lo dice.
+  assert.ok(a.includes("const bono = esDevolucion\n        ? { discount: 0, detail: \"\", residual }\n        : await earlyPayDiscount(sql, {"), "la aplicación de saldo a favor lo llama salvo el crédito de una devolución");
+  assert.equal((a.match(/await earlyPayDiscount\(sql, \{/g) ?? []).length, 1, "una sola llamada, no varias ramas");
+  assert.equal((a.match(/esDevolucion/g) ?? []).length, 3, "se declara una vez y se usa dos: la fecha de la mora y el bono");
   // Y la fecha con la que se MIDE la deriva la propia función de los abonos
   // vivos de la factura, no se la pasa el llamador: así las dos puertas miden
   // igual por construcción, no por coincidencia. Un anticipo viejo ya no hace
@@ -358,8 +413,8 @@ test("la bonificación se calcula DESPUÉS de escribir el abono, en las dos puer
   assert.ok(abonoCobro < bonoCobro, "EL ABONO PRIMERO: si no, la medición no lo ve y se perdona de más");
 
   // Puerta 2: aplicar un saldo a favor.
-  const abonoCredito = a.indexOf("insert into payment_allocs (payment_id, invoice_id, amount) values (${data.paymentId}, ${data.invoiceId}, ${amount})");
-  const bonoCredito = a.indexOf("const bono = await earlyPayDiscount(sql, {");
+  const abonoCredito = a.indexOf("insert into payment_allocs (payment_id, invoice_id, amount, applied_at) values (${data.paymentId}, ${data.invoiceId}, ${amount}, ${appliedAt})");
+  const bonoCredito = a.indexOf("const bono = esDevolucion");
   assert.ok(abonoCredito > 0 && bonoCredito > 0);
   assert.ok(abonoCredito < bonoCredito, "EL ABONO PRIMERO también aquí");
 
@@ -417,4 +472,86 @@ test("la bitácora nombra los verbos del saldo a favor en vez de enseñar el slu
   for (const a of ["saldo-a-favor", "aplicar-saldo-a-favor", "quitar-saldo-a-favor"]) {
     assert.ok(b.includes(`"${a}":`), `falta la etiqueta de ${a}`);
   }
+});
+
+test("L3c: una devolución con sobrante en DÓLARES se detiene, con salida", () => {
+  const az = src("src/lib/azagro.ts");
+  // El saldo a favor vive en pesos y `applyCredit` no lo deja aplicar a una
+  // factura en otra moneda: guardarlo en pesos dejaría al cliente que solo
+  // compra en dólares con un crédito SIN una sola factura a la cual aplicarlo.
+  // Candado sin salida, que es peor que el problema.
+  assert.ok(az.includes('if (leftover > 0.009 && fv[0] && fv[0].currency !== "MXN") {'), "se detiene antes de escribir");
+  assert.ok(az.includes("todavía no se puede guardar como saldo a favor"), "y lo dice");
+  assert.ok(az.includes("usa «Revertir entrega»"), "y nombra una salida que existe");
+  // El candado va ANTES de apagar la NC: si no, quedaría la NC en 0 sin crédito.
+  const i = az.indexOf('if (leftover > 0.009 && fv[0] && fv[0].currency !== "MXN") {');
+  const j = az.indexOf("await sql`update invoices set residual = 0, state = 'paid', paid_date = ${today} where id = ${nc[0]!.id}`;");
+  assert.ok(i > 0 && j > i, "el candado antes de tocar la NC");
+});
+
+test("L3c: el estado de cuenta y la línea de crédito no cuentan el crédito dos veces", () => {
+  const ops = src("src/lib/erp/ops.ts");
+  const cl = src("src/lib/erp/credit-limit.ts");
+  // La NC queda en 0 (deja de restar del saldo) y el crédito aparece en
+  // `aFavor` (que lo resta una vez). Neto: el mismo número que antes, pero
+  // ahora el cliente VE su crédito en vez de tenerlo escondido en un negativo.
+  assert.ok(ops.includes("and pm.kind = 'inbound' and pm.amount > 0 and pm.date <= ${asOf}"), "aFavor recoge el PAG virtual");
+  assert.ok(!ops.includes("pm.bank_id is not null"), "sin exigir banco: el crédito de una devolución no tiene");
+  assert.ok(cl.includes("and pm.kind = 'inbound'"), "y la línea de crédito lo cuenta una sola vez");
+});
+
+// ---------------------------------------------------------------------------
+// 13. LOS TRES DEL PRONTO PAGO USAN LA MISMA BASE
+//
+// `CLAUDE.md` § 1 lo dice textual: «los tres del pronto pago tienen que
+// coincidir o la pantalla estima una bonificación y el sistema perdona otra».
+// La segunda revisión de L3c encontró que se había arreglado solo el que
+// OTORGA: sobre una factura con devolución parcial, los dos que ESTIMAN decían
+// $4,979.26 y el sistema perdonaba $222.53 — y la tarjeta de utilidad del
+// pedido RESTABA de la utilidad una bonificación que nunca se otorgó.
+// ---------------------------------------------------------------------------
+test("los tres que hablan del pronto pago descuentan lo devuelto de la base", () => {
+  const ops = src("src/lib/erp/ops.ts");
+  const rep = src("src/lib/erp/reports.ts");
+  // Una sola consulta contesta «cuánto de esta factura se devolvió».
+  assert.ok(ops.includes("export async function returnedOfInvoices("), "un solo lugar lo contesta");
+  // Y decide por marca ESTRUCTURAL, no solo por texto: los dos abonos de
+  // devolución son virtuales (sin movimiento de banco). Un cobro real cuyo memo
+  // teclee alguien como «Devolución de cheque» tiene banco y no cuenta.
+  const rf = ops.slice(ops.indexOf("export async function returnedOfInvoices("), ops.indexOf("export async function earlyPayDiscount("));
+  assert.ok(rf.includes("and not exists (select 1 from bank_moves bm where bm.payment_id = p.id)"), "sin banco: virtual de verdad");
+  assert.equal(
+    ((ops + rep).match(/returnedOfInvoices\(/g) ?? []).length,
+    4,
+    "la declara una vez y la llaman los tres: otorga, estima y tarjeta",
+  );
+  // 1. El que OTORGA.
+  assert.ok(ops.includes("const baseBono = earlyPayBase(Number(i.amount), devuelto.get(i.id) ?? 0);"), "otorga");
+  assert.ok(ops.includes("cargo: baseBono,"), "y es esa la base");
+  // 2. El que ESTIMA en el estado de cuenta.
+  assert.ok(ops.includes("cargo: earlyPayBase(cargo, devueltoMap.get(inv.id) ?? 0),"), "estima");
+  // 3. El que RESTA en la tarjeta de utilidad del pedido.
+  assert.ok(rep.includes("cargo: earlyPayBase(Number(fv[0].amount), devueltoFv),"), "resta en la utilidad");
+  // Y nadie más calcula el bono: una cuarta copia sería una cuarta respuesta.
+  assert.equal(((ops + rep).match(/earlyPayBonus\(\{/g) ?? []).length, 3, "tres usos de la fórmula, los tres con la misma base");
+});
+
+test("la fecha de pago es la de la APLICACIÓN (migración 0046), sin rodeos por memo", () => {
+  const stock = src("src/lib/erp/stock.ts");
+  const ops = src("src/lib/erp/ops.ts");
+  // El primer intento excluía el crédito de devolución del max(p.date) y eso
+  // hacía RETROCEDER el reloj a un abono viejo (la rama l3c-en-pausa). La
+  // regla correcta no era una excepción: la aplicación tiene fecha.
+  assert.ok(stock.includes("select max(coalesce(pa.applied_at, p.date)) as d"), "paid_date lee la fecha de la aplicación");
+  assert.ok(!stock.includes("memo not like"), "y ya no decide nada por memo");
+  // El que otorga el pronto pago mide con la MISMA expresión: los dos relojes son uno.
+  assert.ok(ops.includes("select max(coalesce(pa.applied_at, p.date))::text as date"), "earlyPayDiscount mide igual");
+  // Y el estado de cuenta a una fecha pasada resta solo lo aplicado hasta ese día.
+  assert.ok(ops.includes("where pa.payment_id = pm.id and coalesce(pa.applied_at, px.date) <= ${asOf}"), "aFavor histórico, correcto");
+  // Y la lista de abonos del estado de cuenta se ORDENA por la misma fecha que
+  // trae: el corte histórico toma «el último de la lista» como fecha de pago.
+  // Ordenar por la del cobro dejaba un crédito aplicado después de un cobro
+  // real antes en la lista: $847.93 de mora de menos en el papel.
+  assert.ok(ops.includes("order by coalesce(pa.applied_at, p.date), pa.id"), "la lista de abonos se ordena por fecha de aplicación");
+  assert.ok(!ops.includes("order by p.date, pa.id"), "y no por la del cobro");
 });

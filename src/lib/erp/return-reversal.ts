@@ -51,6 +51,13 @@ export type ReturnReversalPreview = {
   so: { id: number; name: string; partner: string; currency: string; direct: boolean };
   fv: { id: number; name: string; residualNow: number; residualAfter: number; dueDate: string } | null;
   virtualPayment: { id: number; name: string; amount: number } | null;
+  /**
+   * El SALDO A FAVOR que dejó esta devolución cuando el crédito de la NC no
+   * cupo en ninguna factura viva (L3c, Decisión 11). Si la devolución se
+   * revierte, ese crédito se va con ella: si no, el cliente se queda con la
+   * mercancía de vuelta EN SU PODER y además con dinero a su favor.
+   */
+  advance: { id: number; name: string; amount: number } | null;
   stock: Array<{ code: string; product: string; uom: string; qty: number; unitCost: number; value: number; location: string; qtyBefore: number; qtyAfter: number; avg: number; moveRef: string; matchedBy: "nc" | "legacy" }>;
   keeps: Line[];
   partnerDebt: { name: string; before: number; after: number };
@@ -100,7 +107,7 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
   const preview: ReturnReversalPreview = {
     nc: { id: n.id, name: n.name, date: n.date, amount: Number(n.amount), residual: Number(n.residual), state: n.state, timbrada: n.folio_fiscal || n.uuid_fiscal ? { folio: n.folio_fiscal, uuid: n.uuid_fiscal } : null },
     so: { id: n.order_id ?? 0, name: n.so_name ?? "", partner: n.so_partner ?? "", currency: n.so_currency ?? "MXN", direct },
-    fv: null, virtualPayment: null, stock, keeps, partnerDebt: { name: n.so_partner ?? "", before: 0, after: 0 }, blockers, allowed: canRevert(role), role,
+    fv: null, virtualPayment: null, advance: null, stock, keeps, partnerDebt: { name: n.so_partner ?? "", before: 0, after: 0 }, blockers, allowed: canRevert(role), role,
   };
   const empty = (): Chain => ({ preview, companyId, moves: [], lines: [], partnerId: n.so_partner_id ?? 0 });
 
@@ -221,6 +228,31 @@ async function chainForReturn(sql: Sql, companyId: number, ncId: number, role: s
   `;
   const before = Number(debt[0]?.total ?? 0);
   // La NC abierta con saldo negativo (crédito a favor) deja de contar; la FV vuelve a deber lo del abono virtual.
+  // EL SALDO A FAVOR de esta devolución (L3c). Se busca por el memo, que lleva
+  // el folio de la NC — el mismo amarre por texto del abono virtual de arriba.
+  const adv = await sql<{ id: number; name: string; amount: string; aplicado: string }>`
+    select p.id, p.name, p.amount::text,
+      coalesce((select sum(pa.amount) from payment_allocs pa where pa.payment_id = p.id), 0)::text as aplicado
+    from payments p
+    where p.company_id = ${companyId} and p.memo = ${"Saldo a favor (devolución " + n.name + ")"}
+      and p.reverses_id is null and not exists (select 1 from payments r where r.reverses_id = p.id)
+    order by p.id limit 1
+    for update of p
+  `;
+  if (adv[0]) {
+    const usado = Number(adv[0].aplicado);
+    if (usado > 0.009) {
+      // Ya se gastó en otra factura. Revertir aquí dejaría esa factura pagada
+      // con un crédito que deja de existir, y la deuda se borraría sin que
+      // nadie lo viera. La salida existe y se nombra: quitar la aplicación
+      // primero devuelve el crédito y entonces sí se va con su devolución.
+      blockers.push(
+        `El saldo a favor ${adv[0].name} de esta devolución ya se aplicó a otra factura (${usado.toFixed(2)}). Quítalo de esa factura primero (Cartera → el saldo a favor del cliente → «Quitar de esta factura») y vuelve aquí.`,
+      );
+    } else {
+      preview.advance = { id: adv[0].id, name: adv[0].name, amount: Number(adv[0].amount) };
+    }
+  }
   const after = r2(before - (n.state === "open" ? Number(n.residual) : 0) + (preview.virtualPayment?.amount ?? 0));
   preview.partnerDebt = { name: n.so_partner ?? "", before, after };
   return { preview, companyId, moves, lines: lines.map((l) => ({ product_id: l.product_id, line_id: l.line_id ?? null, qty: Number(l.qty) })), partnerId: n.so_partner_id ?? 0 };
@@ -276,6 +308,17 @@ export const reverseReturn = createServerFn({ method: "POST" })
         await tx`insert into payment_allocs (payment_id, invoice_id, amount) values (${contra[0]!.id}, ${pv.fv.id}, ${-pv.virtualPayment.amount})`;
         await refreshInvoiceResidual(tx, pv.fv.id);
         written.push(cname);
+      }
+      // 2b) El saldo a favor que dejó la devolución: contra-abono sin aplicar,
+      //     igual que él. El crédito se va con la devolución que lo creó — si
+      //     no, el cliente se queda la mercancía Y el dinero a su favor.
+      if (pv.advance) {
+        const aname = await nextDocFolio(tx, companyId, "PAG");
+        await tx`
+          insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date, reverses_id)
+          values (${companyId}, 'inbound', ${aname}, ${fresh.partnerId}, ${-pv.advance.amount}, ${`Reversa de ${pv.advance.name} · saldo a favor de la devolución ${pv.nc.name}`}, ${context.userId}, ${today}, ${pv.advance.id})
+        `;
+        written.push(`${aname} (saldo a favor ${pv.advance.amount.toFixed(2)} extinguido)`);
       }
       // 3) La NC queda revertida por estado (sin documento contrario).
       await tx`update invoices set state = 'reversed', cancelled_at = now(), cancelled_by = ${context.userId}, cancel_reason = ${data.reason} where id = ${pv.nc.id} and company_id = ${companyId}`;

@@ -224,7 +224,8 @@ test("cableado: estado de cuenta", () => {
   assert.ok(ec.includes("statementCreditNote(money(block.aFavor), money(block.arNeto))"), "y el saldo a favor también, desde doc-text");
   const docText = src("src/lib/erp/doc-text.ts");
   assert.ok(docText.includes("export function statementCreditNote("), "la nota del saldo a favor vive en doc-text");
-  assert.ok(docText.includes("Son pagos suyos que ya recibimos"), "y habla del dinero del cliente, no del sistema");
+  assert.ok(docText.includes("Es dinero suyo que ya tenemos"), "y habla del dinero del cliente, no del sistema");
+  assert.ok(docText.includes("un pago recibido de más o una devolución"), "y nombra los dos orígenes: decirle «pagos suyos» a un crédito de devolución sería falso");
   assert.ok(ec.includes("notes: CONSOLIDADO_NOTE,"), "el consolidado también");
   assert.ok(ec.includes('extra={[statementSendHeader(rates), ...rows.map((r) => statementSendLine(r))].join("\\n")}'), "el mensaje también, con la regla para comprobar cada renglón");
   assert.ok(ec.includes("TIIE a la fecha de interés +"), "la tasa se nombra por la fecha desde la que corre");

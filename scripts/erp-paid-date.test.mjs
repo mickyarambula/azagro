@@ -46,11 +46,11 @@ async function liquidar(db) {
       paid_date = coalesce(i.paid_date,
         (select case when max(x.d) is null then null else greatest(max(x.d), i.date) end
           from (
-            select p.date as d
+            select max(coalesce(pa.applied_at, p.date)) as d
             from payment_allocs pa join payments p on p.id = pa.payment_id
             where pa.invoice_id = i.id and p.reverses_id is null
               and not exists (select 1 from payments r where r.reverses_id = p.id)
-            group by p.id, p.date
+            group by p.id
             having sum(pa.amount) > 0.009
           ) x),
         $1::date)
@@ -153,5 +153,56 @@ test("L5: una aplicación QUITADA (+X, −X) ya no manda la fecha: no le abona n
   // Y un cobro de verdad el 10-sep.
   await abono(db, 1000, "2026-09-10");
   assert.deepEqual(await liquidar(db), { paid_date: "2026-09-10", state: "paid" }, "manda el cobro real, no la aplicación quitada");
+  await db.close();
+});
+
+// ---------------------------------------------------------------------------
+// L3c / Decisión 97 (19-sep-2026): el crédito de una DEVOLUCIÓN no fija la
+// fecha de pago. La Decisión 93 mide con la fecha del dinero porque ese dinero
+// ya estaba en el banco; mercancía devuelta nunca fue dinero disponible para
+// ESTA factura. Sin esto, la misma transacción emitía una FI por 111 días
+// vencidos y dejaba la factura marcada como pagada siete meses antes.
+// ---------------------------------------------------------------------------
+/** Un saldo a favor (virtual, sin banco) aplicado a la factura 1 con fecha de aplicación propia (migración 0046). */
+async function credito(db, amount, date, memo, appliedAt = null) {
+  pid += 1;
+  await db.query(`insert into payments (id, company_id, kind, name, partner_id, amount, memo, created_by, date) values ($1, 1, 'inbound', $2, 10, $3, $4, 'u1', $5)`, [pid, `PAG-${String(pid).padStart(4, "0")}`, amount, memo, date]);
+  await db.query(`insert into payment_allocs (payment_id, invoice_id, amount, applied_at) values ($1, 1, $2, $3)`, [pid, amount, appliedAt]);
+  return pid;
+}
+
+test("0046: la aplicación lleva su fecha — un crédito de devolución aplicado HOY deja la factura pagada HOY", async () => {
+  const db = await fresh();                                   // FV-0001 del 2026-08-01
+  // El crédito nació el 1-feb (la devolución); se aplica el 16-sep (applied_at).
+  await credito(db, 1000, "2026-02-01", "Saldo a favor (devolución NC-0003)", HOY);
+  assert.deepEqual(await liquidar(db), { paid_date: HOY, state: "paid" }, "la fecha de la aplicación, no la del crédito");
+  await db.close();
+});
+
+test("0046: LA REGRESIÓN de la rama en pausa — con un abono real anterior, la fecha NO retrocede", async () => {
+  // Lo que rompió el primer intento: excluir el crédito del max(p.date) hacía
+  // que la fecha cayera al abono viejo — la factura quedaba «pagada» cinco
+  // meses antes y la tarjeta de utilidad restaba $4,174.44 de bono que nadie
+  // otorgó. Con la fecha en la aplicación, el reloj no retrocede.
+  const db = await fresh();
+  await abono(db, 900, "2026-08-15");                            // abono real, en agosto
+  await credito(db, 100, "2026-02-01", "Saldo a favor (devolución NC-0003)", HOY);  // el resto, con crédito de devolución, hoy
+  assert.deepEqual(await liquidar(db), { paid_date: HOY, state: "paid" }, "hoy, no el 15-ago ni el 1-feb");
+  await db.close();
+});
+
+test("0046: el sobrante de un COBRO aplicado después sigue la Decisión 93 — su dinero ya estaba en el banco", async () => {
+  const db = await fresh();                                   // FV-0001 del 2026-08-01
+  // Sobrepago del 1-feb, aplicado hoy SIN applied_at (vacío = la fecha del dinero).
+  await credito(db, 1000, "2026-02-01", "Saldo a favor (sobrante de FV-0000)", null);
+  assert.deepEqual(await liquidar(db), { paid_date: "2026-08-01", state: "paid" }, "el piso de la factura: el dinero estaba desde febrero");
+  await db.close();
+});
+
+test("0046: sin fecha de aplicación, todo queda byte a byte como antes", async () => {
+  const db = await fresh();
+  await abono(db, 400, "2026-09-05");
+  await abono(db, 600, "2026-09-13");
+  assert.deepEqual(await liquidar(db), { paid_date: "2026-09-13", state: "paid" }, "el hallazgo #18 intacto");
   await db.close();
 });

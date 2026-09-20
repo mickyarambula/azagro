@@ -170,3 +170,35 @@ export function earlyPayMeasureDate(invoiceDate: string, abonoDates: Array<strin
   }
   return d;
 }
+
+/**
+ * LA BASE SOBRE LA QUE SE CALCULA EL PRONTO PAGO (L3c, 19-sep-2026).
+ *
+ * El bono devuelve el financiamiento que el precio cobró y que no se usó **por
+ * haber pagado antes**. Lo que el cliente DEVOLVIÓ no se pagó antes: se
+ * deshizo, y por eso sale de la base.
+ *
+ * El agujero que cierra: se le negaba el bono a quien aplicaba el crédito de
+ * una devolución, pero un cobro posterior de cualquier tamaño —hasta un
+ * centavo— lo disparaba sobre el cargo COMPLETO y perdonaba el resto. Sobre
+ * una factura de $111,876.11 al 11.05 % con 145 días sin usar, $4,979.26 por
+ * la puerta de al lado. Una puerta cerrada y la de junto abierta no cierra
+ * nada — es la lección que costó cinco revisiones en el bloque L5.
+ */
+export function earlyPayBase(cargo: number, devuelto: number) {
+  return Math.max(0, r2(r2(cargo) - r2(Math.max(0, devuelto))));
+}
+
+/** El memo con el que nace el crédito que deja una devolución (L3c). */
+export const RETURN_CREDIT_MEMO = "Saldo a favor (devolución ";
+
+/**
+ * ¿Este cobro es el crédito que dejó una devolución? Un solo lugar, porque de
+ * él cuelgan DOS reglas distintas —la fecha con la que se mide la mora
+ * (Decisión 97) y que no gane pronto pago (Decisión 96)— y tenerlo escrito dos
+ * veces es cómo empiezan a divergir: un día alguien cambia una cadena y no la
+ * otra, y el mismo cobro es devolución para una cosa y no para la otra.
+ */
+export function isReturnCredit(memo: string | null | undefined) {
+  return String(memo ?? "").startsWith(RETURN_CREDIT_MEMO);
+}

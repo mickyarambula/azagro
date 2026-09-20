@@ -84,7 +84,7 @@ export function expedienteFor(line: string | null | undefined, audience: DocAudi
  */
 export function statementCreditNote(aFavor: string, neto: string) {
   return [
-    `Saldo a su favor: ${aFavor}. Son pagos suyos que ya recibimos y que todavía no se han aplicado a una factura.`,
+    `Saldo a su favor: ${aFavor}. Es dinero suyo que ya tenemos —un pago recibido de más o una devolución— y que todavía no se ha aplicado a ninguna factura.`,
     `Saldo neto a cargo: ${neto}.`,
   ].join("\n");
 }

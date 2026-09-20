@@ -1,0 +1,22 @@
+-- 0046 — La aplicación de un cobro a una factura lleva su propia fecha (L3c, 20-sep-2026).
+--
+-- Hasta hoy una aplicación (`payment_allocs`) heredaba la fecha de su cobro.
+-- Para un cobro normal da igual: se aplica el mismo día. Con el saldo a favor
+-- (L5, 19-sep-2026) un cobro se puede aplicar MESES después de nacer, y la
+-- factura quedó pagada el día de la APLICACIÓN, no el día en que nació el
+-- crédito. Sin esta columna `paid_date` no podía saberlo — y de ahí leen la
+-- mora, la FI, el pronto pago y el P&L.
+--
+-- El primer intento de L3c (rama `l3c-en-pausa`) lo rodeó excluyendo por memo
+-- el crédito de devolución de la fecha de pago, y eso hacía RETROCEDER el reloj
+-- a un abono real anterior: la factura quedaba «pagada» cinco meses antes y la
+-- tarjeta de utilidad restaba $4,174.44 de bono que nadie otorgó. La regla
+-- correcta no era una excepción: era que la aplicación tenga fecha.
+--
+-- Nullable a propósito: vacío = «el mismo día que el cobro», que es lo que
+-- siempre fue para toda fila que existe hoy. Todo lector usa
+-- `coalesce(pa.applied_at, p.date)`, así que ningún número histórico se mueve.
+-- Resuelve de paso dos avisos repetidos del revisor de dinero: el saldo a favor
+-- a una fecha de corte (que restaba aplicaciones posteriores al corte) y que
+-- desaplicar moviera el saldo de una factura en un mes ya cerrado.
+alter table payment_allocs add column if not exists applied_at date;

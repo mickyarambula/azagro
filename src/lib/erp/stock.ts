@@ -392,11 +392,16 @@ export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
         paid_date = coalesce(i.paid_date,
           (select case when max(x.d) is null then null else greatest(max(x.d), i.date) end
             from (
-              select p.date as d
+              -- LA FECHA DE LA APLICACION, no la del cobro (migracion 0046,
+              -- L3c). Vacia = el mismo dia que el cobro, que es lo que siempre
+              -- fue. Un saldo a favor aplicado meses despues de nacer trae la
+              -- fecha en que se aplico; asi la fecha de pago nunca retrocede a
+              -- un abono viejo ni se adelanta al dia en que nacio el credito.
+              select max(coalesce(pa.applied_at, p.date)) as d
               from payment_allocs pa join payments p on p.id = pa.payment_id
               where pa.invoice_id = i.id and p.reverses_id is null
                 and not exists (select 1 from payments r where r.reverses_id = p.id)
-              group by p.id, p.date
+              group by p.id
               having sum(pa.amount) > 0.009
             ) x),
           ${todayMx()}::date)

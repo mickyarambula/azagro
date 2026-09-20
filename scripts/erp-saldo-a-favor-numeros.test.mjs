@@ -155,7 +155,7 @@ test("un depósito de $1,000 sobre facturas de 400/400/400: 400, 400, 200", () =
 // ---------------------------------------------------------------------------
 // 8. El regalo que encontró el revisor de dinero (quinta pasada)
 // ---------------------------------------------------------------------------
-import { earlyPayMeasureDate } from "../src/lib/erp/advance.ts";
+import { earlyPayBase, earlyPayMeasureDate } from "../src/lib/erp/advance.ts";
 
 test("un anticipo viejo NO hace retroceder el reloj del pronto pago", () => {
   // Factura del 1-ene a 150 días. Se cobra casi entera el 20-jul (día 200:
@@ -182,4 +182,31 @@ test("la fecha de medición: la más tarde de todas, con la factura de piso", ()
   // Y un cobro normal (abono el día de la factura o después) no se mueve: el
   // camino viejo queda byte a byte.
   assert.equal(earlyPayMeasureDate("2026-08-01", ["2026-08-01"]), "2026-08-01");
+});
+
+// ---------------------------------------------------------------------------
+// 9. L3c: lo devuelto no entra a la base del pronto pago
+// ---------------------------------------------------------------------------
+test("la puerta lateral del pronto pago: lo devuelto sale de la base", () => {
+  // Factura de referencia: $111,876.11 a 150 días, tasa de costo 6.90 % +
+  // spread ASR 4.15 % = 11.05 %. Cobrada al día 5, quedan 145 sin usar.
+  const CARGO = 111876.11, TASA = 0.1105, DIAS = 145;
+  const bono = (base) => Math.round(((base * TASA * DIAS) / 360) * 100) / 100;
+
+  // Sin devolución: el bono de siempre, byte a byte.
+  assert.equal(earlyPayBase(CARGO, 0), CARGO, "sin devolución, la base es el cargo");
+  assert.equal(bono(earlyPayBase(CARGO, 0)), 4979.26, "el número del revisor");
+
+  // Con casi todo devuelto: la base baja y el bono con ella. ANTES se calculaba
+  // sobre el cargo completo, así que un cobro de un centavo disparaba $4,979.26
+  // y perdonaba el resto.
+  assert.equal(earlyPayBase(CARGO, 106876.11), 5000, "solo lo que de verdad se financió hasta el final");
+  assert.equal(bono(5000), 222.53, "y el bono cae de $4,979.26 a $222.53");
+  assert.equal(Math.round((4979.26 - 222.53) * 100) / 100, 4756.73, "lo que se regalaba por la puerta de al lado");
+
+  // Devolver más que el cargo (no debería pasar) no da base negativa.
+  assert.equal(earlyPayBase(1000, 1500), 0, "nunca negativa");
+  assert.equal(earlyPayBase(1000, 0), 1000);
+  // Centavos: se redondea a dos, como todo el dinero del sistema.
+  assert.equal(earlyPayBase(100.005, 0.004), 100.01);
 });

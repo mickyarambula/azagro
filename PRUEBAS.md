@@ -739,6 +739,61 @@ crédito sobre una factura ya pagada, que **sigue quedándose atrapada** —el
 mecanismo para arreglarla ya existe, le faltan tres pantallas que hay que
 mover juntas—; y capturar los anticipos que traigas del corte de Compaq.
 
+## ESCENARIO 19 — Devolución sobre una factura ya pagada: el crédito ya no se queda atrapado (Decisión 11, 20-sep-2026)
+
+**El número que más importa:** si un cliente te pagó una factura de **$1,000**
+completa y luego te devuelve mercancía por **$300**, tiene que quedarle
+**$300.00 a su favor**, visible y aplicable a su siguiente factura. Hasta hoy
+esos $300 se quedaban escondidos como un saldo negativo dentro de la nota de
+crédito, sin forma de usarlos, y si intentabas cobrarla el sistema te decía
+"esta factura ya está saldada" — que era mentira.
+
+**Antes de empezar:** un pedido de contado entregado, facturado y **cobrado
+completo** (Escenario 18 te deja uno). Anota el folio de su factura.
+
+### Parte A — El crédito nace y se ve
+
+1. Ve a "Ventas", abre ese pedido y pulsa **"Devolver"**. Devuelve una partida
+   por menos del total (unos $300). Confirma.
+2. El aviso te dice que nació la nota de crédito y, como la factura ya estaba
+   pagada, que quedó **saldo a favor** con su folio `PAG-000N`. Anótalo.
+3. Ve a "Cartera" → "Cuentas por cobrar". La nota de crédito aparece
+   **pagada** (no abierta ni con saldo negativo). Y arriba de la tabla está el
+   recuadro **"Saldo a favor de clientes"** con ese cliente y **$300.00**.
+4. Ve a "Cartera" → "Estado de cuenta", elige el cliente. Junto al saldo dice
+   **"Saldo a su favor $300.00"**. Imprime: el papel trae el renglón **"Saldo a
+   su favor: $300.00"** y explica que es dinero suyo por una devolución.
+
+### Parte B — Se aplica a otra factura
+
+5. Haz otro pedido de contado al mismo cliente por más de $300, entrégalo y
+   factúralo. **No lo cobres.**
+6. Vuelve a "Cuentas por cobrar", pulsa el botón del cliente en el recuadro de
+   saldo a favor y, en la ventana, pulsa **"Aplicar"** en la factura nueva. El
+   aviso dice que se aplicaron **$300.00** y cuánto queda por cobrar.
+7. La fecha de pago de esa parte es **hoy** (el día que lo aplicaste), no el
+   día de la devolución. Y **no** se le bonifica pronto pago por eso: devolver
+   mercancía no es pagarte antes.
+
+### Parte C — Lo que se niega, a propósito
+
+8. En "Cartera", busca el `PAG-000N` del saldo a favor e intenta revertirlo
+   solo. Tiene que **negarse** y decir que **"se deshace revirtiendo esa
+   devolución, no solo"**. Si lo quitas de la factura equivocada, la salida es
+   el enlace de la factura en la ventana de saldo a favor.
+9. Ahora ve al pedido de la devolución y pulsa **"Revertir la devolución"**
+   *con el crédito ya aplicado* (paso 6). Se niega y te dice que lo quites de
+   esa factura primero. Quítalo (paso 8, el enlace) y vuelve: ahora sí, y en la
+   lista "Se revierte:" aparece el renglón del saldo a favor con **"El cliente
+   deja de tener esos $300.00 a su favor"**. Lo que se borra, se ve.
+10. Un pedido **en dólares** con la factura pagada: al devolver más de lo que
+    la factura debe, el sistema se **detiene** y te dice que devuelvas hasta
+    donde alcance el saldo o uses "Revertir entrega". No es error: el saldo a
+    favor vive en pesos y todavía no se puede aplicar a facturas en dólares.
+
+**Lo que todavía NO se prueba aquí:** devolverle el dinero al cliente en
+efectivo (sigue sin construirse), y el crédito de una devolución en dólares.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

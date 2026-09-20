@@ -80,11 +80,21 @@ test("CENTRAL (cableado): el contra-PAG es del MISMO tipo con importe NEGATIVO, 
 
 test("por qué negativo y no tipo contrario: el P&L suma cobros y pagos por kind, así netean en cero", () => {
   const reports = src("src/lib/erp/reports.ts");
-  assert.ok(reports.includes("where company_id = ${companyId} and kind = 'inbound' and date between"), "cobros = Σ amount de inbound");
-  assert.ok(reports.includes("where company_id = ${companyId} and kind = 'outbound' and date between"), "pagos = Σ amount de outbound");
+  assert.ok(reports.includes("where p.company_id = ${companyId} and p.kind = 'inbound' and p.date between"), "cobros = Σ amount de inbound");
+  assert.ok(reports.includes("where p.company_id = ${companyId} and p.kind = 'outbound' and p.date between"), "pagos = Σ amount de outbound");
   // Un contra-cobro 'inbound' negativo deja 'cobros' en cero neto; uno 'outbound' positivo inflaría los dos.
   const cobros = [184300, -184300].reduce((s, a) => s + a, 0);
   assert.equal(cobros, 0);
+  // 19-sep-2026: y los dos exigen movimiento de banco. Hay PAG virtuales que
+  // no tocan la cuenta —el abono de una devolución, el pronto pago, el saldo a
+  // favor que deja una devolución—: son crédito, no cobranza. El par
+  // (original, contrario) sigue neteando, porque o los dos tienen banco o
+  // ninguno lo tiene.
+  assert.equal(
+    (reports.match(/and exists \(select 1 from bank_moves m where m\.payment_id = p\.id\)/g) ?? []).length,
+    2,
+    "cobrado y pagado son dinero que se movió en el banco",
+  );
 });
 
 // ---------------------------------------------------------------------------

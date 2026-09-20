@@ -20,7 +20,7 @@ import { nextDocFolio } from "@/lib/erp/folios";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
 import { docRate, rateTableName, type RateUse } from "@/lib/erp/doc-rate";
-import { depositSplit, earlyPayMeasureDate } from "@/lib/erp/advance";
+import { depositSplit, earlyPayBase, earlyPayMeasureDate } from "@/lib/erp/advance";
 import {
   circuitForTerm,
   circuitLabel,
@@ -2010,6 +2010,46 @@ export const saveBankOpening = createServerFn({ method: "POST" })
   });
 
 /**
+ * CUÁNTO DE UNA FACTURA SE DEVOLVIÓ — un solo lugar (L3c, 19-sep-2026).
+ *
+ * Sale de la base del pronto pago porque el bono devuelve el financiamiento
+ * que el precio cobró y que no se usó **por haber pagado antes**: la mercancía
+ * que regresó no se pagó antes, se deshizo.
+ *
+ * **Los TRES que hablan del bono tienen que usar esta misma cuenta** — el que
+ * otorga (`earlyPayDiscount`), el que estima en el estado de cuenta y el que
+ * resta en la tarjeta de utilidad del pedido. Es la regla que `CLAUDE.md` § 1
+ * dice textual: «los tres del pronto pago tienen que coincidir o la pantalla
+ * estima una bonificación y el sistema perdona otra». Arreglar solo el que
+ * otorga dejaba $4,756.73 de diferencia por factura con devolución parcial, y
+ * una utilidad de pedido que se restaba sola.
+ *
+ * Devuelve un mapa factura → devuelto para poder preguntarlo de muchas de un
+ * viaje (el estado de cuenta recorre cientos).
+ */
+export async function returnedOfInvoices(sql: Sql, companyId: number, invoiceIds: number[]) {
+  const map = new Map<number, number>();
+  if (!invoiceIds.length) return map;
+  const rows = await sql<{ invoice_id: number; total: string }>`
+    select pa.invoice_id, coalesce(sum(pa.amount), 0)::text as total
+    from payment_allocs pa join payments p on p.id = pa.payment_id
+    join invoices i on i.id = pa.invoice_id
+    where i.company_id = ${companyId} and pa.invoice_id = any(${invoiceIds})
+      and p.reverses_id is null
+      and not exists (select 1 from payments r where r.reverses_id = p.id)
+      -- Los dos son PAG virtuales: nacen sin movimiento de banco. Esa es la
+      -- marca estructural; el memo solo no basta, porque el de un cobro real
+      -- lo teclea la persona y «Devolución de cheque, se repone» habría
+      -- sacado $111,876.11 de la base del bono (revisor, 20-sep-2026).
+      and (p.memo like 'Saldo a favor (devolución %' or p.memo like 'Devolución %')
+      and not exists (select 1 from bank_moves bm where bm.payment_id = p.id)
+    group by pa.invoice_id
+  `;
+  for (const r of rows) map.set(r.invoice_id, Number(r.total));
+  return map;
+}
+
+/**
  * LA BONIFICACIÓN DE PRONTO PAGO — un solo lugar (19-sep-2026, L5).
  *
  * La llaman las DOS puertas por las que una factura puede quedar saldada: el
@@ -2061,14 +2101,30 @@ export async function earlyPayDiscount(
     // CUÁNDO TERMINÓ DE ENTRAR el dinero de esta factura, no cuándo entró el
     // último pedazo que alguien decidió aplicar. Un anticipo viejo hacía
     // retroceder el reloj y perdonaba a quien pagó tarde.
+    // La fecha de la APLICACIÓN, no la del cobro (migración 0046): la misma
+    // que escribe `refreshInvoiceResidual` en `paid_date`, así los dos relojes
+    // son el mismo.
     const abonos = await sql<{ date: string }>`
-      select p.date::text from payment_allocs pa join payments p on p.id = pa.payment_id
+      select max(coalesce(pa.applied_at, p.date))::text as date
+      from payment_allocs pa join payments p on p.id = pa.payment_id
       where pa.invoice_id = ${i.id} and p.reverses_id is null
         and not exists (select 1 from payments r where r.reverses_id = p.id)
-      group by p.id, p.date
+      group by p.id
       having sum(pa.amount) > 0.009
     `;
     const medida = earlyPayMeasureDate(i.date, abonos.map((a) => a.date));
+    // LO QUE SE DEVOLVIÓ NO SE FINANCIÓ HASTA EL FINAL, así que no entra a la
+    // base del pronto pago (L3c, 19-sep-2026). El bono devuelve el
+    // financiamiento que el precio cobró y que no se usó **por haber pagado
+    // antes**; la mercancía que regresó no se pagó antes, se deshizo.
+    //
+    // Sin esto quedaba una puerta lateral: se le niega el bono a quien aplica
+    // el crédito de la devolución, pero un cobro posterior de CUALQUIER
+    // tamaño —hasta un centavo— lo disparaba sobre el cargo COMPLETO y
+    // perdonaba el resto. Sobre la factura de referencia, $4,979.26 por el
+    // otro lado. Una puerta cerrada y la de al lado abierta no cierra nada.
+    const devuelto = await returnedOfInvoices(sql, opts.companyId, [i.id]);
+    const baseBono = earlyPayBase(Number(i.amount), devuelto.get(i.id) ?? 0);
     const early = daysBetween(i.date, medida) < pol.earlyPayDays;
     let tiieAtIssue = 0;
     if (early) {
@@ -2078,7 +2134,7 @@ export async function earlyPayDiscount(
       tiieAtIssue = pick.rate;
     }
     const bono = earlyPayBonus({
-      cargo: Number(i.amount),
+      cargo: baseBono,
       issueDate: i.date,
       payDate: medida,
       thresholdDays: pol.earlyPayDays,
@@ -2097,7 +2153,8 @@ export async function earlyPayDiscount(
       `;
       await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${dpay[0]!.id}, ${i.id}, ${discount})`;
       newRes = await refreshInvoiceResidual(sql, i.id);
-      detail = `Pagó al día ${bono.lived} (umbral ${pol.earlyPayDays}). Bonificación ganada: ${Number(i.amount).toFixed(2)} × ${(bono.rate * 100).toFixed(2)}% × ${bono.days} d / 360 = ${bono.bonus.toFixed(2)}. Aplicado al saldo: ${discount.toFixed(2)}.`;
+      const nota = baseBono < Number(i.amount) - 0.009 ? ` (base ${baseBono.toFixed(2)}: no cuenta lo devuelto)` : "";
+      detail = `Pagó al día ${bono.lived} (umbral ${pol.earlyPayDays}). Bonificación ganada: ${baseBono.toFixed(2)}${nota} × ${(bono.rate * 100).toFixed(2)}% × ${bono.days} d / 360 = ${bono.bonus.toFixed(2)}. Aplicado al saldo: ${discount.toFixed(2)}.`;
       await writeAudit(sql, {
         companyId: opts.companyId, userId: opts.userId,
         action: "pronto-pago", entity: "invoice", entityId: i.id, name: i.name, detail,
@@ -2761,18 +2818,28 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         date: string;
         amount: string;
       }>`
-        select pa.invoice_id, p.date::text, pa.amount::text
+        select pa.invoice_id, coalesce(pa.applied_at, p.date)::text as date, pa.amount::text
         from payment_allocs pa
         join payments p on p.id = pa.payment_id
         join invoices i on i.id = pa.invoice_id
         where i.company_id = ${cid} and i.partner_id = ${partner.id} and i.kind = 'customer'
-        order by p.date, pa.id
+        -- Ordenado por la MISMA fecha que trae (migración 0046): el corte
+        -- histórico toma «el último de la lista» como fecha de pago, y si se
+        -- ordenara por la del cobro, un crédito aplicado después de un cobro
+        -- real quedaría antes en la lista y el papel mediría con la fecha
+        -- equivocada — $847.93 de mora de menos en la factura de referencia.
+        order by coalesce(pa.applied_at, p.date), pa.id
       `;
 
       // Una factura revertida (BLOQUE DE DESHACER) no es cartera: no aparece
       // en el estado de cuenta ni suma al saldo. Su historia está en bitácora.
       const vivas = invoices.filter((i) => i.state !== "reversed");
       const visibles = historico ? vivas.filter((i) => i.date <= asOf) : vivas;
+      // Lo devuelto de cada factura, de un viaje: la MISMA base del pronto pago
+      // que usa el que OTORGA (L3c). Si aquí se estimara sobre el cargo
+      // completo, la pantalla prometería una bonificación y el sistema
+      // perdonaría otra — $4,756.73 de diferencia en la factura de referencia.
+      const devueltoMap = await returnedOfInvoices(sql, cid, visibles.map((i) => i.id));
       const rows = visibles.map((inv) => {
         // Dos fechas por factura: due_date es el vencimiento VISIBLE al cliente
         // (120 d); credit_due es el plazo financiero real (150 d) desde el que
@@ -2902,9 +2969,12 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         // leyera otra, la pantalla estimaría una bonificación y el sistema
         // perdonaría otra.
         const tiieIssuePick = productDoc && cobraInteres ? pickDocRate(books, inv.circuit_code, inv.date, "costo") : null;
+        // La MISMA base que va a usar el que otorga (L3c): lo devuelto no se
+        // financió hasta el final. Si aquí se estimara sobre el cargo completo,
+        // la pantalla prometería una bonificación y el sistema perdonaría otra.
         const bono = productDoc && cobraInteres && tiieIssuePick
           ? earlyPayBonus({
-              cargo,
+              cargo: earlyPayBase(cargo, devueltoMap.get(inv.id) ?? 0),
               issueDate: inv.date,
               payDate: fechaBono,
               thresholdDays: pol.earlyPayDays,
@@ -3061,15 +3131,23 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       // si no, el papel que se le manda le cobra de más y él sí sabe que pagó.
       // Se cuenta a la fecha del corte, como todo lo demás de esta pantalla.
       const favorRows = await sql<{ total: string }>`
+        -- A la fecha del corte: el cobro ya existía Y solo se restan las
+        -- aplicaciones hechas hasta ese día (migración 0046). Antes se
+        -- restaban todas y un crédito de marzo aplicado en agosto salía como
+        -- $0 en un corte al 30 de junio, cuando ese día eran $300.
         select coalesce(sum(pm.amount - coalesce((
-          select sum(pa.amount) from payment_allocs pa where pa.payment_id = pm.id
+          select sum(pa.amount) from payment_allocs pa join payments px on px.id = pa.payment_id
+          where pa.payment_id = pm.id and coalesce(pa.applied_at, px.date) <= ${asOf}
         ), 0)), 0)::text as total
         from payments pm
         where pm.company_id = ${cid} and pm.partner_id = ${partner.id}
           and pm.kind = 'inbound' and pm.amount > 0 and pm.date <= ${asOf}
           and pm.reverses_id is null
           and not exists (select 1 from payments r where r.reverses_id = pm.id)
-          and pm.amount - coalesce((select sum(pa.amount) from payment_allocs pa where pa.payment_id = pm.id), 0) > 0.009
+          and pm.amount - coalesce((
+            select sum(pa.amount) from payment_allocs pa join payments px on px.id = pa.payment_id
+            where pa.payment_id = pm.id and coalesce(pa.applied_at, px.date) <= ${asOf}
+          ), 0) > 0.009
       `;
       const aFavor = Math.round(Number(favorRows[0]?.total ?? 0) * 100) / 100;
       result.push({ partner, contacts, rows, ar, ap, byCurrency, aFavor, arNeto: Math.round((ar - aFavor) * 100) / 100 });

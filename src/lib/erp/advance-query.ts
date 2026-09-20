@@ -26,7 +26,8 @@ import { activeMember, assertCan } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 import { earlyPayDiscount, issueMoraInvoice } from "@/lib/erp/ops";
-import { applyableCredit, proposeSplit, unappliedOf } from "@/lib/erp/advance";
+import { applyableCredit, isReturnCredit, proposeSplit, unappliedOf } from "@/lib/erp/advance";
+import { todayMx } from "@/lib/utils";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -211,8 +212,8 @@ export const applyCredit = createServerFn({ method: "POST" })
       const companyId = await cid(sql, context.userId);
       // Las dos puntas bloqueadas antes de mirar números: el cobro del que sale
       // el crédito y la factura a la que entra.
-      const pay = await sql<{ id: number; name: string; amount: string; partner_id: number; reverses_id: number | null; kind: string; date: string }>`
-        select id, name, amount::text, partner_id, reverses_id, kind, date::text from payments
+      const pay = await sql<{ id: number; name: string; amount: string; partner_id: number; reverses_id: number | null; kind: string; date: string; memo: string }>`
+        select id, name, amount::text, partner_id, reverses_id, kind, date::text, coalesce(memo,'') as memo from payments
         where id = ${data.paymentId} and company_id = ${companyId} for update
       `;
       if (!pay[0]) throw new Error("Cobro no encontrado");
@@ -281,7 +282,25 @@ export const applyCredit = createServerFn({ method: "POST" })
       // depositado, no lo estuvo, y cobrársela sería cobrar intereses sobre
       // dinero que ya estaba en el banco. Pero tampoco pudo pagar algo que no
       // existía, así que la fecha del depósito sola no sirve.
-      const fechaEfectiva = pay[0].date > inv[0].date ? pay[0].date : inv[0].date;
+      //
+      // **Salvo el crédito de una DEVOLUCIÓN** (L3c): la Decisión 93 mide con
+      // la fecha del dinero porque ese dinero YA ESTABA en el banco y no
+      // financió nada. Mercancía devuelta nunca fue dinero disponible para
+      // OTRA factura, así que la premisa no se cumple: su fecha es el día en
+      // que se aplica. Sin esto, un crédito guardado meses se llevaba consigo
+      // toda la mora corrida — sobre la factura de referencia, $5,486.59 que
+      // además ya no se podrían facturar, porque al quedar `paid` desaparece
+      // el botón «Mora».
+      // LA FECHA DE ESTA APLICACIÓN (migración 0046). Para el sobrante de un
+      // cobro, vacía: el dinero estaba en el banco desde que llegó, y esa es su
+      // fecha (Decisión 93). Para el crédito de una devolución, HOY: mercancía
+      // en la bodega no era dinero disponible para esta factura hasta que
+      // alguien lo aplicó (Decisión 97). Se escribe en la aplicación y de ahí
+      // leen la fecha de pago, la mora y el pronto pago: un solo hecho.
+      const esDevolucion = isReturnCredit(pay[0].memo);
+      const appliedAt: string | null = esDevolucion ? todayMx() : null;
+      const origen = appliedAt ?? pay[0].date;
+      const fechaEfectiva = origen > inv[0].date ? origen : inv[0].date;
       let mora: { name: string | null; charge: number } = { name: null, charge: 0 };
       if (inv[0].kind === "customer") {
         mora = await issueMoraInvoice(sql, companyId, data.invoiceId, {
@@ -291,7 +310,7 @@ export const applyCredit = createServerFn({ method: "POST" })
           userId: context.userId,
         });
       }
-      await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${data.paymentId}, ${data.invoiceId}, ${amount})`;
+      await sql`insert into payment_allocs (payment_id, invoice_id, amount, applied_at) values (${data.paymentId}, ${data.invoiceId}, ${amount}, ${appliedAt})`;
       let residual = await refreshInvoiceResidual(sql, data.invoiceId);
       // PRONTO PAGO, igual que por banco (19-sep-2026, criterio técnico con
       // aval del dueño). El mismo dinero por dos puertas no puede valer
@@ -303,12 +322,22 @@ export const applyCredit = createServerFn({ method: "POST" })
       // Con la fecha EFECTIVA: si su dinero ya estaba ahí cuando nació la
       // factura, no se financió ni un día y se le devuelve el financiamiento
       // completo que el precio le cobró. Es la misma regla, no una excepción.
+      // PRONTO PAGO — pero NO con el crédito de una devolución (L3c,
+      // 19-sep-2026). La bonificación devuelve el financiamiento que el precio
+      // cobró y que no se usó **por haber pagado antes**. Devolver mercancía no
+      // es pagar antes: es deshacer una venta. Sin este candado, aplicar el
+      // crédito de una devolución a otra factura le habría ganado al cliente
+      // una bonificación por pago anticipado que nunca hizo — y sobre una
+      // factura de $111,876.11 a 150 días son hasta $5,081.04.
+      //
       // `payDate` solo fecha el documento de la bonificación: la fecha con la
       // que se MIDE la deriva `earlyPayDiscount` de los abonos vivos de la
-      // factura, así que las dos puertas miden igual por construcción.
-      const bono = await earlyPayDiscount(sql, {
-        companyId, userId: context.userId, invoiceId: data.invoiceId, payDate: fechaEfectiva, residual,
-      });
+      // factura, así que las dos puertas de DINERO miden igual por construcción.
+      const bono = esDevolucion
+        ? { discount: 0, detail: "", residual }
+        : await earlyPayDiscount(sql, {
+            companyId, userId: context.userId, invoiceId: data.invoiceId, payDate: fechaEfectiva, residual,
+          });
       residual = bono.residual;
       const queda = unappliedOf(Number(pay[0].amount), Number(alloc[0]!.applied) + amount);
       await writeAudit(sql, {
@@ -339,11 +368,10 @@ export const applyCredit = createServerFn({ method: "POST" })
  * `credit:edit` la mitad de cartera de una reversa que alguien hizo a
  * propósito, que es de admin/gerencia.
  *
- * Límite conocido y a propósito: `payment_allocs` no tiene fecha propia
- * (hereda la del cobro), así que quitar una aplicación de un mes ya cerrado
- * mueve el saldo de esa factura en ese corte. Es el mismo comportamiento que
- * tenía el borrado, sin perder el rastro. Darle fecha propia a una aplicación
- * es un cambio de esquema y va aparte.
+ * La contra-aplicación lleva fecha de HOY (`applied_at`, migración 0046):
+ * quitar es un hecho de hoy, así que el saldo de esa factura en un mes ya
+ * cerrado no se mueve — el mismo principio que la NC de devolución y el
+ * contra-PAG (Decisión 16).
  */
 export const unapplyCredit = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
@@ -408,7 +436,10 @@ export const unapplyCredit = createServerFn({ method: "POST" })
       if (quitado <= 0.009) throw new Error(`${pay[0].name} ya no le abona nada a ${inv[0].name}.`);
       // Contrario, no borrado (Decisión 16): la suma vuelve a cero y las dos
       // filas se quedan.
-      await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${data.paymentId}, ${data.invoiceId}, ${-quitado})`;
+      // Con la fecha de HOY (migración 0046): quitar es un hecho de hoy, y así
+      // el saldo de esa factura en un corte ya cerrado no se mueve — el mismo
+      // principio que la NC de devolución y el contra-PAG (Decisión 16).
+      await sql`insert into payment_allocs (payment_id, invoice_id, amount, applied_at) values (${data.paymentId}, ${data.invoiceId}, ${-quitado}, ${todayMx()})`;
       const residual = await refreshInvoiceResidual(sql, data.invoiceId);
       await writeAudit(sql, {
         companyId, userId: context.userId,

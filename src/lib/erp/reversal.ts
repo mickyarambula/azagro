@@ -157,6 +157,17 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
     blockers.push(`${p.name} es el abono de una devolución (${p.memo.replace("Devolución ", "")}): se revierte con la devolución. Usa «Revertir devolución» en el pedido, junto a la nota de crédito ${p.memo.replace("Devolución ", "")}.`);
     return empty();
   }
+  // El saldo a favor que dejó una DEVOLUCIÓN cuelga de su nota de crédito: si
+  // se revirtiera solo, el crédito se extinguiría y quedarían vivos la NC, el
+  // movimiento de kardex y el `qty_returned` de la partida — media reversa
+  // desde la pantalla equivocada. Se va con su devolución (L3c).
+  if (p.memo.startsWith("Saldo a favor (devolución ")) {
+    const nc = p.memo.slice("Saldo a favor (devolución ".length).replace(/\)$/, "");
+    blockers.push(
+      `${p.name} es el saldo a favor que dejó la devolución ${nc}: se deshace revirtiendo esa devolución, no solo. Si lo que quieres es quitarlo de la factura a la que se aplicó, usa «Quitar de esta factura».`,
+    );
+    return empty();
+  }
   if (p.memo.startsWith("Pronto pago ")) {
     blockers.push(`${p.name} es la bonificación de pronto pago de un cobro: se revierte junto con ese cobro, no sola.`);
     return empty();

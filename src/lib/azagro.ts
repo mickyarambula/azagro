@@ -2565,27 +2565,55 @@ export const returnSale = createServerFn({ method: "POST" })
       await refreshInvoiceResidual(sql, fv[0].id);
     }
     const leftover = credit - applied;
-    if (leftover <= 0.009) {
-      await sql`update invoices set residual = 0, state = 'paid', paid_date = ${today} where id = ${nc[0]!.id}`;
-    } else {
-      // NOTA (L3c, Decisión 11 — sigue SIN construir, 19-sep-2026). El crédito
-      // que no cupo en ninguna factura viva queda aquí como `residual`
-      // NEGATIVO, y ahí está atrapado: `applyInvoicePayment` lo rechaza con
-      // «esta factura ya está saldada» (cualquier negativo cumple
-      // `residual <= 0.009`, y el mensaje además miente) y
-      // `refreshInvoiceResidual` lo colapsaría a $0 la primera vez que algo
-      // legítimo lo tocara (`Math.max(0, …)`, `stock.ts`).
-      //
-      // El mecanismo para arreglarlo YA EXISTE desde el 19-sep-2026: el saldo
-      // a favor de L5 (`advance.ts`). Se intentó cerrar aquí el mismo día y se
-      // sacó del alcance porque mover este crédito a un saldo a favor cambia
-      // TRES cosas a la vez que hay que resolver juntas: el estado de cuenta
-      // del cliente (que hoy lo enseña como renglón negativo y dejaría de
-      // hacerlo), la posición cambiaria de una NC en dólares
-      // (`fx-position-query.ts` cuenta con este negativo) y la reversa de
-      // devolución (paso 8, que tendría que llevarse el crédito consigo).
-      // Sin las tres, el cliente vería un estado de cuenta $X más alto.
-      await sql`update invoices set residual = ${-leftover}, state = 'open' where id = ${nc[0]!.id}`;
+    // UNA DEVOLUCIÓN CON SOBRANTE EN DÓLARES SE DETIENE, con salida (L3c,
+    // 19-sep-2026). El saldo a favor vive en PESOS (límite explícito de L5), y
+    // un crédito en pesos no se puede aplicar a una factura en dólares:
+    // `applyCredit` lo rechaza y la lista de facturas ni siquiera las enseña.
+    // Guardarlo en pesos al TC pactado dejaría al cliente que solo compra en
+    // dólares viendo un crédito SIN UNA SOLA FACTURA a la cual aplicarlo —
+    // candado sin salida, que es peor que el problema— y además congelaría un
+    // tipo de cambio sin documento, justo lo que la Decisión 90 prohíbe callar.
+    //
+    // La salida que se nombra existe y funciona hoy: cobrar la factura primero
+    // (para que haya saldo vivo donde quepa el crédito), o revertir la entrega
+    // si lo que no debió registrarse fue la salida de mercancía (Decisión 38).
+    if (leftover > 0.009 && fv[0] && fv[0].currency !== "MXN") {
+      throw new Error(
+        `La devolución vale ${credit.toFixed(2)} y ${fv[0].name} solo tiene ${Number(fv[0].residual).toFixed(2)} de saldo, así que sobran ${leftover.toFixed(2)}. En un pedido en ${fv[0].currency} ese sobrante todavía no se puede guardar como saldo a favor (el saldo a favor vive en pesos y no se puede aplicar a facturas en otra moneda). Devuelve hasta donde alcance el saldo de la factura, o si la entrega no debió registrarse, usa «Revertir entrega».`,
+      );
+    }
+    // EL CRÉDITO QUE NO CUPO EN NINGUNA FACTURA VIVA (L3c, Decisión 11,
+    // construido el 19-sep-2026).
+    //
+    // Hasta hoy se escribía en la propia NC como `residual` NEGATIVO y ahí
+    // quedaba atrapado: `applyInvoicePayment` lo rechazaba con «esta factura ya
+    // está saldada» (cualquier negativo cumple `residual <= 0.009`, y el
+    // mensaje además mentía) y `refreshInvoiceResidual` lo habría colapsado a
+    // $0 la primera vez que algo legítimo lo tocara (`Math.max(0, …)`).
+    //
+    // Ahora nace como SALDO A FAVOR del cliente, la misma forma que el
+    // sobrante de un cobro (L5): un PAG sin aplicar. **Virtual** —sin banco,
+    // como el abono de la devolución—, porque aquí no entró dinero: lo que hay
+    // es crédito. Así ningún documento vuelve a llevar saldo negativo.
+    //
+    // EL MEMO HACE TRES TRABAJOS a la vez, y por eso lleva las dos cosas:
+    //   · empieza con «Saldo a favor» → `unapplyCredit` lo acepta, que es la
+    //     salida obligatoria si se aplica a la factura equivocada;
+    //   · lleva el folio de la NC → `reverseReturn` lo encuentra para llevárselo
+    //     consigo, y `reversal.ts` lo bloquea nombrando ese camino (revertirlo
+    //     solo extinguiría el crédito dejando viva la NC, el movimiento de
+    //     kardex y `qty_returned`: media reversa desde la pantalla equivocada).
+    // El amarre por folio es llave de verdad (único por empresa), el mismo de
+    // la Decisión 42.
+    await sql`update invoices set residual = 0, state = 'paid', paid_date = ${today} where id = ${nc[0]!.id}`;
+    let favorName: string | null = null;
+    if (leftover > 0.009) {
+      favorName = await nextDocFolio(sql, m.company_id, "PAG");
+      await sql`
+        insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
+        values (${m.company_id}, 'inbound', ${favorName}, ${so[0].partner_id}, ${leftover},
+          ${`Saldo a favor (devolución ${ncName})`}, ${context.userId}, ${today})
+      `;
     }
     await writeAudit(sql, {
       companyId: m.company_id,
@@ -2594,7 +2622,9 @@ export const returnSale = createServerFn({ method: "POST" })
       entity: "sale",
       entityId: so[0].id,
       name: so[0].name,
-      detail: `${ncName}${fv[0] ? ` · abona a ${fv[0].name}${data.fvId != null ? " (elegida)" : ""}` : " · sin factura viva a la que abonar"}${posted.length ? ` · ${posted.join(", ")}` : ""}${
+      detail: `${ncName}${fv[0] ? ` · abona a ${fv[0].name}${data.fvId != null ? " (elegida)" : ""}` : " · sin factura viva a la que abonar"}${
+        favorName ? ` · saldo a favor ${favorName} ${leftover.toFixed(2)}` : ""
+      }${posted.length ? ` · ${posted.join(", ")}` : ""}${
         costs.length ? ` · costo de salida ${costs.map((c) => (c.found ? c.unitCost.toFixed(4) : "SIN SALIDA")).join(", ")}` : ""
       }`,
     });
