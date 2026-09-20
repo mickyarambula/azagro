@@ -202,3 +202,28 @@ export const RETURN_CREDIT_MEMO = "Saldo a favor (devolución ";
 export function isReturnCredit(memo: string | null | undefined) {
   return String(memo ?? "").startsWith(RETURN_CREDIT_MEMO);
 }
+
+/**
+ * LA BASE SOBRE LA QUE CORRE LA MORA (L3b, Decisión 10, 20-sep-2026).
+ *
+ * El interés corre sobre el CARGO ORIGINAL, no sobre el saldo: un abono
+ * parcial no lo congela ni reduce la base (regla del Excel, `CLAUDE.md` § 1).
+ * **Y eso sigue siendo verdad.** Una DEVOLUCIÓN no es un abono: un abono es
+ * dinero que paga la deuda, una devolución es mercancía que regresó, o sea que
+ * el cargo original resultó ser otro. Sobre la parte devuelta nunca hubo venta
+ * que financiar, así que nunca hubo interés que cobrar.
+ *
+ * El propio sistema ya escribió esa distinción tres veces antes de llegar aquí:
+ * `returnedOfInvoices` la separa por documento (la nota de crédito, no el
+ * abono), la Decisión 96 saca lo devuelto de la base del pronto pago con esta
+ * misma resta, y la Decisión 97 lo dice con todas sus letras — «mercancía
+ * devuelta nunca fue dinero disponible».
+ *
+ * `ajusta = false` es la salida caso por caso de la Decisión 10: quien tenga
+ * permiso puede decidir que esta devolución NO baje la mora (no es lo mismo un
+ * error de Azagro que un sobrante del cliente), y eso queda en bitácora.
+ */
+export function moraBase(cargo: number, devuelto: number, ajusta = true) {
+  const c = Math.max(0, r2(cargo));
+  return ajusta ? Math.max(0, r2(c - Math.max(0, r2(devuelto)))) : c;
+}

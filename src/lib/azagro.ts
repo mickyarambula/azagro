@@ -2747,6 +2747,9 @@ export const listInvoices = createServerFn({ method: "POST" })
       partner_phone: string;
       date: string;
       due_date: string;
+      credit_due: string | null;
+      mora_ajusta: boolean;
+      devuelto: string;
       state: string;
       amount: string;
       residual: string;
@@ -2779,8 +2782,18 @@ export const listInvoices = createServerFn({ method: "POST" })
       cancelled_at: string | null;
     }>`
       select i.id, i.kind, i.name, p.name as partner, i.partner_id, p.email as partner_email, p.phone as partner_phone,
-        i.date::text, i.due_date::text,
+        i.date::text, i.due_date::text, i.credit_due::text,
         i.state, i.amount::text, i.residual::text, i.late_amount::text, i.origin,
+        coalesce(i.mora_ajusta, true) as mora_ajusta,
+        -- Lo devuelto de esta factura (L3b): la vista previa del cobro tiene
+        -- que estimar con la MISMA base que la FI va a facturar. Misma fuente
+        -- que returnedOfInvoices: la nota de crédito por applies_to_id.
+        coalesce((
+          select sum(-nc.amount) from invoices nc
+          where nc.company_id = i.company_id and nc.applies_to_id = i.id
+            and nc.kind = 'customer' and nc.name like 'NC-%'
+            and nc.reverses_id is null and nc.state <> 'reversed'
+        ), 0)::text as devuelto,
         coalesce(i.amount_fx,0)::text as amount_fx, coalesce(i.fx_agreed,1)::text as fx_agreed, i.fx_paid::text as fx_paid,
         coalesce(i.credit_days, 0)::int as credit_days,
         greatest(0, (${today}::date - i.due_date))::int as days_overdue,

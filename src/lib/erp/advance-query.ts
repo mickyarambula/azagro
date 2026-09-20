@@ -22,11 +22,11 @@ import { z } from "zod";
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx } from "@/lib/db";
-import { activeMember, assertCan } from "@/lib/erp/acl";
+import { activeMember, assertAdminOrGerencia, assertCan } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
-import { earlyPayDiscount, issueMoraInvoice } from "@/lib/erp/ops";
-import { applyableCredit, isReturnCredit, proposeSplit, unappliedOf } from "@/lib/erp/advance";
+import { earlyPayDiscount, issueMoraInvoice, returnedOfInvoices } from "@/lib/erp/ops";
+import { applyableCredit, isReturnCredit, moraBase, proposeSplit, unappliedOf } from "@/lib/erp/advance";
 import { todayMx } from "@/lib/utils";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -447,5 +447,66 @@ export const unapplyCredit = createServerFn({ method: "POST" })
         detail: `${quitado.toFixed(2)} de ${pay[0].name} regresa al saldo a favor (aplicación contraria, nada borrado) · saldo de la factura ${Number(inv[0].residual).toFixed(2)} → ${residual.toFixed(2)}`,
       });
       return { ok: true as const, removed: quitado, residual, invoice: inv[0].name, payment: pay[0].name };
+    });
+  });
+
+/**
+ * APAGAR (o volver a encender) EL AJUSTE DE MORA DE UNA FACTURA — la segunda
+ * mitad de la Decisión 10 (L3b, 20-sep-2026).
+ *
+ * Por omisión, la mora de una factura se calcula sobre el cargo MENOS lo
+ * devuelto: sobre la mercancía que regresó nunca hubo venta que financiar. Pero
+ * el dueño lo dejó dicho: «es el comportamiento por omisión, no una regla fija
+ * — quien tenga permiso puede decidir lo contrario caso por caso, con bitácora
+ * (depende de por qué devolvió: error de Azagro no es lo mismo que sobrante del
+ * cliente)».
+ *
+ * Es admin o gerencia, como revertir: mueve dinero que ya se le dijo al cliente
+ * y no se deshace con un botón cualquiera. El motivo es obligatorio — sin la
+ * razón, dentro de un mes nadie va a saber por qué esta factura cobra interés
+ * sobre mercancía que el cliente ya no tiene.
+ *
+ * No escribe ningún número: solo el interruptor. Lo que cambie de aquí en
+ * adelante lo calculan los seis lectores con `moraBase`, y la FI ya emitida
+ * se queda como está (Decisión 21) — lo que se cobró de más se finiquita con su
+ * propio documento, que es otra pieza.
+ */
+export const setMoraAjusta = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ invoiceId: z.number(), ajusta: z.boolean(), reason: z.string().min(3, "Escribe el motivo: dentro de un mes nadie va a recordar por qué.") }))
+  .handler(async ({ context, data }) => {
+    const boot = await getSql();
+    await assertCan(boot, context.userId, "credit", "edit");
+    return withTx(async (sql) => {
+      const companyId = await cid(sql, context.userId);
+      await assertAdminOrGerencia(sql, context.userId);
+      const inv = await sql<{ id: number; name: string; kind: string; inv_class: string; state: string; amount: string; mora_ajusta: boolean }>`
+        select id, name, kind, coalesce(inv_class,'product') as inv_class, state, amount::text,
+          coalesce(mora_ajusta, true) as mora_ajusta
+        from invoices where id = ${data.invoiceId} and company_id = ${companyId} for update
+      `;
+      if (!inv[0]) throw new Error("Factura no encontrada");
+      if (inv[0].kind !== "customer" || inv[0].inv_class !== "product" || Number(inv[0].amount) <= 0) {
+        throw new Error(`${inv[0].name} no es una factura de venta: el ajuste de mora al devolver solo aplica a lo que el cliente debe por producto.`);
+      }
+      if (inv[0].state === "reversed") throw new Error(`${inv[0].name} está revertida (Decisión 31): ya no se le calcula mora.`);
+      if (inv[0].mora_ajusta === data.ajusta) {
+        throw new Error(`${inv[0].name} ya está así: la mora ${data.ajusta ? "SÍ" : "NO"} se ajusta por lo devuelto.`);
+      }
+      const devuelto = (await returnedOfInvoices(sql, companyId, [inv[0].id])).get(inv[0].id) ?? 0;
+      await sql`update invoices set mora_ajusta = ${data.ajusta} where id = ${inv[0].id} and company_id = ${companyId}`;
+      await writeAudit(sql, {
+        companyId, userId: context.userId,
+        action: data.ajusta ? "mora-ajusta-si" : "mora-ajusta-no",
+        entity: "invoice", entityId: inv[0].id, name: inv[0].name,
+        detail: `${data.ajusta ? "La mora vuelve a ajustarse" : "La mora deja de ajustarse"} por lo devuelto · cargo ${Number(inv[0].amount).toFixed(2)} · devuelto ${devuelto.toFixed(2)} · base ${moraBase(Number(inv[0].amount), devuelto, data.ajusta).toFixed(2)} · ${data.reason}`,
+      });
+      return {
+        ok: true as const,
+        invoice: inv[0].name,
+        ajusta: data.ajusta,
+        base: moraBase(Number(inv[0].amount), devuelto, data.ajusta),
+        devuelto,
+      };
     });
   });

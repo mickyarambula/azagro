@@ -51,7 +51,10 @@ test("la FI guarda TIIE, spread, días, capital y FEGA, con autor y desglose", (
   assert.ok(mora.includes("if (!pick) throw new Error(missingDocRateMessage("), "sin renglón en la tabla que le toca no se emite FI (error claro), no se estima");
   assert.ok(mora.includes("spread ${(pol.collectionSpread * 100).toFixed(2)}%"), "la FI guarda el spread");
   assert.ok(mora.includes("d vencidos"), "la FI guarda los días");
-  assert.ok(mora.includes("capital (cargo original)"), "la FI guarda el capital base");
+  // 20-sep-2026 (L3b): la FI guarda la base que de verdad cobró y de qué cargo
+  // salió, en un solo renglón — antes guardaba dos capitales distintos en la
+  // misma cadena y quien la auditara leía bases que no cuadraban.
+  assert.ok(mora.includes("`capital ${bill.capital.toFixed(2)} (cargo ${Number(inv[0].amount).toFixed(2)}"), "la FI guarda el capital base y de qué cargo salió");
   assert.ok(mora.includes("created_by, calc, calc_client, int_part, fega_part"), "la FI guarda autor, fórmula y desglose interés/FEGA");
   assert.ok(mora.includes("writeAudit("), "la emisión de FI (manual o al cobrar) queda en bitácora");
 });

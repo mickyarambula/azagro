@@ -13,7 +13,7 @@ import { policy, returnedOfInvoices } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
 import { circuitTerms, financingCircuit, fundingTableOf, nearestFunding, readCircuits } from "@/lib/erp/circuits";
 import { docRate, usesFundingTable } from "@/lib/erp/doc-rate";
-import { earlyPayBase } from "@/lib/erp/advance";
+import { earlyPayBase, moraBase } from "@/lib/erp/advance";
 import { linealMarginFromPrice, type FinancingBase } from "@/lib/erp/pricing";
 import { YEAR_DAYS } from "@/lib/erp/rules";
 
@@ -1028,8 +1028,11 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       credit_due: string | null;
       inv_class: string;
       circuit_code: string | null;
+      id: number;
+      mora_ajusta: boolean;
     }>`
-      select i.amount::text, i.residual::text, coalesce(i.currency,'MXN') as currency, i.due_date::text, i.credit_due::text,
+      select i.id, coalesce(i.mora_ajusta, true) as mora_ajusta,
+        i.amount::text, i.residual::text, coalesce(i.currency,'MXN') as currency, i.due_date::text, i.credit_due::text,
         coalesce(i.inv_class,'product') as inv_class, i.circuit_code
       from invoices i
       join partners p on p.id = i.partner_id
@@ -1051,6 +1054,9 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
     // Facturas cuyo plazo no tiene TIIE en la tabla: el saldo sí cuenta, el
     // interés no se estima (se reporta cuántas quedaron sin estimar).
     let sinTiie = 0;
+    // Lo devuelto de cada factura, de un viaje: la MISMA base que la FI y el
+    // estado de cuenta (L3b).
+    const devueltoMora = await returnedOfInvoices(sql, companyId, open.map((i) => i.id));
     for (const inv of open) {
       const moraDue = inv.credit_due || inv.due_date;
       const saldo = Number(inv.residual);
@@ -1070,7 +1076,11 @@ export const getUpcomingDue = createServerFn({ method: "GET" })
       const rate = pick ? pick.rate + pol.collectionSpread : 0;
       // El interés corre sobre el CARGO original una vez vencido el plazo; el
       // "× 30 / 360" es la unidad del reporte (interés de un mes de 30 días).
-      const interesMensual = pick ? (Number(inv.amount) * rate * 30) / 360 : 0;
+      // La MISMA base que la FI y el estado de cuenta (L3b): el cargo menos lo
+      // devuelto. Si «lo que viene» estimara sobre el cargo entero, el inicio
+      // prometería un interés que nadie va a facturar.
+      const baseMora = moraBase(Number(inv.amount), devueltoMora.get(inv.id) ?? 0, inv.mora_ajusta !== false);
+      const interesMensual = pick ? (baseMora * rate * 30) / 360 : 0;
       const target = moraDue < today ? vencido : (() => {
         const key = moraDue.slice(0, 7);
         const b = buckets.get(key) ?? { month: key, n: 0, saldo: 0, saldoMxnDocs: 0, saldoUsdDocs: 0, interesMensual: 0 };

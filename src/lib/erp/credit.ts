@@ -273,6 +273,8 @@ export function explainInterest(i: {
   currency?: string;
   dueDate?: string;
   residual?: number;
+  /** Lo devuelto que salió de la base (L3b). Solo para nombrarla bien. */
+  returned?: number;
 }) {
   const cur = i.currency === "USD" ? "USD" : "MXN";
   const cap = moneyIn(i.capital, cur);
@@ -281,12 +283,17 @@ export function explainInterest(i: {
   const dueBit = i.dueDate ? ` al ${dateDMY(i.dueDate)}` : " en la fecha de vencimiento";
   const tiieBit = i.tiieDate ? ` (renglón de la tabla del ${dateDMY(i.tiieDate)})` : "";
   const split = splitFegaBundle(i.fegaRate, i.commissionRate);
+  // Cómo se nombra el capital. **Nunca es el saldo** (L3b, 20-sep-2026): el
+  // interés corre sobre el cargo —menos lo devuelto, si hubo devolución—, y
+  // llamarle «saldo pendiente» a ese número describía otra cosa. El dato de si
+  // el documento ya se pagó sigue sirviendo, pero para decir eso y no para
+  // nombrar la base.
   const base =
-    i.residual != null && i.residual > 0.009
-      ? "saldo pendiente"
-      : i.residual != null
+    i.returned != null && i.returned > 0.009
+      ? "cargo menos lo devuelto"
+      : i.residual != null && i.residual <= 0.009
         ? "cargo original (el documento ya se pagó)"
-        : "cargo";
+        : "cargo original";
 
   // Antes del vencimiento no hay nada que cobrar: ni interés ni comisión ni
   // FEGA. No se multiplica por días negativos (eso daba un "interés a favor"

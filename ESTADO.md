@@ -447,8 +447,40 @@ caso por caso, con bitácora (depende de por qué devolvió: error de Azagro no
 es lo mismo que sobrante del cliente). Hoy la devolución no toca las FI ni el
 cargo sobre el que corre el interés (la NC es un documento aparte) — falta
 construir el ajuste y la opción de anularlo caso por caso.
-**Verificado el 19-sep-2026: sigue sin construirse** — `returnSale`
-(`azagro.ts:2361`) no menciona la FI ni `inv_class = 'mora'` en ningún camino.
+**CONSTRUIDA el 20-sep-2026** (migración 0047). La base de la mora pasó a ser
+`moraBase(cargo, devuelto, ajusta)` y la usan los SEIS lectores en el mismo
+acto — partirlos habría dejado el papel diciendo un interés y la FI cobrando
+otro. `returnSale` no cambió: no hace falta que toque la mora, porque la base
+se DERIVA de las notas de crédito vivas de esa factura (`returnedOfInvoices`),
+como todo lo demás en este sistema.
+
+**El choque aparente de reglas no era tal.** `CLAUDE.md` § 1 dice que el
+interés corre sobre el cargo y que un abono parcial no reduce la base; la
+Decisión 10 dice que la mora se ajusta al devolver. Un abono es dinero que paga
+la deuda; una devolución es mercancía que regresó, y sobre esa parte nunca hubo
+venta que financiar. El sistema ya había escrito esa distinción tres veces
+antes de llegar aquí (`returnedOfInvoices`, Decisión 96 y Decisión 97).
+
+Números del § 5 del diseño: cargo $111,876.11 al 16.05 %, 30 días → $1,496.34;
+devuelta la mitad → **$748.17**; con el ajuste apagado → $1,496.34.
+
+La primera revisión encontró que el PAPEL mentía: la FI le imprimía al cliente
+«cargo original $111,876.11 × 16.05 % × 30 / 360 = $748.17», y ese producto es
+$1,496.34. Ahora el texto dice la base que de verdad se cobra y de dónde sale
+(«cargo X − Y devueltos = Z × tasa…»). Apareció además un QUINTO lector que
+nadie había contado —la vista previa del diálogo de cobro, que estimaba sobre
+el SALDO y desde el vencimiento visible— y el corte histórico, que recalculaba
+la mora de un mes ya cerrado: los dos cerrados.
+
+**Lo que queda fuera, a propósito y anotado:** el finiquito de lo YA facturado.
+Si se emitió una FI sobre el cargo completo y después se devuelve, la base
+nueva es menor y `moraBilling` topa en cero (`Math.max(0, base − facturado)`),
+así que el sistema deja de cobrar interés legítimo hasta que la base nueva
+alcanza lo ya cobrado — un «pozo» que se autocorrige hacia adelante pero sin
+documento que lo explique, y el FEGA cobrado de más se queda. Devolverlo pide
+una nota de crédito sobre la FI con `int_part`/`fega_part` negativos, y eso
+toca el conteo de los tres lectores de mora del P&L y el candado LIFO del paso
+8: es su propia pieza.
 
 ### L3c. ¿Qué se hace con el saldo a favor de una nota de crédito sobre una factura ya pagada? (LOGICA h.10)
 **RESUELTA EN DOCUMENTO (Decisión 11 del dueño, 7-sep-2026), no construida.**

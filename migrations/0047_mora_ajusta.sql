@@ -1,0 +1,22 @@
+-- 0047 — El ajuste de la mora al devolver se puede apagar por documento
+-- (L3b, Decisión 10, 20-sep-2026).
+--
+-- La Decisión 10 del dueño dice, textual: la mora ya facturada «se ajusta en
+-- proporción a lo devuelto — pero es el comportamiento POR OMISIÓN, no una
+-- regla fija: quien tenga permiso puede decidir lo contrario caso por caso,
+-- con bitácora (depende de por qué devolvió: error de Azagro no es lo mismo
+-- que sobrante del cliente)».
+--
+-- Esta columna es ese interruptor, y vive en la FACTURA porque la decisión es
+-- sobre ella: si a esta venta se le baja la base del interés o no. No es un
+-- valor por omisión que decida dinero (regla 9): `true` es la decisión escrita
+-- del dueño, y lo único que la cambia es una persona con permiso, dejando su
+-- motivo en la bitácora.
+--
+-- `not null default true` a propósito, al revés que `policy_code`: aquí no hay
+-- «sin capturar» — o se ajusta (lo decidido) o alguien decidió que no. Toda
+-- factura que existe hoy queda en `true`, que es el comportamiento que la
+-- Decisión 10 pide; ningún número histórico se mueve hasta que alguien
+-- devuelva algo, porque sin devolución la base es el cargo completo de todos
+-- modos (`moraBase(cargo, 0) = cargo`).
+alter table invoices add column if not exists mora_ajusta boolean not null default true;

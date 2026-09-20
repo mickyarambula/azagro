@@ -96,6 +96,11 @@ export function statementNotes(rates: { annual: string; commission: string; fega
     `Comisión ${rates.commission} + FEGA ${rates.fega} = ${rates.total} sobre el cargo, una sola vez, cuando el documento ya venció; se factura por separado.`,
     "Lo que aún no vence no lleva interés, ni comisión, ni FEGA: se muestran los días que faltan.",
     "Saldo = cargo − abonos; no incluye intereses. Ut. cambiaria = USD × (TC pactado − TC pagado).",
+    // Con devolución, el interés de la fila no sale de multiplicar el cargo
+    // impreso: sale del cargo MENOS lo devuelto (L3b). Sin esta línea, el
+    // cliente que rehace la cuenta con su hoja no llega al mismo número y el
+    // papel deja de verificarse solo.
+    "Si hubo devoluciones, el interés se calcula sobre el cargo menos lo devuelto: la nota de crédito aparece en su propio renglón.",
   ].join("\n");
 }
 
@@ -331,6 +336,8 @@ export function interestInvoiceClientCalc(i: {
   docDue: string;
   interestFrom: string;
   capital: number;
+  /** Lo devuelto que salió de la base, para explicar el renglón (L3b). 0 = no hubo. */
+  returned?: number;
   annualRate: number;
   days: number;
   interestAccrued: number;
@@ -344,7 +351,12 @@ export function interestInvoiceClientCalc(i: {
   const m = (n: number) => moneyIn(n, cur);
   const lines = [
     `Sobre la factura ${i.docName}: vence ${dateDMY(i.docDue)} · interés desde ${dateDMY(i.interestFrom)}.`,
-    `Intereses moratorios al ${dateDMY(i.asOf)}: cargo original ${m(i.capital)} × tasa anual ${pctRate(i.annualRate)} × ${i.days} días vencidos desde el ${dateDMY(i.interestFrom)} / 360 = ${m(i.interestAccrued)}.`,
+    // El capital que se nombra es el que se MULTIPLICA: si el cliente devolvió
+    // parte, el interés no corre sobre lo que regresó (L3b). Decirle «cargo
+    // original» junto a un interés de otra base le da una cuenta que no da.
+    i.returned && i.returned > 0.009
+      ? `Intereses moratorios al ${dateDMY(i.asOf)}: cargo ${m(i.capital + i.returned)} − ${m(i.returned)} devueltos = ${m(i.capital)} × tasa anual ${pctRate(i.annualRate)} × ${i.days} días vencidos desde el ${dateDMY(i.interestFrom)} / 360 = ${m(i.interestAccrued)}.`
+      : `Intereses moratorios al ${dateDMY(i.asOf)}: cargo original ${m(i.capital)} × tasa anual ${pctRate(i.annualRate)} × ${i.days} días vencidos desde el ${dateDMY(i.interestFrom)} / 360 = ${m(i.interestAccrued)}.`,
   ];
   if (i.interestBefore > 0.009) {
     lines.push(`Ya facturado en documentos anteriores: ${m(i.interestBefore)}. En esta factura: ${m(i.interestNew)}.`);
@@ -355,7 +367,7 @@ export function interestInvoiceClientCalc(i: {
       split.commission > 0 ? `comisión ${pctRate(split.commission)}` : "",
       split.fega > 0 ? `FEGA ${pctRate(split.fega)}` : "",
     ].filter(Boolean);
-    lines.push(`${partes.join(" + ")} sobre el cargo original, una sola vez: ${m(i.fegaNew)}.`);
+    lines.push(`${partes.join(" + ")} sobre ${i.returned && i.returned > 0.009 ? `${m(i.capital)} (el cargo menos lo devuelto)` : "el cargo original"}, una sola vez: ${m(i.fegaNew)}.`);
   }
   lines.push(`Total de esta factura: ${m(i.interestNew + i.fegaNew)}.`);
   return lines.join("\n");

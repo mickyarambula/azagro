@@ -19,6 +19,8 @@ const ACTION: Record<string, string> = {
   "aplicar-saldo-a-favor": "Aplicó saldo a favor",
   "quitar-saldo-a-favor": "Quitó saldo a favor",
   "revertir-saldo-a-favor": "Revirtió saldo a favor",
+  "mora-ajusta-no": "Apagó el ajuste de mora",
+  "mora-ajusta-si": "Encendió el ajuste de mora",
   traslado: "Traslado",
   ajuste: "Ajuste de stock",
   archivo: "Archivo",

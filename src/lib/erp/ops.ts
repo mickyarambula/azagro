@@ -20,7 +20,7 @@ import { nextDocFolio } from "@/lib/erp/folios";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
 import { docRate, rateTableName, type RateUse } from "@/lib/erp/doc-rate";
-import { depositSplit, earlyPayBase, earlyPayMeasureDate } from "@/lib/erp/advance";
+import { depositSplit, earlyPayBase, earlyPayMeasureDate, moraBase } from "@/lib/erp/advance";
 import {
   circuitForTerm,
   circuitLabel,
@@ -2027,7 +2027,7 @@ export const saveBankOpening = createServerFn({ method: "POST" })
  * Devuelve un mapa factura → devuelto para poder preguntarlo de muchas de un
  * viaje (el estado de cuenta recorre cientos).
  */
-export async function returnedOfInvoices(sql: Sql, companyId: number, invoiceIds: number[]) {
+export async function returnedOfInvoices(sql: Sql, companyId: number, invoiceIds: number[], asOf?: string) {
   const map = new Map<number, number>();
   if (!invoiceIds.length) return map;
   // LA FUENTE SON LAS NOTAS DE CRÉDITO, no las aplicaciones (20-sep-2026).
@@ -2049,6 +2049,11 @@ export async function returnedOfInvoices(sql: Sql, companyId: number, invoiceIds
     where nc.company_id = ${companyId} and nc.applies_to_id = any(${invoiceIds})
       and nc.kind = 'customer' and nc.name like 'NC-%'
       and nc.reverses_id is null and nc.state <> 'reversed'
+      -- A LA FECHA DEL CORTE: una devolución de septiembre no puede cambiar el
+      -- estado de cuenta al 31 de agosto. Sin el tope, un mes ya cerrado
+      -- recalculaba la base de la mora hacia abajo y dejaba de coincidir con
+      -- el papel que el cliente ya tenía en la mano.
+      and (${asOf ?? null}::date is null or nc.date <= ${asOf ?? null}::date)
     group by nc.applies_to_id
   `;
   for (const r of rows) map.set(r.applies_to_id, Number(r.total));
@@ -2774,6 +2779,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         policy_code: string;
         circuit_code: string | null;
         folio_fiscal: string;
+        mora_ajusta: boolean;
         uuid_fiscal: string;
       }>`
         select id, name, kind, date::text, due_date::text, credit_due::text, amount::text, residual::text, state, origin,
@@ -2782,7 +2788,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
           coalesce(credit_days, 0)::int as credit_days,
           coalesce(opening_paid, 0)::text as opening_paid,
           coalesce(policy_code, '') as policy_code,
-          circuit_code,
+          circuit_code, coalesce(mora_ajusta, true) as mora_ajusta,
           coalesce(folio_fiscal, '') as folio_fiscal,
           coalesce(uuid_fiscal, '') as uuid_fiscal
         from invoices
@@ -2845,7 +2851,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       // que usa el que OTORGA (L3c). Si aquí se estimara sobre el cargo
       // completo, la pantalla prometería una bonificación y el sistema
       // perdonaría otra — $4,756.73 de diferencia en la factura de referencia.
-      const devueltoMap = await returnedOfInvoices(sql, cid, visibles.map((i) => i.id));
+      const devueltoMap = await returnedOfInvoices(sql, cid, visibles.map((i) => i.id), historico ? asOf : undefined);
       const rows = visibles.map((inv) => {
         // Dos fechas por factura: due_date es el vencimiento VISIBLE al cliente
         // (120 d); credit_due es el plazo financiero real (150 d) desde el que
@@ -2908,7 +2914,10 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         const endOverdue = paidForCalc && paidForCalc < asOf ? paidForCalc : asOf;
         const mora = productDoc && !sinTiie
           ? computeMora({
-              capital: Math.max(0, cargo),
+              // La MISMA base que va a facturar la FI (L3b): el cargo menos lo
+              // devuelto. Si aquí se midiera sobre el cargo entero, el papel
+              // diría un interés y la FI cobraría otro.
+              capital: moraBase(cargo, devueltoMap.get(inv.id) ?? 0, inv.mora_ajusta !== false),
               dueDate: moraDue,
               asOf,
               paidDate: paidForCalc,
@@ -2951,7 +2960,7 @@ export const getLiveStatement = createServerFn({ method: "POST" })
         const { serie, folio } = splitDocName(inv.name);
         const line = productDoc && !sinTiie
           ? computeStatementLine({
-              cargo,
+              cargo: moraBase(cargo, devueltoMap.get(inv.id) ?? 0, inv.mora_ajusta !== false),
               dueDate: moraDue,
               asOf,
               paidDate: paidForCalc,
@@ -3203,10 +3212,11 @@ export async function issueMoraInvoice(
     policy_code: string;
     circuit_code: string | null;
     state: string;
+    mora_ajusta: boolean;
   }>`
     select id, partner_id, residual::text, amount::text, due_date::text, credit_due::text, paid_date::text,
       fega_charged, interest_invoiced::text, name, kind, coalesce(inv_class,'product') as inv_class, order_id,
-      coalesce(policy_code, '') as policy_code, circuit_code, state
+      coalesce(policy_code, '') as policy_code, circuit_code, state, coalesce(mora_ajusta, true) as mora_ajusta
     from invoices where id = ${invoiceId} and company_id = ${companyId}
     for update
   `;
@@ -3222,7 +3232,10 @@ export async function issueMoraInvoice(
   }
   // La mora corre desde el plazo financiero (credit_due, día 150), no desde el
   // vencimiento visible al cliente (due_date, día 120). La TIIE es la vigente
-  // en esa fecha. El capital es SIEMPRE el cargo original (regla del Excel).
+  // en esa fecha. El capital es el cargo original MENOS lo devuelto
+  // (`moraBase`, L3b): la regla del Excel dice que un ABONO no baja la base, y
+  // sigue siendo cierta — una devolución no es un abono, es mercancía que
+  // regresó y sobre la que nunca hubo venta que financiar.
   const moraDue = inv[0].credit_due || inv[0].due_date;
   const paidDate = opts?.paidDate === undefined ? inv[0].paid_date : opts.paidDate;
   // La política «Sin mora» apaga el interés: no se emite FI y no se pide TIIE.
@@ -3263,8 +3276,12 @@ export async function issueMoraInvoice(
   }
   const cobra = { commission: politica.commission, fega: politica.fega };
   const tasas = chargeRates(pol.fegaRate, pol.commissionRate, cobra);
+  // LA BASE: el cargo menos lo devuelto (L3b, Decisión 10). Sobre la mercancía
+  // que regresó nunca hubo venta que financiar. `moraBase` es la regla; el
+  // interruptor por documento vive en `invoices.mora_ajusta`.
+  const devueltoFv = (await returnedOfInvoices(sql, companyId, [inv[0].id])).get(inv[0].id) ?? 0;
   const bill = moraBilling({
-    cargo: Number(inv[0].amount),
+    cargo: moraBase(Number(inv[0].amount), devueltoFv, inv[0].mora_ajusta !== false),
     moraDue,
     asOf,
     paidDate,
@@ -3276,6 +3293,7 @@ export async function issueMoraInvoice(
   });
   const formula = explainInterest({
     capital: bill.capital,
+    returned: Number(inv[0].amount) - bill.capital,
     days: bill.daysOverdue,
     tiie: bill.tiie,
     tiieDate: pick.date,
@@ -3296,7 +3314,7 @@ export async function issueMoraInvoice(
   const calc = [
     formula,
     `${rateLabel(pick, "cobro")} vigente al ${moraDue} + spread ${(pol.collectionSpread * 100).toFixed(2)}%`,
-    `capital (cargo original) ${Number(inv[0].amount).toFixed(2)} · ${bill.daysOverdue} d vencidos`,
+    `capital ${bill.capital.toFixed(2)} (cargo ${Number(inv[0].amount).toFixed(2)}${devueltoFv > 0.009 ? ` − devuelto ${devueltoFv.toFixed(2)}` : ""}${inv[0].mora_ajusta === false ? ", ajuste APAGADO" : ""}) · ${bill.daysOverdue} d vencidos`,
     `interés nuevo ${bill.interestNew.toFixed(2)} (ya facturado antes: ${Number(inv[0].interest_invoiced).toFixed(2)})`,
     `comisión + FEGA ${bill.fegaNew.toFixed(2)} (tasa ${pctRate(tasas.fegaRate)}${inv[0].fega_charged ? ", ya cobrado antes" : ""})`,
     `política ${politica.name}: comisión ${cobra.commission ? "sí" : "no"} · FEGA ${cobra.fega ? "sí" : "no"}`,
@@ -3309,7 +3327,15 @@ export async function issueMoraInvoice(
     docName: inv[0].name,
     docDue: inv[0].due_date,
     interestFrom: moraDue,
-    capital: Number(inv[0].amount),
+    // LA BASE QUE DE VERDAD SE COBRÓ (L3b): si aquí fuera el cargo entero, el
+    // papel le daría al cliente una multiplicación que no da — «$111,876.11 ×
+    // 16.05 % × 30 / 360 = $748.17», y ese producto es $1,496.34.
+    capital: bill.capital,
+    // Y lo devuelto, para que el renglón se explique solo en vez de parecer un
+    // error: el cliente sabe lo que regresó.
+    returned: moraBase(Number(inv[0].amount), devueltoFv, inv[0].mora_ajusta !== false) < Number(inv[0].amount) - 0.009
+      ? Number(inv[0].amount) - bill.capital
+      : 0,
     annualRate: bill.annualRate,
     days: bill.daysOverdue,
     interestAccrued: bill.interest,

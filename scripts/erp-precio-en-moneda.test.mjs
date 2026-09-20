@@ -216,7 +216,7 @@ test("estado de cuenta: la fila de una FV en dólares sale en dólares al TC pac
   assert.ok(fn.includes("const ar = customerRows.reduce((s, r) => s + r.saldoMxn, 0);"), "la cartera del socio no mezcla dólares con pesos");
   assert.ok(fn.includes("const ap = rows.filter((r) => r.kind === \"supplier\").reduce((s, r) => s + r.saldoMxn, 0);"));
   // El interés se calcula en pesos (capital: Math.max(0, cargo)) y solo se DIVIDE al enseñar: el motor no cambia.
-  assert.ok(fn.includes("capital: Math.max(0, cargo)"), "computeMora sigue sobre el cargo en pesos");
+  assert.ok(fn.includes("capital: moraBase(cargo, devueltoMap.get(inv.id) ?? 0, inv.mora_ajusta !== false),"), "computeMora sigue sobre el cargo en pesos (menos lo devuelto, L3b)");
   assert.ok(fn.includes("utCambiaria: fxDiff,"), "el ajuste por TC es pesos y no se divide");
 });
 

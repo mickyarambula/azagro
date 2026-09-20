@@ -109,7 +109,11 @@ test("cableado: por vencer por mes usa el plazo financiero y proyecta interés s
   const rep = src("src/lib/erp/reports.ts");
   const fn = rep.slice(rep.indexOf("export const getUpcomingDue"));
   assert.ok(fn.includes("inv.credit_due || inv.due_date"), "agrupa por el plazo financiero (día 150)");
-  assert.ok(fn.includes("Number(inv.amount) * rate * 30) / 360"), "interés mensual proyectado sobre el CARGO");
+  // 20-sep-2026 (L3b): sobre el CARGO menos lo devuelto — la misma base que la
+  // FI y el estado de cuenta, para que el inicio no prometa un interés que
+  // nadie va a facturar.
+  assert.ok(fn.includes("const baseMora = moraBase(Number(inv.amount), devueltoMora.get(inv.id) ?? 0, inv.mora_ajusta !== false);"), "interés mensual proyectado sobre el CARGO (menos lo devuelto)");
+  assert.ok(fn.includes("(baseMora * rate * 30) / 360"), "y estima con esa base");
   assert.ok(fn.includes(`assertCan(sql, context.userId, "credit", "view")`), "requiere permiso de cartera");
 });
 

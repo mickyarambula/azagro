@@ -169,7 +169,11 @@ test("pago parcial + liquidación: la mora corre sobre el CARGO, no sobre el sal
   });
   assert.equal(fi2.charge, 2666.66); // el código viejo (base saldo 50,000) daba $0
   const ops = src("src/lib/erp/ops.ts");
-  assert.ok(ops.includes("cargo: Number(inv[0].amount)"), "la FI debe usar el cargo original como base");
+  // 20-sep-2026 (L3b): el cargo original MENOS lo devuelto. Sigue sin ser el
+  // saldo: un abono no baja la base, una devolución sí, porque sobre la
+  // mercancía que regresó nunca hubo venta que financiar.
+  assert.ok(ops.includes("cargo: moraBase(Number(inv[0].amount), devueltoFv, inv[0].mora_ajusta !== false),"), "la FI debe usar el cargo original (menos lo devuelto) como base");
+  assert.ok(!ops.includes("cargo: Number(inv[0].residual)"), "nunca el saldo");
   assert.ok(!/capital: Number\(inv\[0\]\.residual\) > 0\.009/.test(ops), "ya no debe existir la base sobre saldo en la FI");
 });
 
@@ -194,7 +198,12 @@ test("cableado: Cartera y Bancos cobran por applyInvoicePayment, en transacción
 // ---------------------------------------------------------------------------
 test("cableado: el estado de cuenta calcula sobre cargo y muestra lo mismo que facturaría la FI", () => {
   const ops = src("src/lib/erp/ops.ts");
-  assert.ok(ops.includes("capital: Math.max(0, cargo)"), "computeMora del estado de cuenta debe usar el cargo");
+  // 20-sep-2026 (L3b, Decisión 10): sigue siendo el CARGO y no el saldo — lo
+  // que se le resta es lo DEVUELTO, que es otra cosa: un abono es dinero que
+  // paga la deuda, una devolución es mercancía que regresó y sobre la que
+  // nunca hubo venta que financiar.
+  assert.ok(ops.includes("capital: moraBase(cargo, devueltoMap.get(inv.id) ?? 0, inv.mora_ajusta !== false),"), "computeMora del estado de cuenta debe usar el cargo (menos lo devuelto)");
+  assert.ok(!ops.includes("capital: saldo"), "nunca el saldo");
   assert.ok(!/const capital = saldo > 0\.009 \? saldo : cargo/.test(ops), "ya no debe alternar entre saldo y cargo");
   assert.ok(
     ops.includes("Math.max(0, mora.interest - intInvoiced) + mora.fega"),

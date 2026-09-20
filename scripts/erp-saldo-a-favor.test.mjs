@@ -525,10 +525,14 @@ test("los tres que hablan del pronto pago descuentan lo devuelto de la base", ()
   assert.ok(rf.includes("select nc.applies_to_id, coalesce(sum(-nc.amount), 0)::text as total"), "la fuente es la nota de crédito");
   assert.ok(rf.includes("and nc.reverses_id is null and nc.state <> 'reversed'"), "solo las vivas");
   assert.ok(!rf.includes("p.memo like"), "ninguna decisión de dinero por texto tecleable");
+  // El conteo sube a 6 (20-sep-2026, L3b): a los tres del pronto pago se suman
+  // los dos lectores de la base de la MORA — `issueMoraInvoice` y
+  // `getUpcomingDue` — que ahora preguntan lo mismo. El estado de cuenta reusa
+  // el `devueltoMap` que ya tenía, de un solo viaje.
   assert.equal(
     ((ops + rep).match(/returnedOfInvoices\(/g) ?? []).length,
-    4,
-    "la declara una vez y la llaman los tres: otorga, estima y tarjeta",
+    6,
+    "una declaración y cinco llamadas: pronto pago (3) y mora (2)",
   );
   // 1. El que OTORGA.
   assert.ok(ops.includes("const baseBono = earlyPayBase(Number(i.amount), devuelto.get(i.id) ?? 0);"), "otorga");

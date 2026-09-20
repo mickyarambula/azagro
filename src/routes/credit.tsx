@@ -14,6 +14,8 @@ import { dateDMY, money, moneyIn, num, todayMx } from "@/lib/utils";
 import { invoiceShown } from "@/lib/erp/fx";
 import { circuitLabel, nearestFunding } from "@/lib/erp/circuits";
 import { docRate, rateTableName } from "@/lib/erp/doc-rate";
+import { moraBase } from "@/lib/erp/advance";
+import { setMoraAjusta } from "@/lib/erp/advance-query";
 import { ReversalButton } from "@/components/cancel-doc";
 import { reversalPreview, reversePayment } from "@/lib/erp/reversal";
 import { applyCredit, getPartnerCredit, listCredits, unapplyCredit } from "@/lib/erp/advance-query";
@@ -279,6 +281,42 @@ function Page() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">
+                      {/* El interruptor de la Decisión 10: por omisión la mora
+                          se calcula sobre el cargo MENOS lo devuelto, y quien
+                          tenga permiso puede decidir lo contrario caso por
+                          caso. Solo aparece si hubo devolución — sin ella no
+                          cambia ningún número y sería ruido. */}
+                      {r.kind === "customer" && num(r.devuelto) > 0.009 && num(r.amount) > 0 && (
+                        <button
+                          type="button"
+                          className="erp-btn h-8 text-[12px]"
+                          title={
+                            r.mora_ajusta !== false
+                              ? `La mora se calcula sobre ${money(moraBase(num(r.amount), num(r.devuelto)))} (cargo ${money(num(r.amount))} menos ${money(num(r.devuelto))} devueltos). Apágalo si esta devolución no debe bajar el interés.`
+                              : `El ajuste está apagado: la mora se calcula sobre el cargo completo, ${money(num(r.amount))}, aunque el cliente haya devuelto ${money(num(r.devuelto))}.`
+                          }
+                          onClick={async () => {
+                            const ajusta = r.mora_ajusta === false;
+                            const motivo = window.prompt(
+                              ajusta
+                                ? `Volver a ajustar la mora de ${r.name} por lo devuelto (${money(num(r.devuelto))}). ¿Por qué?`
+                                : `La mora de ${r.name} dejará de bajar por los ${money(num(r.devuelto))} devueltos: se cobrará sobre el cargo completo. ¿Por qué? (por ejemplo: le sobró mercancía, no fue un error nuestro)`,
+                            );
+                            if (!motivo) return;
+                            try {
+                              const res = await setMoraAjusta({ data: { invoiceId: r.id, ajusta, reason: motivo } });
+                              setMsg(
+                                `${res.invoice}: la mora ${res.ajusta ? "vuelve a ajustarse" : "deja de ajustarse"} por lo devuelto. Base ${money(res.base)}.`,
+                              );
+                              await load();
+                            } catch (err) {
+                              setError(err instanceof Error ? err.message : "Error");
+                            }
+                          }}
+                        >
+                          {r.mora_ajusta !== false ? "Mora: ajustada" : "Mora: sin ajustar"}
+                        </button>
+                      )}
                       {r.kind === "customer" && overdue && (
                         <button
                           type="button"
@@ -549,9 +587,15 @@ function Page() {
               const tasas = cobra
                 ? chargeRates(settings.fegaRate, settings.commissionRate, cobra)
                 : { fegaRate: 0, commissionRate: 0, fegaOnlyRate: 0 };
+              // LA MISMA BASE Y EL MISMO PLAZO que va a usar la FI (L3b): el
+              // cargo menos lo devuelto, desde el plazo financiero. Estimaba
+              // sobre el SALDO y desde el vencimiento visible: con la
+              // configuración 120/150 los dos errores se cancelaban por
+              // casualidad, y con media devolución la pantalla prometía
+              // $1,496.34 donde el sistema cobra $748.17.
               const mora = computeMora({
-                capital: num(inv.residual),
-                dueDate: inv.due_date,
+                capital: moraBase(num(inv.amount), num(inv.devuelto), inv.mora_ajusta !== false),
+                dueDate: inv.credit_due || inv.due_date,
                 asOf: pay.date || todayMx(),
                 tiieAtDue: pick.rate,
                 spread: settings.collectionSpread,
@@ -559,7 +603,10 @@ function Page() {
                 fegaAlreadyCharged: false,
               });
               const exp = explainInterest({
-                capital: num(inv.residual),
+                // La misma base que la línea de arriba: el texto tiene que
+                // explicar el número que enseña.
+                capital: moraBase(num(inv.amount), num(inv.devuelto), inv.mora_ajusta !== false),
+                returned: num(inv.amount) - moraBase(num(inv.amount), num(inv.devuelto), inv.mora_ajusta !== false),
                 days: mora.daysOverdue,
                 tiie: pick.rate,
                 tiieDate: pick.date,
