@@ -464,6 +464,25 @@ factura ya está saldada» (cualquier negativo cumple `residual <= 0.009`, y el
 mensaje además miente) y `refreshInvoiceResidual` lo colapsaría a $0 la primera
 vez que algo legítimo lo tocara (`Math.max(0, …)`).
 
+**HAY UN INTENTO COMPLETO EN LA RAMA `l3c-en-pausa`** (19-sep-2026). Está
+construido y con 1052 pruebas en verde, pero **no se subió a `main`**: el
+revisor de dinero lo rechazó tres pasadas seguidas y la tercera encontró una
+REGRESIÓN introducida por el arreglo de la segunda — al excluir el crédito de
+devolución del `max(p.date)` de `refreshInvoiceResidual`, si la factura ya
+traía un abono real anterior la fecha de pago **retrocede** a un día en que
+todavía debía: la FI cobra 21 días ($1,037.65) mientras el estado de cuenta lee
+0, y la tarjeta de utilidad resta $4,174.44 de bono que nadie otorgó (en `main`
+es $0.00).
+
+La regla correcta no es «excluir el crédito de devolución de la fecha» sino
+«la fecha es la del último abono que de verdad PAGÓ, y un crédito de devolución
+no paga pero tampoco hace retroceder el reloj» — un tercer caso que el motor de
+`paid_date` hoy no distingue. **Lo que sí hay que rescatar de esa rama** está
+listado en su mensaje de commit; lo más importante es `returnedOfInvoices` y
+que los tres lectores del pronto pago usen la misma base, porque **ese defecto
+existe HOY en `main`** y es independiente de L3c ($4,756.73 por factura con
+devolución parcial).
+
 El **mecanismo** para arreglarlo se construyó el 19-sep-2026 con L5: el saldo a
 favor (`advance.ts`). Se intentó cerrar L3c el mismo día y **se sacó del
 alcance** porque mover ese crédito a un saldo a favor cambia TRES lectores que
