@@ -515,11 +515,16 @@ test("los tres que hablan del pronto pago descuentan lo devuelto de la base", ()
   const rep = src("src/lib/erp/reports.ts");
   // Una sola consulta contesta «cuánto de esta factura se devolvió».
   assert.ok(ops.includes("export async function returnedOfInvoices("), "un solo lugar lo contesta");
-  // Y decide por marca ESTRUCTURAL, no solo por texto: los dos abonos de
-  // devolución son virtuales (sin movimiento de banco). Un cobro real cuyo memo
-  // teclee alguien como «Devolución de cheque» tiene banco y no cuenta.
+  // Y la fuente es la NOTA DE CRÉDITO, no las aplicaciones ni el memo
+  // (20-sep-2026): las aplicaciones solo veían lo que CUPO, así que una
+  // devolución sobre una factura ya pagada reportaba $0 y el bono se calculaba
+  // sobre el cargo entero de una venta cuya mercancía regresó toda. La NC nace
+  // por el importe completo y sabe a qué factura pertenece (`applies_to_id`).
+  // De paso deja de depender de texto que alguien teclea.
   const rf = ops.slice(ops.indexOf("export async function returnedOfInvoices("), ops.indexOf("export async function earlyPayDiscount("));
-  assert.ok(rf.includes("and not exists (select 1 from bank_moves bm where bm.payment_id = p.id)"), "sin banco: virtual de verdad");
+  assert.ok(rf.includes("select nc.applies_to_id, coalesce(sum(-nc.amount), 0)::text as total"), "la fuente es la nota de crédito");
+  assert.ok(rf.includes("and nc.reverses_id is null and nc.state <> 'reversed'"), "solo las vivas");
+  assert.ok(!rf.includes("p.memo like"), "ninguna decisión de dinero por texto tecleable");
   assert.equal(
     ((ops + rep).match(/returnedOfInvoices\(/g) ?? []).length,
     4,

@@ -2030,22 +2030,28 @@ export const saveBankOpening = createServerFn({ method: "POST" })
 export async function returnedOfInvoices(sql: Sql, companyId: number, invoiceIds: number[]) {
   const map = new Map<number, number>();
   if (!invoiceIds.length) return map;
-  const rows = await sql<{ invoice_id: number; total: string }>`
-    select pa.invoice_id, coalesce(sum(pa.amount), 0)::text as total
-    from payment_allocs pa join payments p on p.id = pa.payment_id
-    join invoices i on i.id = pa.invoice_id
-    where i.company_id = ${companyId} and pa.invoice_id = any(${invoiceIds})
-      and p.reverses_id is null
-      and not exists (select 1 from payments r where r.reverses_id = p.id)
-      -- Los dos son PAG virtuales: nacen sin movimiento de banco. Esa es la
-      -- marca estructural; el memo solo no basta, porque el de un cobro real
-      -- lo teclea la persona y «Devolución de cheque, se repone» habría
-      -- sacado $111,876.11 de la base del bono (revisor, 20-sep-2026).
-      and (p.memo like 'Saldo a favor (devolución %' or p.memo like 'Devolución %')
-      and not exists (select 1 from bank_moves bm where bm.payment_id = p.id)
-    group by pa.invoice_id
+  // LA FUENTE SON LAS NOTAS DE CRÉDITO, no las aplicaciones (20-sep-2026).
+  //
+  // Sumar `payment_allocs` solo veía **lo que cupo**: la devolución abona a la
+  // factura `Math.min(credit, residual)` y el resto se va a un saldo a favor
+  // SIN aplicar. Sobre una factura YA PAGADA no cabe nada, así que una
+  // devolución completa reportaba `devuelto = 0` y el pronto pago se calculaba
+  // sobre el cargo entero de una venta cuya mercancía regresó toda — hasta
+  // $4,979.26 de bonificación regalada en la factura de referencia.
+  //
+  // La NC sí lo sabe: nace por el importe COMPLETO de lo devuelto y guarda a
+  // qué factura pertenece (`applies_to_id`, migración 0036). Su `amount` es
+  // negativo, de ahí el signo. La NC espejo de una reversa de entrega no entra:
+  // no lleva `applies_to_id` (se amarra por `reverses_id`, `delivery-reversal`).
+  const rows = await sql<{ applies_to_id: number; total: string }>`
+    select nc.applies_to_id, coalesce(sum(-nc.amount), 0)::text as total
+    from invoices nc
+    where nc.company_id = ${companyId} and nc.applies_to_id = any(${invoiceIds})
+      and nc.kind = 'customer' and nc.name like 'NC-%'
+      and nc.reverses_id is null and nc.state <> 'reversed'
+    group by nc.applies_to_id
   `;
-  for (const r of rows) map.set(r.invoice_id, Number(r.total));
+  for (const r of rows) map.set(r.applies_to_id, Number(r.total));
   return map;
 }
 
