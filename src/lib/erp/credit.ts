@@ -465,12 +465,21 @@ export function earlyPayBonus(input: {
   tiieAtIssue: number;
   costSpread: number;
 }) {
-  const lived = daysBetween(input.issueDate, input.payDate);
+  // Días vividos de la factura al día del pago. **Nunca negativos** (L5,
+  // 19-sep-2026): con el saldo a favor, un anticipo depositado ANTES de que
+  // existiera la factura se le puede aplicar después, y entonces la fecha del
+  // abono es anterior a la de la factura. Sin este piso, `financialDays −
+  // lived` daba MÁS días que el plazo completo y se bonificaba un
+  // financiamiento que nunca corrió: con un plazo de 150 días y un anticipo de
+  // 60 días antes, 210 días — $7,583.33 en vez del tope de $5,416.67 sobre
+  // $100,000 al 13%. Una factura no puede haberse pagado antes de nacer.
+  const lived = Math.max(0, daysBetween(input.issueDate, input.payDate));
   const rate = input.tiieAtIssue + input.costSpread;
   if (lived >= input.thresholdDays) {
     return { applies: false, lived, days: 0, rate, bonus: 0 };
   }
-  const days = Math.max(0, input.financialDays - lived);
+  // Y nunca más que el plazo completo: ese es todo el financiamiento que hubo.
+  const days = Math.min(Math.max(0, input.financialDays - lived), Math.max(0, input.financialDays));
   const bonus = Math.round(((Math.max(0, input.cargo) * rate * days) / YEAR_DAYS) * 100) / 100;
   return { applies: days > 0, lived, days, rate, bonus };
 }

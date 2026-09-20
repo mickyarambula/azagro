@@ -242,8 +242,12 @@ test("#1 cableado: applyInvoicePayment lee la política, la respeta y no rellena
   const ops = src("src/lib/erp/ops.ts");
   const pay = fnBody(ops, "applyInvoicePayment");
   assert.ok(pay.includes("coalesce(policy_code,'') as policy_code, circuit_code, state from invoices"), "el SELECT trae la política");
-  assert.ok(pay.includes("policyChargesInterest(inv[0].policy_code) && inv[0].credit_days > 0"), "sin mora o sin plazo no hay bonificación (y no se pide TIIE)");
-  assert.ok(pay.includes("financialDays: inv[0].credit_days,"), "los días de ESTE documento");
+  // 19-sep-2026 (L5): el pronto pago se extrajo a `earlyPayDiscount`, que
+  // ahora llaman las DOS puertas (el cobro por banco y la aplicación de un
+  // saldo a favor). Los invariantes son los mismos, en su nueva casa.
+  const bono = fnBody(ops, "earlyPayDiscount");
+  assert.ok(bono.includes("policyChargesInterest(i.policy_code) && i.credit_days > 0"), "sin mora o sin plazo no hay bonificación (y no se pide TIIE)");
+  assert.ok(bono.includes("financialDays: i.credit_days,"), "los días de ESTE documento");
   assert.ok(!ops.includes("|| pol.creditDays"), "ningún lector rellena el plazo con Ajustes — ni el cobro ni el estado de cuenta");
   const live = ops.slice(ops.indexOf("export const getLiveStatement"), ops.indexOf("export async function issueMoraInvoice"));
   assert.ok(live.includes("financialDays: inv.credit_days,"), "el estado de cuenta usa el mismo número que el cobro");

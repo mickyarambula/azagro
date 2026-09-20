@@ -298,6 +298,12 @@ function Page() {
       ``,
       // La cartera del socio se suma en pesos (saldoMxn); si hay renglones en dólares se dice.
       `Saldo: ${money(block.ar)}${block.rows.some((r) => (r.currency || "MXN") === "USD") ? " (total en pesos; los renglones en dólares van al tipo de cambio pactado)" : ""}`,
+      // El saldo a favor sale en el papel: es dinero del cliente que ya entró y
+      // todavía no se aplica a ninguna factura. Callarlo le cobraría de más, y
+      // él sí sabe lo que depositó (L5, Decisión 12).
+      ...(block.aFavor > 0.009
+        ? [`Saldo a su favor: ${money(block.aFavor)} (pagos recibidos sin aplicar todavía a una factura)`, `Saldo neto: ${money(block.arNeto)}`]
+        : []),
       ``,
       STATEMENT_PAPER_HEADERS.join(" | "),
       ...productRows(block, hidePaid).map((r) => statementPaperRow(r, r.currency || "MXN", false).join(" | ")),
@@ -538,6 +544,11 @@ function StatementView({
           <div className="text-right">
             <p className="text-xs text-muted">Saldo</p>
             <p className="text-2xl font-semibold tabular-nums">{money(viewing.ar)}</p>
+            {viewing.aFavor > 0.009 && (
+              <p className="mt-1 text-[12px] text-muted">
+                Saldo a su favor {money(viewing.aFavor)} · neto <span className="font-medium tabular-nums">{money(viewing.arNeto)}</span>
+              </p>
+            )}
             <div className="mt-2 flex justify-end gap-2">
               <button type="button" className="erp-btn" onClick={onClose}>Cerrar</button>
               <button

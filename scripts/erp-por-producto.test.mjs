@@ -330,7 +330,9 @@ test("cableado: el servidor ya no arma un por-producto que mezcla monedas", () =
   const ops = src("src/lib/erp/ops.ts");
   assert.ok(!ops.includes("const byProduct"), "se fue del servidor");
   assert.ok(!ops.includes("byProduct,"), "y del payload del estado de cuenta");
-  assert.ok(ops.includes("result.push({ partner, contacts, rows, ar, ap, byCurrency });"));
+  // 19-sep-2026 (L5): el payload lleva además el saldo a favor del cliente y
+  // el neto. Lo que sigue fijado es que el por-producto NO se arma aquí.
+  assert.ok(ops.includes("result.push({ partner, contacts, rows, ar, ap, byCurrency, aFavor,"), "el payload del estado de cuenta");
 });
 
 test("cableado: el reparto separa monedas y no inventa un producto", () => {

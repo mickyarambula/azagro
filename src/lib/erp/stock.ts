@@ -379,10 +379,26 @@ export async function refreshInvoiceResidual(sql: Sql, invoiceId: number) {
     await sql`
       update invoices i
       set residual = 0, state = 'paid',
+        -- ...contando solo los abonos que de verdad le abonan algo: desaplicar
+        -- deja la aplicación y su contraria (+X, −X), que suman cero y no
+        -- deben mandar la fecha de una factura a la que ya no le abonan nada.
+        -- ...y NUNCA antes de que la factura existiera (L5, 19-sep-2026): con
+        -- el saldo a favor, un anticipo de febrero se le puede aplicar a una
+        -- factura de junio, y max(p.date) dejaba la factura «pagada» cuatro
+        -- meses antes de nacer. La fecha honesta es aquella en que el dinero
+        -- estuvo disponible PARA ESA FACTURA: la más tarde de las dos. Es la
+        -- misma idea del hallazgo #18 —manda el dinero, no la captura—, con el
+        -- único límite que el dinero no puede saltarse.
         paid_date = coalesce(i.paid_date,
-          (select max(p.date) from payment_allocs pa join payments p on p.id = pa.payment_id
-            where pa.invoice_id = i.id and p.reverses_id is null
-              and not exists (select 1 from payments r where r.reverses_id = p.id)),
+          (select case when max(x.d) is null then null else greatest(max(x.d), i.date) end
+            from (
+              select p.date as d
+              from payment_allocs pa join payments p on p.id = pa.payment_id
+              where pa.invoice_id = i.id and p.reverses_id is null
+                and not exists (select 1 from payments r where r.reverses_id = p.id)
+              group by p.id, p.date
+              having sum(pa.amount) > 0.009
+            ) x),
           ${todayMx()}::date)
       where i.id = ${invoiceId}
     `;

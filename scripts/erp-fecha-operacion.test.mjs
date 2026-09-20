@@ -204,7 +204,7 @@ test("cableado: las fechas por omisión de FV, FP, NC, pago de devolución, kard
   const stock = src("src/lib/erp/stock.ts");
   assert.ok(stock.includes("const day = (opts.date || todayMx()).slice(0, 10);"), "fecha del movimiento de kardex por omisión");
   // #18 (17-sep-2026, con OK del dueño): primero la fecha del último abono vivo; todayMx sigue siendo el respaldo.
-  assert.ok(stock.includes("and not exists (select 1 from payments r where r.reverses_id = p.id)),\n          ${todayMx()}::date)"), "paid_date al liquidar: el respaldo sigue siendo todayMx");
+  assert.ok(stock.includes("          ) x),\n          ${todayMx()}::date)"), "paid_date al liquidar: el respaldo sigue siendo todayMx");
   const credit = src("src/lib/erp/credit.ts");
   assert.ok(credit.includes("const asOf = (input.asOf || todayMx()).slice(0, 10);"));
   assert.ok(credit.includes("const today = (asOf || todayMx()).slice(0, 10);"));

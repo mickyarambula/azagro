@@ -16,11 +16,17 @@ import type { Sql } from "@/lib/db";
  * por la que la existencia no es una columna, regla 2). Un solo lugar para
  * la regla: `saveOrder` y `createSale` leen de aquí.
  */
-export type CreditExposure = { limit: number; invoiced: number; reserved: number; used: number };
+export type CreditExposure = { limit: number; invoiced: number; reserved: number; credit: number; used: number };
 
 /** La aritmética, pura: ¿cabe este pedido? */
-export function creditRoom(x: { limit: number; invoiced: number; reserved: number; order: number }) {
-  const used = Math.round((x.invoiced + x.reserved) * 100) / 100;
+export function creditRoom(x: { limit: number; invoiced: number; reserved: number; credit?: number; order: number }) {
+  // EL SALDO A FAVOR BAJA LO QUE OCUPA LA LÍNEA (L5, Decisión 12, 19-sep-2026).
+  // La línea mide cuánta deuda NETA tiene el cliente, y un anticipo es dinero
+  // que Azagro ya tiene en la mano: seguir topándolo por dinero que ya cobró
+  // sería cobrarle dos veces la misma línea. Nunca baja de cero: un cliente
+  // con saldo a favor y sin deuda ocupa 0, no un número negativo que le
+  // regalaría línea de más.
+  const used = Math.round(Math.max(0, x.invoiced + x.reserved - (x.credit ?? 0)) * 100) / 100;
   const after = Math.round((used + x.order) * 100) / 100;
   // Sin límite capturado (0) no se limita: igual que siempre.
   const exceeds = x.limit > 0 && after > x.limit;
@@ -62,18 +68,39 @@ export async function creditExposure(sql: Sql, companyId: number, partnerId: num
       and coalesce(so.term_kind,'credit_days') <> 'contado'
       and so.id <> ${exclude}
   `;
+  // Saldo a favor: cobros del socio que todavía no se aplicaron a ninguna
+  // factura (L5). Derivado, como todo lo demás aquí — `advance-query.ts` tiene
+  // la misma cuenta con nombre; se repite aquí para no cruzar los módulos de
+  // cartera y de límite, y las dos están probadas contra los mismos números.
+  const cr = await sql<{ total: string }>`
+    select coalesce(sum(p.amount - coalesce((
+      select sum(pa.amount) from payment_allocs pa where pa.payment_id = p.id
+    ), 0)), 0)::text as total
+    from payments p
+    where p.company_id = ${companyId} and p.partner_id = ${partnerId}
+      -- Solo COBROS: un socio puede ser cliente y proveedor a la vez, y un
+      -- sobrante que Azagro le pago de mas no es credito del cliente.
+      and p.kind = 'inbound'
+      and p.amount > 0
+      and p.reverses_id is null
+      and not exists (select 1 from payments r where r.reverses_id = p.id)
+      and p.amount - coalesce((select sum(pa.amount) from payment_allocs pa where pa.payment_id = p.id), 0) > 0.009
+  `;
   const limit = Number(partner[0]?.credit_limit ?? 0);
   const invoiced = Number(ar[0]?.ar ?? 0);
   const reserved = Number(res[0]?.reserved ?? 0);
-  return { limit, invoiced, reserved, used: Math.round((invoiced + reserved) * 100) / 100 };
+  const credit = Math.round(Number(cr[0]?.total ?? 0) * 100) / 100;
+  return { limit, invoiced, reserved, credit, used: Math.round(Math.max(0, invoiced + reserved - credit) * 100) / 100 };
 }
 
 /** El texto de bitácora y de pantalla, uno solo para los dos caminos. */
 export function creditDetail(x: CreditExposure, order: number) {
-  return `Límite ${x.limit.toFixed(0)} · saldo ${x.invoiced.toFixed(0)} · apartado en pedidos ${x.reserved.toFixed(0)} · pedido ${order.toFixed(0)}`;
+  const favor = x.credit > 0.009 ? ` · saldo a favor ${x.credit.toFixed(0)}` : "";
+  return `Límite ${x.limit.toFixed(0)} · saldo ${x.invoiced.toFixed(0)} · apartado en pedidos ${x.reserved.toFixed(0)}${favor} · pedido ${order.toFixed(0)}`;
 }
 export function creditExceededMessage(x: CreditExposure) {
-  return `Supera el límite de crédito (${x.limit.toFixed(0)}). Saldo facturado ${x.invoiced.toFixed(0)} + apartado en pedidos confirmados sin facturar ${x.reserved.toFixed(0)} = ${x.used.toFixed(0)}. Un administrador puede autorizar el exceso.`;
+  const favor = x.credit > 0.009 ? ` − saldo a favor ${x.credit.toFixed(0)}` : "";
+  return `Supera el límite de crédito (${x.limit.toFixed(0)}). Saldo facturado ${x.invoiced.toFixed(0)} + apartado en pedidos confirmados sin facturar ${x.reserved.toFixed(0)}${favor} = ${x.used.toFixed(0)}. Un administrador puede autorizar el exceso.`;
 }
 
 /**
@@ -97,12 +124,28 @@ export async function creditExceededSummary(
     select count(*)::int as n, coalesce(sum(used - credit_limit), 0)::text as amount
     from (
       select p.credit_limit,
-        coalesce(ar.ar, 0) + coalesce(res.reserved, 0) as used
+        -- MISMA CUENTA que creditExposure, incluido el saldo a favor (L5,
+        -- 19-sep-2026): si aqui no se restara, el inicio diria que un cliente
+        -- esta sobre su limite mientras el pedido le pasa sin problema. Dos
+        -- respuestas a la misma pregunta es peor que cualquiera de las dos.
+        greatest(0, coalesce(ar.ar, 0) + coalesce(res.reserved, 0) - coalesce(fav.credito, 0)) as used
       from partners p
       left join lateral (
         select sum(residual) as ar from invoices
         where company_id = p.company_id and partner_id = p.id and kind = 'customer' and state = 'open'
       ) ar on true
+      left join lateral (
+        select sum(pm.amount - coalesce((
+          select sum(pa.amount) from payment_allocs pa where pa.payment_id = pm.id
+        ), 0)) as credito
+        from payments pm
+        where pm.company_id = p.company_id and pm.partner_id = p.id
+          and pm.kind = 'inbound'
+          and pm.amount > 0
+          and pm.reverses_id is null
+          and not exists (select 1 from payments r where r.reverses_id = pm.id)
+          and pm.amount - coalesce((select sum(pa.amount) from payment_allocs pa where pa.payment_id = pm.id), 0) > 0.009
+      ) fav on true
       left join lateral (
         select sum(greatest(0, so.total - coalesce((
           select sum(i.amount) from invoices i

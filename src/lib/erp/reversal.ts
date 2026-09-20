@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, withTx, type Sql } from "@/lib/db";
 import { activeMember, canRevert } from "@/lib/erp/acl";
+import { reversalOfAllocation } from "@/lib/erp/advance";
 import { writeAudit } from "@/lib/erp/audit";
 import { refreshInvoiceResidual } from "@/lib/erp/stock";
 import { nextDocFolio } from "@/lib/erp/folios";
@@ -78,6 +79,17 @@ type Chain = {
   /** Decisión 80: también la FP en dólares pagada con pesos tiene diferencial (signo contrario). */
   isUsd: boolean;
   fxResultDelta: number;
+  /**
+   * Un SALDO A FAVOR (L5, Decisión 12): un cobro sin aplicar a ninguna
+   * factura. Su reversa es mucho más simple —no hay saldo que rehacer, ni FI,
+   * ni ATC, ni pronto pago—: solo el contra-PAG y el contra-movimiento de
+   * banco. Y el contra-PAG nace SIN aplicación, igual que el original.
+   */
+  isAdvance: boolean;
+  /** Lo que el PAG le abonó a SU factura (puede ser menos que su importe: L5). */
+  allocAmount: number;
+  /** El abono contrario que se escribe. Misma cuenta que `residualAfter`. */
+  contraAlloc: number;
 };
 
 /** La cadena completa de un PAG: qué se contraría, qué se queda, qué lo detiene. No escribe nada. */
@@ -128,6 +140,9 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
     isUsdCustomer: false,
     isUsd: false,
     fxResultDelta: 0,
+    isAdvance: false,
+    allocAmount: 0,
+    contraAlloc: 0,
   });
 
   if (p.reverses_id) {
@@ -147,15 +162,55 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
     return empty();
   }
 
-  // Un PAG aplica a UNA factura (no hay reparto entre varias: Decisión 13 no construida).
-  const allocs = await sql<{ invoice_id: number; amount: string }>`
-    select invoice_id, amount::text from payment_allocs where payment_id = ${p.id} order by id
+  // APLICACIONES VIVAS, no filas. Desaplicar no borra: deja la aplicación y su
+  // contraria (+X, −X), que suman cero. Contando filas, un anticipo aplicado y
+  // luego quitado parecía «repartido entre 2 facturas» y quedaba bloqueado —
+  // y la salida que el mensaje nombraba («Quitar de esta factura») contestaba
+  // «ya no le abona nada». Candado sin salida, que es peor que el bug que
+  // tapa: el dinero del cliente se quedaba atrapado como crédito para siempre.
+  const vivas = await sql<{ invoice_id: number; amount: string }>`
+    select invoice_id, sum(amount)::text as amount from payment_allocs
+    where payment_id = ${p.id} group by invoice_id having sum(amount) > 0.009 order by min(id)
   `;
-  if (allocs.length !== 1) {
-    blockers.push(`${p.name} está aplicado a ${allocs.length} facturas; este paso solo revierte abonos de una sola factura.`);
+  // CERO aplicaciones vivas = saldo a favor (L5, Decisión 12): dinero recibido
+  // que todavía no se aplicó a nada. Se revierte por el camino corto de abajo.
+  if (vivas.length === 0) {
+    const bmA = await sql<{
+      id: number; bank_id: number; bank: string; amount: string; reconciled: boolean; partner_id: number | null;
+      kind: string; invoice_id: number | null; currency: string; amount_fx: string | null; fx_rate: string | null;
+    }>`
+      select m.id, m.bank_id, b.name as bank, m.amount::text, m.reconciled, m.partner_id, m.kind, m.invoice_id,
+        coalesce(b.currency,'MXN') as currency, m.amount_fx::text, m.fx_rate::text
+      from bank_moves m join banks b on b.id = m.bank_id
+      where m.payment_id = ${p.id} and m.company_id = ${companyId} limit 1
+    `;
+    const bank = bmA[0]
+      ? { id: bmA[0].id, bank_id: bmA[0].bank_id, bank: bmA[0].bank, amount: Number(bmA[0].amount), reconciled: bmA[0].reconciled,
+          partner_id: bmA[0].partner_id, kind: bmA[0].kind, invoice_id: bmA[0].invoice_id, currency: bmA[0].currency,
+          amount_fx: bmA[0].amount_fx == null ? null : Number(bmA[0].amount_fx), fx_rate: bmA[0].fx_rate == null ? null : Number(bmA[0].fx_rate) }
+      : null;
+    const base = empty();
+    reverts.push({ name: p.name, detail: `saldo a favor de ${p.partner} sin aplicar a ninguna factura → contra-cobro por el mismo importe`, amount, currency: bank?.currency ?? "MXN" });
+    if (bank) reverts.push({ name: bank.bank, detail: "el movimiento de banco se contraría; el contrario nace sin conciliar", amount: -bank.amount, currency: bank.currency });
+    return { ...base, bankMove: bank, isAdvance: true };
+  }
+  // VARIAS aplicaciones: el dinero está bien, lo que está mal es dónde cayó.
+  // La salida NO es revertir el cobro (eso devolvería dinero que sí entró):
+  // es **desaplicarlo** de la factura equivocada, y entonces vuelve a ser
+  // saldo a favor. Un candado sin salida sería peor que el problema.
+  if (vivas.length > 1) {
+    blockers.push(
+      `${p.name} está repartido entre ${vivas.length} facturas. Para corregir a cuál se aplicó, usa «Quitar de esta factura» en el renglón que esté mal: el dinero regresa al saldo a favor del cliente y de ahí lo puedes aplicar a la correcta. Revertir el cobro completo solo procede si el dinero nunca debió entrar.`,
+    );
     return empty();
   }
-  const invoiceId = allocs[0]!.invoice_id;
+  const invoiceId = vivas[0]!.invoice_id;
+  // Lo que este PAG le abonó a ESA factura. Hasta el 19-sep-2026 siempre era
+  // igual al importe del PAG, porque un cobro nacía aplicado completo. Con el
+  // saldo a favor (L5) un PAG puede estar aplicado en PARTE, y el contrario
+  // tiene que contrariar la aplicación — si contrariara el importe del PAG,
+  // la factura quedaría debiendo la diferencia, deuda que nadie contrajo.
+  const allocAmount = Number(vivas[0]!.amount);
   const inv = await sql<{
     id: number;
     name: string;
@@ -291,7 +346,11 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
   const bankBefore = bankNow[0] ? Number(bankNow[0].total) : 0;
   const discount = discountRow ? { id: discountRow.id, name: discountRow.name, amount: Number(discountRow.amount) } : null;
   const residualNow = Number(i.residual);
-  const residualAfter = r2(Math.max(0, residualNow + amount + (discount?.amount ?? 0)));
+  // Los dos números —lo que se promete y lo que se escribe— salen de la misma
+  // cuenta (`reversalOfAllocation`, pura y probada con números), para que no
+  // puedan volver a separarse: se prometía devolver $300 y se escribían $200.
+  const rev = reversalOfAllocation({ residualNow, allocAmount, discount: discount?.amount ?? 0 });
+  const residualAfter = rev.residualAfter;
   const debt = await sql<{ total: string }>`
     select coalesce(sum(residual),0)::text as total from invoices
     where company_id = ${companyId} and partner_id = ${p.partner_id} and kind = ${i.kind} and state = 'open'
@@ -337,6 +396,9 @@ async function chainForPayment(sql: Sql, companyId: number, paymentId: number, r
     isUsdCustomer,
     isUsd,
     fxResultDelta,
+    isAdvance: false,
+    allocAmount,
+    contraAlloc: rev.contraAlloc,
   };
 }
 
@@ -414,7 +476,10 @@ async function applyReversal(sql: Sql, userId: string, chain: Chain, reason: str
     values (${companyId}, ${pv.payment.kind}, ${cname}, ${partnerId}, ${-pv.payment.amount}, ${`Reversa de ${pv.payment.name} · ${reason}`}, ${userId}, ${today}, ${pv.payment.id})
     returning id
   `;
-  await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${contra[0]!.id}, ${invoiceId}, ${-pv.payment.amount})`;
+  // Un saldo a favor no está aplicado a ninguna factura: su contrario tampoco.
+  if (!chain.isAdvance) {
+    await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${contra[0]!.id}, ${invoiceId}, ${chain.contraAlloc})`;
+  }
   written.push(cname);
 
   // 4) El contra-movimiento de banco: importe opuesto, nace sin conciliar, ligado.
@@ -429,15 +494,15 @@ async function applyReversal(sql: Sql, userId: string, chain: Chain, reason: str
   // 5) La factura vuelve a deber: el saldo se rehace desde los abonos (+A −A) y
   //    paid_date se limpia; 'paid' → 'open' es justo la transición que
   //    nextInvoiceState permite (una 'reversed' no se toca).
-  const residual = await refreshInvoiceResidual(sql, invoiceId);
+  const residual = chain.isAdvance ? 0 : await refreshInvoiceResidual(sql, invoiceId);
 
   await writeAudit(sql, {
     companyId,
     userId,
-    action: "revertir-pago",
-    entity: "invoice",
-    entityId: invoiceId,
-    name: pv.invoice.name,
+    action: chain.isAdvance ? "revertir-saldo-a-favor" : "revertir-pago",
+    entity: chain.isAdvance ? "payment" : "invoice",
+    entityId: chain.isAdvance ? pv.payment.id : invoiceId,
+    name: chain.isAdvance ? pv.payment.name : pv.invoice.name,
     detail: `${pv.payment.name} ${pv.payment.kind === "inbound" ? "cobro" : "pago"} ${pv.payment.amount.toFixed(2)} del ${pv.payment.date} → ${written.join(", ")}${
       chain.bankMove ? ` · ${chain.bankMove.bank} ${(-chain.bankMove.amount).toFixed(2)} sin conciliar` : ""
     } · saldo ${pv.invoice.residualNow.toFixed(2)} → ${residual.toFixed(2)}${pv.keeps.length ? ` · se queda ${pv.keeps.map((k) => k.name).join(", ")}` : ""} · ${reason}`,

@@ -16,6 +16,7 @@ import { circuitLabel, nearestFunding } from "@/lib/erp/circuits";
 import { docRate, rateTableName } from "@/lib/erp/doc-rate";
 import { ReversalButton } from "@/components/cancel-doc";
 import { reversalPreview, reversePayment } from "@/lib/erp/reversal";
+import { applyCredit, getPartnerCredit, listCredits, unapplyCredit } from "@/lib/erp/advance-query";
 
 export const Route = createFileRoute("/credit")({
   validateSearch: (raw: Record<string, unknown>) => ({
@@ -28,6 +29,12 @@ function Page() {
   const { lado } = useSearch({ from: "/credit" });
   const kind = lado === "pagar" ? "supplier" : lado === "todos" ? "all" : "customer";
   const [status, setStatus] = useState<"all" | "open" | "overdue" | "paid">("all");
+  // SALDO A FAVOR (L5): dinero del socio que todavía no se aplicó a ninguna
+  // factura. Se enseña arriba, no escondido: la razón de la Decisión 12 es que
+  // nadie se entere tarde de que tiene dinero de un cliente sin acreditar.
+  const [credits, setCredits] = useState<Awaited<ReturnType<typeof listCredits>>>([]);
+  const [creditFor, setCreditFor] = useState<{ partnerId: number; partner: string } | null>(null);
+  const [creditData, setCreditData] = useState<Awaited<ReturnType<typeof getPartnerCredit>> | null>(null);
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<Awaited<ReturnType<typeof listInvoices>>>([]);
   const [folioEdit, setFolioEdit] = useState<{
@@ -56,15 +63,17 @@ function Page() {
   const [banks, setBanks] = useState<Array<{ id: number; name: string; opening: string; movement: string; currency: string }>>([]);
 
   async function load() {
-    const [inv, b, s] = await Promise.all([
+    const [inv, b, s, cr] = await Promise.all([
       listInvoices({ data: { kind } }),
       listBanks().catch(() => null),
       getSettings().catch((e: unknown) => {
         setSettingsError(e instanceof Error ? e.message : "No se pudieron leer los Ajustes");
         return null;
       }),
+      listCredits().catch(() => null),
     ]);
     setRows(inv);
+    setCredits(cr ?? []);
     if (b) setBanks(b.banks);
     if (s) {
       setSettings(s);
@@ -74,6 +83,13 @@ function Page() {
   useEffect(() => {
     void load();
   }, [kind]);
+
+  // El saldo a favor del lado que se está mirando: el del cliente en «cobrar»,
+  // el de Azagro con el proveedor en «pagar».
+  const misCreditos = useMemo(
+    () => credits.filter((c) => (lado === "pagar" ? c.lado === "proveedor" : c.lado === "cliente")),
+    [credits, lado],
+  );
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -140,6 +156,34 @@ function Page() {
         <Kpi label="Contado" value={money(kpis.cash)} />
         <Kpi label="A crédito" value={money(kpis.terms)} />
       </div>
+
+      {misCreditos.length > 0 && (
+        <div className="mb-4 erp-card p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-sm font-semibold">
+              Saldo a favor {lado === "pagar" ? "con proveedores" : "de clientes"} · {money(misCreditos.reduce((a, c) => a + c.available, 0))}
+            </p>
+            <p className="text-[12px] text-muted">
+              Dinero que ya entró y todavía no se aplica a ninguna factura. Aplícalo cuando el {lado === "pagar" ? "proveedor" : "cliente"} diga a cuál va.
+            </p>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {misCreditos.map((c) => (
+              <button
+                key={c.paymentId}
+                type="button"
+                className="erp-btn text-[12px]"
+                onClick={async () => {
+                  setCreditFor({ partnerId: c.partnerId, partner: c.partner });
+                  setCreditData(await getPartnerCredit({ data: { partnerId: c.partnerId, lado: c.lado } }));
+                }}
+              >
+                <span className="font-medium">{c.partner}</span> · {moneyIn(c.available, c.currency)} <span className="text-muted">({c.name})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="overflow-x-auto erp-card">
         <table className="w-full min-w-[980px] text-left text-[13px]">
@@ -428,7 +472,13 @@ function Page() {
               const extra = r.mora ? ` Mora ${r.mora} (${money(r.moraCharge)})${r.moraFormula ? ` · ${r.moraFormula}` : ""}.` : "";
               const desc = r.discount > 0 ? ` Pronto pago: se bonificaron ${money(r.discount)} y la factura quedó saldada.` : "";
               const fx = r.fxNote ? ` Diferencial TC: ${r.fxNote}.` : "";
-              setMsg(`Aplicado ${money(r.applied)} en ${r.bank}. Saldo factura ${money(r.residual)}. Caja ${money(r.cashAfter)}.${extra}${desc}${fx}`);
+              // El sobrante se dice SIEMPRE y con su folio (L5, Decisión 12:
+              // «el dinero del cliente no puede desaparecer sin que nadie se
+              // entere»). Antes se perdía sin una sola palabra en pantalla.
+              const favor = r.advance > 0.009
+                ? ` Sobró ${money(r.advance)}: quedó como saldo a favor de ${lado === "pagar" ? "Azagro con el proveedor" : "el cliente"} (${r.advanceName}), listo para aplicarse a otra factura.`
+                : "";
+              setMsg(`Aplicado ${money(r.applied)} en ${r.bank}. Saldo factura ${money(r.residual)}. Caja ${money(r.cashAfter)}.${favor}${extra}${desc}${fx}`);
               await load();
             } catch (err) {
               setError(err instanceof Error ? err.message : "Error");
@@ -733,6 +783,108 @@ function Page() {
             </div>
           </div>
         </form>
+      )}
+
+      {/* SALDO A FAVOR: aplicarlo y quitarlo (L5, Decisiones 12 y 13). El
+          sistema propone de la más vieja a la más nueva; la persona confirma
+          renglón por renglón o teclea otro importe — muchas veces el cliente
+          dice cuál factura está pagando, y eso el sistema no lo sabe. */}
+      {creditFor && creditData && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onClick={() => { setCreditFor(null); setCreditData(null); }}>
+          <div className="w-full max-w-2xl erp-card p-5" onClick={(e) => e.stopPropagation()}>
+            <p className="text-base font-semibold">Saldo a favor de {creditFor.partner}</p>
+            <p className="mt-0.5 text-[12px] text-muted">
+              Disponible {money(creditData.total)}. Se aplica a una factura a la vez. Lo que no apliques se queda como saldo a favor.
+            </p>
+
+            <p className="mt-4 text-[11px] font-medium uppercase tracking-wide text-muted">De dónde viene</p>
+            <div className="mt-1 space-y-1">
+              {creditData.credits.map((c) => (
+                <div key={c.paymentId} className="text-[12px]">
+                  <span className="font-medium">{c.name}</span> · {dateDMY(c.date)} · disponible {moneyIn(c.available, c.currency)}
+                  {c.memo ? <span className="text-muted"> · {c.memo}</span> : null}
+                  {c.applications.length > 0 && (
+                    <span className="text-muted">
+                      {" · ya aplicado a "}
+                      {c.applications.map((a) => (
+                        <button
+                          key={a.invoiceId}
+                          type="button"
+                          className="underline"
+                          title="Quitarlo de esta factura: el dinero regresa al saldo a favor"
+                          onClick={async () => {
+                            try {
+                              const r = await unapplyCredit({ data: { paymentId: c.paymentId, invoiceId: a.invoiceId } });
+                              setMsg(`${money(r.removed)} de ${r.payment} regresó al saldo a favor. ${r.invoice} vuelve a deber ${money(r.residual)}.`);
+                              setCreditData(await getPartnerCredit({ data: { partnerId: creditFor.partnerId, lado: lado === "pagar" ? "proveedor" : "cliente" } }));
+                              await load();
+                            } catch (err) {
+                              setError(err instanceof Error ? err.message : "Error");
+                            }
+                          }}
+                        >
+                          {a.invoice} ({money(a.amount)})
+                        </button>
+                      ))}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <p className="mt-4 text-[11px] font-medium uppercase tracking-wide text-muted">A qué factura</p>
+            {creditData.invoices.length === 0 ? (
+              <p className="mt-1 text-[12px] text-muted">Este cliente no tiene facturas abiertas. El saldo a favor se queda hasta que haya a qué aplicarlo.</p>
+            ) : (
+              <div className="mt-1 space-y-1">
+                {creditData.invoices.map((inv) => {
+                  // La propuesta se calcula sobre EL CRÉDITO QUE SE VA A
+                  // APLICAR, no sobre el total de todos: con dos saldos a
+                  // favor, proponer la suma y aplicar solo el primero enseña
+                  // un número que ese botón no puede cumplir.
+                  const origen = creditData.credits[0];
+                  const prop = origen ? creditData.proposal.find((x) => x.id === inv.id) : undefined;
+                  const cabe = origen ? Math.min(origen.available, inv.residual, prop?.amount ?? inv.residual) : 0;
+                  return (
+                    <div key={inv.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-line py-1.5 text-[12px]">
+                      <span>
+                        {/* El saldo vive en pesos y aqui solo hay facturas en
+                            pesos (el servidor filtra): se enseña con money(),
+                            nunca pesos con signo de otra moneda (Decisión 82). */}
+                        <span className="font-medium">{inv.name}</span> · {dateDMY(inv.date)} · debe {money(inv.residual)}
+                        {cabe > 0.009 ? <span className="text-muted"> · propuesta {money(cabe)}</span> : null}
+                      </span>
+                      <button
+                        type="button"
+                        className="erp-btn text-[12px]"
+                        disabled={!origen || cabe <= 0.009}
+                        onClick={async () => {
+                          if (!origen) return;
+                          try {
+                            const r = await applyCredit({ data: { paymentId: origen.paymentId, invoiceId: inv.id, amount: cabe } });
+                            const m = r.mora ? ` Mora ${r.mora} (${money(r.moraCharge)}).` : "";
+                            const d = r.discount > 0.009 ? ` Pronto pago: se bonificaron ${money(r.discount)} y la factura quedó saldada.` : "";
+                            setMsg(`Se aplicaron ${money(r.applied)} de ${r.payment} a ${r.invoice}. Saldo de la factura ${money(r.residual)}. Saldo a favor que queda ${money(r.remaining)}.${m}${d}`);
+                            setCreditData(await getPartnerCredit({ data: { partnerId: creditFor.partnerId, lado: lado === "pagar" ? "proveedor" : "cliente" } }));
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : "Error");
+                          }
+                        }}
+                      >
+                        Aplicar
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="mt-4 flex justify-end">
+              <button type="button" className="erp-btn" onClick={() => { setCreditFor(null); setCreditData(null); }}>Cerrar</button>
+            </div>
+          </div>
+        </div>
       )}
     </AppShell>
   );

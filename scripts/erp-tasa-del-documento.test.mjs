@@ -116,7 +116,7 @@ test("los cinco lectores preguntan por circuito, y ninguno se quedó con la TIIE
   assert.ok(mora.includes('pickDocRate(books, inv[0].circuit_code, moraDue, "cobro")'), "FI: tasa de cobro del circuito");
   assert.ok(mora.includes("if (!pick) throw new Error(missingDocRateMessage("), "FI: sin renglón en la tabla que le toca, no se emite");
   // 3. Pronto pago — la única que va a tasa de COSTO.
-  assert.ok(ops.includes('pickDocRate(books, inv[0].circuit_code, inv[0].date, "costo")'), "pronto pago: tasa de costo del circuito");
+  assert.ok(ops.includes('pickDocRate(books, i.circuit_code, i.date, "costo")'), "pronto pago: tasa de costo del circuito");
   // 4. «Lo que viene» del inicio.
   assert.ok(rep.includes("base: baseOf.get(inv.circuit_code ?? \"\") ?? null"), "lo que viene: por circuito de la factura");
   // 5. La vista previa de la pantalla de cobro, que tiene que enseñar la
@@ -144,7 +144,7 @@ test("la estimación de pronto pago usa la MISMA tasa que el cobro va a perdonar
   const ops = src("src/lib/erp/ops.ts");
   const rep = src("src/lib/erp/reports.ts");
   // 1. El cobro real (el que perdona dinero de verdad).
-  assert.ok(ops.includes('pickDocRate(books, inv[0].circuit_code, inv[0].date, "costo")'), "el cobro bonifica a tasa de costo del circuito");
+  assert.ok(ops.includes('pickDocRate(books, i.circuit_code, i.date, "costo")'), "el cobro bonifica a tasa de costo del circuito");
   // 2. La columna "Pronto pago (est.)" del estado de cuenta. Si leyera otra
   //    tabla, la pantalla estimaría una bonificación y el sistema perdonaría
   //    otra: sobre $111,876.11 con 30 días sin consumir, $1,081.47 contra

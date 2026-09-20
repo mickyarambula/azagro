@@ -45,13 +45,31 @@ function moraBilling(input) {
   return { ...base, interestNew, fegaNew, charge: round2(interestNew + fegaNew) };
 }
 function earlyPayBonus(input) {
-  const lived = daysBetween(input.issueDate, input.payDate);
+  // Actualizada el 19-sep-2026 con el motor (L5): días vividos con piso en
+  // cero y bono con tope en el plazo completo. Con el saldo a favor, un
+  // anticipo depositado ANTES de que existiera la factura se le puede aplicar
+  // después, y sin el piso se bonificaba un financiamiento que nunca corrió.
+  const lived = Math.max(0, daysBetween(input.issueDate, input.payDate));
   const rate = input.tiieAtIssue + input.costSpread;
   if (lived >= input.thresholdDays) return { applies: false, lived, days: 0, rate, bonus: 0 };
-  const days = Math.max(0, input.financialDays - lived);
+  const days = Math.min(Math.max(0, input.financialDays - lived), Math.max(0, input.financialDays));
   const bonus = round2((Math.max(0, input.cargo) * rate * days) / YEAR_DAYS);
   return { applies: days > 0, lived, days, rate, bonus };
 }
+
+// La copia de arriba amarrada al original: si el motor cambia y esta copia no,
+// la prueba lo dice en vez de seguir verde probándose a sí misma (el revisor
+// de dinero encontró justo eso el 19-sep-2026).
+test("la copia de earlyPayBonus de esta prueba sigue igual al motor", () => {
+  const motor = readFileSync(new URL("../src/lib/erp/credit.ts", import.meta.url), "utf8");
+  assert.ok(motor.includes("const lived = Math.max(0, daysBetween(input.issueDate, input.payDate));"), "piso en cero");
+  assert.ok(motor.includes("const days = Math.min(Math.max(0, input.financialDays - lived), Math.max(0, input.financialDays));"), "tope en el plazo completo");
+  // Y los números: un anticipo de 60 días ANTES de la factura, plazo 150.
+  const b = earlyPayBonus({ cargo: 100000, issueDate: "2026-03-01", payDate: "2026-01-01", thresholdDays: 120, financialDays: 150, tiieAtIssue: 0.04, costSpread: 0.09 });
+  assert.equal(b.lived, 0, "no se vivieron días negativos");
+  assert.equal(b.days, 150, "nunca más que el plazo completo");
+  assert.equal(b.bonus, 5416.67, "100,000 × 13% × 150/360 — el tope, no 7,583.33");
+});
 
 // Parámetros de los ejemplos: TIIE 7% + spread 9% = 16% anual, FEGA 3.04%.
 const P = { tiieAtDue: 0.07, spread: 0.09, fegaRate: 0.0304 };

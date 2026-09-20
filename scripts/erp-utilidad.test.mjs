@@ -114,11 +114,14 @@ test("cableado: el P&L por pedido usa TIIE de emisión y parámetros de Ajustes"
 
 test("cableado: el descuento por pronto pago se aplica de verdad al cobrar, con bitácora", () => {
   const ops = src("src/lib/erp/ops.ts");
-  const helper = ops.slice(ops.indexOf("export async function applyInvoicePayment"), ops.indexOf("export const addBankMove"));
+  // 19-sep-2026 (L5): el pronto pago vive en `earlyPayDiscount`, que llaman
+  // el cobro por banco y la aplicación de un saldo a favor — el mismo dinero
+  // por dos puertas no puede valer distinto. Los invariantes son los mismos.
+  const helper = ops.slice(ops.indexOf("export async function earlyPayDiscount"), ops.indexOf("export async function applyInvoicePayment"));
   assert.ok(helper.includes("earlyPayBonus({"), "el cobro debe calcular la bonificación");
   assert.ok(helper.includes("bono.applies && newRes <= bono.bonus"), "solo se perdona lo que cabe en la bonificación ganada");
   assert.ok(helper.includes(`"pronto-pago"`), "el descuento aplicado queda en bitácora");
-  assert.ok(helper.includes("Pronto pago ${inv[0].name}"), "el descuento queda como pago sin banco, ligado a la factura");
+  assert.ok(helper.includes("Pronto pago ${i.name}"), "el descuento queda como pago sin banco, ligado a la factura");
   assert.ok(helper.includes("thresholdDays: pol.earlyPayDays"), "el umbral sale de Ajustes");
 });
 

@@ -78,9 +78,21 @@ export async function fxCostOfPeriod(sql: Sql, companyId: number, from: string, 
       fx_agreed: string | null;
       fx_pago: string | null;
     }>`
-      select p.name as pago, p.date::text as fecha, i.name as factura, pt.name as socio, i.kind,
-        bm.amount::text as banco, pa.amount::text as aplicado,
-        i.fx_agreed::text as fx_agreed, p.fx_rate::text as fx_pago
+      select distinct on (p.id) p.name as pago, p.date::text as fecha, pt.name as socio, i.kind,
+        bm.amount::text as banco,
+        -- POR PAGO, no por aplicación (L5, Decisión 13): un cobro puede
+        -- repartirse entre varias facturas. Con pa.amount suelto, el mismo
+        -- bm.amount se repetía en cada renglón y el diferencial se contaba
+        -- tantas veces como facturas tuviera el pago.
+        --
+        -- Se suman TODAS las aplicaciones del pago, no solo las de facturas en
+        -- dólares: payment_allocs.amount y bank_moves.amount están los dos
+        -- en pesos, así que la resta es correcta venga de donde venga; una
+        -- aplicación a una factura en pesos aporta cero diferencial y no
+        -- estorba. Lo que sí se exige es que el pago toque al menos una
+        -- factura en dólares, que es de lo que trata esta mitad.
+        (select coalesce(sum(pa2.amount),0) from payment_allocs pa2 where pa2.payment_id = p.id)::text as aplicado,
+        i.name as factura, i.fx_agreed::text as fx_agreed, p.fx_rate::text as fx_pago
       from payments p
       join payment_allocs pa on pa.payment_id = p.id
       join invoices i on i.id = pa.invoice_id
@@ -91,9 +103,24 @@ export async function fxCostOfPeriod(sql: Sql, companyId: number, from: string, 
         and p.date between ${from} and ${to}
         and coalesce(i.currency,'MXN') = 'USD'
         and coalesce(b.currency,'MXN') = 'MXN'
-      order by p.date, p.id
+        -- SOLO PAGOS COMPLETAMENTE APLICADOS (L5, 19-sep-2026). La resta
+        -- banco - aplicado mide movimiento del dolar SOLO cuando el pago se
+        -- aplico entero; si le queda saldo a favor, esa resta mide lo que
+        -- falta por aplicar y mete un diferencial fantasma en el Resultado del
+        -- mes. Con un sobrante de 300 aplicado 200 daria 100.
+        --
+        -- Es una prueba ESTRUCTURAL, no de texto: el memo lo teclea la
+        -- persona, asi que un cobro real cuyo memo empezara con las palabras
+        -- equivocadas se habria salido del diferencial del periodo. Y ademas
+        -- atrapa al contra-PAG de un cobro aplicado en parte (importe -300,
+        -- aplicaciones -200), que por memo no se distinguia.
+        and abs(p.amount - coalesce((select sum(pa4.amount) from payment_allocs pa4 where pa4.payment_id = p.id), 0)) <= 0.009
+      -- distinct on (p.id): un pago con varias aplicaciones a facturas en
+      -- dolares (o dos a la MISMA) daria un renglon por cada una, todos con el
+      -- mismo total, y el diferencial se contaria de mas. Se queda uno.
+      order by p.id, i.id
     `;
-    const deudaFilas = pagos
+    const deudaFilas = [...pagos].sort((a, b) => (a.fecha === b.fecha ? 0 : a.fecha < b.fecha ? -1 : 1))
       .map((r) => {
         const banco = Number(r.banco);
         const aplicado = Number(r.aplicado);

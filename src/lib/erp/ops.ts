@@ -20,6 +20,7 @@ import { nextDocFolio } from "@/lib/erp/folios";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
 import { interestInvoiceClientCalc } from "@/lib/erp/doc-text";
 import { docRate, rateTableName, type RateUse } from "@/lib/erp/doc-rate";
+import { depositSplit, earlyPayMeasureDate } from "@/lib/erp/advance";
 import {
   circuitForTerm,
   circuitLabel,
@@ -2009,6 +2010,104 @@ export const saveBankOpening = createServerFn({ method: "POST" })
   });
 
 /**
+ * LA BONIFICACIÓN DE PRONTO PAGO — un solo lugar (19-sep-2026, L5).
+ *
+ * La llaman las DOS puertas por las que una factura puede quedar saldada: el
+ * cobro por banco (`applyInvoicePayment`) y la aplicación de un saldo a favor
+ * (`applyCredit`). Hasta hoy solo existía dentro de la primera, así que el
+ * mismo dinero valía distinto según por dónde entrara: hasta $5,416.67 que el
+ * cliente recibía por una vía y no por la otra sobre una factura de $100,000 a
+ * 150 días. Y peor, la tarjeta de utilidad del pedido descontaba el bono
+ * estimado en cuanto había fecha de pago, aunque por esa vía nadie lo hubiera
+ * otorgado: utilidad restada de una bonificación que no se dio.
+ *
+ * **La fecha con la que se MIDE se deriva aquí** (`earlyPayMeasureDate`), no la
+ * pone el llamador: es la más tarde entre todos los abonos vivos de la factura
+ * y la propia factura. Así las dos puertas miden igual POR CONSTRUCCIÓN — que
+ * era el punto de la Decisión 94 — en vez de depender de que cada una le pase
+ * la fecha correcta. `opts.payDate` solo fecha el documento de la bonificación.
+ *
+ * Devuelve el saldo ya recalculado. Si no aplica, devuelve el saldo tal cual y
+ * no escribe nada.
+ */
+export async function earlyPayDiscount(
+  sql: Sql,
+  opts: { companyId: number; userId: string; invoiceId: number; payDate: string; residual: number },
+) {
+  let newRes = opts.residual;
+  let discount = 0;
+  let detail = "";
+  const inv = await sql<{
+    id: number; kind: string; inv_class: string; amount: string; name: string; date: string;
+    partner_id: number; credit_days: number; policy_code: string; circuit_code: string | null;
+  }>`
+    select id, kind, coalesce(inv_class,'product') as inv_class, amount::text, name, date::text,
+      partner_id, coalesce(credit_days,0)::int as credit_days, coalesce(policy_code,'') as policy_code, circuit_code
+    from invoices where id = ${opts.invoiceId} and company_id = ${opts.companyId}
+  `;
+  const i = inv[0];
+  if (!i) return { discount, detail, residual: newRes };
+  if (
+    i.kind === "customer" && i.inv_class === "product" && Number(i.amount) > 0 && newRes > 0.009 &&
+    policyChargesInterest(i.policy_code) && i.credit_days > 0
+  ) {
+    const pol = await policy(sql, opts.companyId);
+    // Va a tasa de COSTO (`CLAUDE.md` regla 1) y de la tabla que le toca al
+    // circuito de ESTA factura (Decisión 5, `doc-rate.ts`): en doble
+    // facturación la TIIE; en lineal la columna de COSTO — no la de cobro, que
+    // lleva la protección adentro y regalaría de más. Solo se busca si el pago
+    // cae antes del umbral; si hace falta y no hay renglón, se detiene: nunca
+    // se bonifica con una tasa inventada.
+    // CUÁNDO TERMINÓ DE ENTRAR el dinero de esta factura, no cuándo entró el
+    // último pedazo que alguien decidió aplicar. Un anticipo viejo hacía
+    // retroceder el reloj y perdonaba a quien pagó tarde.
+    const abonos = await sql<{ date: string }>`
+      select p.date::text from payment_allocs pa join payments p on p.id = pa.payment_id
+      where pa.invoice_id = ${i.id} and p.reverses_id is null
+        and not exists (select 1 from payments r where r.reverses_id = p.id)
+      group by p.id, p.date
+      having sum(pa.amount) > 0.009
+    `;
+    const medida = earlyPayMeasureDate(i.date, abonos.map((a) => a.date));
+    const early = daysBetween(i.date, medida) < pol.earlyPayDays;
+    let tiieAtIssue = 0;
+    if (early) {
+      const books = await rateBooksOf(sql, opts.companyId);
+      const pick = pickDocRate(books, i.circuit_code, i.date, "costo");
+      if (!pick) throw new Error(missingDocRateMessage(books, i.circuit_code, i.date, `pronto pago de ${i.name}`));
+      tiieAtIssue = pick.rate;
+    }
+    const bono = earlyPayBonus({
+      cargo: Number(i.amount),
+      issueDate: i.date,
+      payDate: medida,
+      thresholdDays: pol.earlyPayDays,
+      // Los días no usados del plazo de ESTE pedido — nunca el de Ajustes.
+      financialDays: i.credit_days,
+      tiieAtIssue,
+      costSpread: pol.asrSpread,
+    });
+    if (bono.applies && newRes <= bono.bonus + 0.009) {
+      discount = Math.round(newRes * 100) / 100;
+      const dname = await nextDocFolio(sql, opts.companyId, "PAG");
+      const dpay = await sql<{ id: number }>`
+        insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
+        values (${opts.companyId}, 'inbound', ${dname}, ${i.partner_id}, ${discount}, ${`Pronto pago ${i.name}`}, ${opts.userId}, ${opts.payDate})
+        returning id
+      `;
+      await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${dpay[0]!.id}, ${i.id}, ${discount})`;
+      newRes = await refreshInvoiceResidual(sql, i.id);
+      detail = `Pagó al día ${bono.lived} (umbral ${pol.earlyPayDays}). Bonificación ganada: ${Number(i.amount).toFixed(2)} × ${(bono.rate * 100).toFixed(2)}% × ${bono.days} d / 360 = ${bono.bonus.toFixed(2)}. Aplicado al saldo: ${discount.toFixed(2)}.`;
+      await writeAudit(sql, {
+        companyId: opts.companyId, userId: opts.userId,
+        action: "pronto-pago", entity: "invoice", entityId: i.id, name: i.name, detail,
+      });
+    }
+  }
+  return { discount, detail, residual: newRes };
+}
+
+/**
  * Cobro/pago aplicado a UNA factura. Es el ÚNICO camino: lo usan la pantalla
  * de Cartera (registerPayment) y la de Bancos (addBankMove ligado a factura),
  * para que el mismo pago produzca el mismo resultado por cualquier entrada.
@@ -2111,9 +2210,31 @@ export async function applyInvoicePayment(
     applied = Math.min(opts.amount, residual);
     bankAmount = applied;
   }
-  // El saldo de la cuenta está en SU moneda: se compara con lo que sale de ella.
+  // LO QUE DE VERDAD ENTRÓ O SALIÓ, contra lo que consumió la aplicación
+  // (Decisión 12). Hasta el 19-sep-2026 el banco se registraba por lo aplicado
+  // y el sobrante desaparecía del rastro completo: ni cartera, ni caja, ni
+  // conciliación. Ahora el banco lleva el depósito real y lo que no cupo en
+  // esta factura nace como saldo a favor, con su propio folio.
+  const deposito = depositSplit({ deposited: opts.amount, used: bankAmount });
+  // **SOLO EN PESOS CONTRA PESOS, por ahora.** `payments.amount` significa
+  // «pesos», y de ahí leen el saldo a favor, la línea de crédito y el estado
+  // de cuenta. Un sobrante en una cuenta en dólares serían dólares guardados
+  // en una columna de pesos: US$2,000 se leerían como $2,000 y al aplicarlos
+  // desaparecerían $34,000 (a TC 18). Antes de dejar nacer ese crédito hay que
+  // decidir en qué moneda vive y cómo se aplica a una factura de la otra
+  // —Decisiones 76-82 del lado compra/venta—, y eso es una pieza aparte.
+  // Mientras tanto se detiene ANTES de escribir nada, con salida: capturar el
+  // importe exacto sigue funcionando en las cuatro monedas.
+  const sobrante = mode === "mxn" ? deposito.leftover : 0;
+  if (mode !== "mxn" && deposito.leftover > 0.009) {
+    throw new Error(
+      `El importe (${opts.amount.toFixed(2)}) es mayor que lo que ${inv[0].kind === "customer" ? "debe" : "se le debe"} ${inv[0].name}. En una operación con tipo de cambio el sobrante todavía no se puede guardar como saldo a favor: captura el importe exacto de esta factura y registra el resto aparte.`,
+    );
+  }
+  // El saldo de la cuenta está en SU moneda: se compara con lo que sale de
+  // ella — y de una cuenta sale el importe COMPLETO, no solo lo que se aplica.
   const cash = Number(bank[0].opening) + Number(bank[0].movement);
-  if (inv[0].kind === "supplier" && cash + 0.009 < bankAmount) {
+  if (inv[0].kind === "supplier" && cash + 0.009 < bankAmount + sobrante) {
     throw new Error(
       `No hay saldo en ${bank[0].name} (${cash.toFixed(2)} ${bank[0].currency}). Primero cobra o captura un saldo inicial en Bancos.`,
     );
@@ -2163,6 +2284,49 @@ export async function applyInvoicePayment(
       ${inv[0].partner_id}, ${moveKind}, ${inv[0].id}, ${pay[0]!.id}, ${opts.userId}, ${bankUsd ? signed : null}, ${moveFx}
     )
   `;
+
+  // EL SOBRANTE: saldo a favor, con su propio folio (Decisión 12 — «el dinero
+  // del cliente no puede desaparecer sin que nadie se entere»).
+  //
+  // Nace como un PAG **sin aplicar**: mismo documento de siempre, con su folio,
+  // su fecha, su banco y su bitácora, solo que todavía sin `payment_allocs`.
+  // De ahí se deriva el saldo a favor (`advance.ts`), sin columna que se pueda
+  // desincronizar del dinero. Y su movimiento de banco va aparte del de la
+  // factura: los dos suman el depósito real, y cada uno cuelga de su PAG.
+  //
+  // Va en la moneda de la CUENTA, que es donde el dinero está parado: un
+  // sobrante en una cuenta en dólares son dólares, no pesos convertidos
+  // (Decisión 91 — los dólares en caja llevan su costo).
+  let advanceName: string | null = null;
+  if (sobrante > 0.009) {
+    advanceName = await nextDocFolio(sql, opts.companyId, "PAG");
+    const advPay = await sql<{ id: number }>`
+      insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date, currency, fx_rate)
+      values (${opts.companyId}, ${kind}, ${advanceName}, ${inv[0].partner_id}, ${sobrante},
+        ${`Saldo a favor (sobrante de ${inv[0].name})`}, ${opts.userId}, ${payDate}, 'MXN', ${moveFx ?? 1})
+      returning id
+    `;
+    // Sin `payment_allocs` a propósito: eso ES el saldo a favor.
+    const advSigned = inv[0].kind === "customer" ? sobrante : -sobrante;
+    await sql`
+      insert into bank_moves (company_id, bank_id, date, amount, memo, partner_id, kind, invoice_id, payment_id, created_by, amount_fx, fx_rate)
+      values (
+        ${opts.companyId}, ${opts.bankId}, ${payDate}, ${advSigned},
+        ${`Saldo a favor ${advanceName} (sobrante de ${inv[0].name})`},
+        ${inv[0].partner_id}, ${moveKind}, ${null}, ${advPay[0]!.id}, ${opts.userId},
+        ${bankUsd ? advSigned : null}, ${moveFx}
+      )
+    `;
+    await writeAudit(sql, {
+      companyId: opts.companyId,
+      userId: opts.userId,
+      action: "saldo-a-favor",
+      entity: "payment",
+      entityId: advPay[0]!.id,
+      name: advanceName,
+      detail: `${sobrante.toFixed(2)} · sobrante de ${inv[0].name} (depósito ${opts.amount.toFixed(2)}, aplicado ${bankAmount.toFixed(2)})`,
+    });
+  }
 
   // Diferencial cambiario del tramo: se decide pago por pago (como el Excel).
   let fxDoc: string | null = null;
@@ -2216,69 +2380,27 @@ export async function applyInvoicePayment(
   // apaga, igual que en el estado de cuenta) y si tiene plazo financiero: con
   // 0 días no hay financiamiento que devolver, y no se rellena con Ajustes
   // (hallazgo #1 de la auditoría, Decisión 68). De contado tampoco se pide TIIE.
-  let discount = 0;
-  let discountDetail = "";
-  if (
-    inv[0].kind === "customer" && inv[0].inv_class === "product" && Number(inv[0].amount) > 0 && newRes > 0.009 &&
-    policyChargesInterest(inv[0].policy_code) && inv[0].credit_days > 0
-  ) {
-    const pol = await policy(sql, opts.companyId);
-    // La tasa solo hace falta si el pago cae antes del umbral (Ajustes). Si
-    // hace falta y la tabla no tiene renglón para la fecha de emisión, el cobro
-    // se detiene con aviso: nunca se bonifica con una tasa inventada.
-    //
-    // Va a tasa de COSTO (`CLAUDE.md` regla 1: «lo que se le regresa al
-    // cliente por pagar antes es la bonificación de pronto pago, a tasa de
-    // costo»), y de la tabla que le toca al circuito de ESTA factura
-    // (Decisión 5, `doc-rate.ts`): en doble facturación la TIIE; en lineal la
-    // columna de COSTO — no la de cobro, que llevaría la protección adentro y
-    // regalaría de más.
-    const early = daysBetween(inv[0].date, payDate) < pol.earlyPayDays;
-    let tiieAtIssue = 0;
-    if (early) {
-      const books = await rateBooksOf(sql, opts.companyId);
-      const pick = pickDocRate(books, inv[0].circuit_code, inv[0].date, "costo");
-      if (!pick) throw new Error(missingDocRateMessage(books, inv[0].circuit_code, inv[0].date, `pronto pago de ${inv[0].name}`));
-      tiieAtIssue = pick.rate;
-    }
-    const bono = earlyPayBonus({
-      cargo: Number(inv[0].amount),
-      issueDate: inv[0].date,
-      payDate,
-      thresholdDays: pol.earlyPayDays,
-      // Se bonifican los días no usados del plazo de ESTE pedido — nunca el
-      // de Ajustes: credit_days = 0 es contado, y de contado no se llega aquí.
-      financialDays: inv[0].credit_days,
-      tiieAtIssue,
-      costSpread: pol.asrSpread,
-    });
-    if (bono.applies && newRes <= bono.bonus + 0.009) {
-      discount = Math.round(newRes * 100) / 100;
-      const dname = await nextDocFolio(sql, opts.companyId, "PAG");
-      const dpay = await sql<{ id: number }>`
-        insert into payments (company_id, kind, name, partner_id, amount, memo, created_by, date)
-        values (${opts.companyId}, 'inbound', ${dname}, ${inv[0].partner_id}, ${discount}, ${`Pronto pago ${inv[0].name}`}, ${opts.userId}, ${payDate})
-        returning id
-      `;
-      await sql`insert into payment_allocs (payment_id, invoice_id, amount) values (${dpay[0]!.id}, ${inv[0].id}, ${discount})`;
-      newRes = await refreshInvoiceResidual(sql, inv[0].id);
-      discountDetail = `Pagó al día ${bono.lived} (umbral ${pol.earlyPayDays}). Bonificación ganada: ${Number(inv[0].amount).toFixed(2)} × ${(bono.rate * 100).toFixed(2)}% × ${bono.days} d / 360 = ${bono.bonus.toFixed(2)}. Aplicado al saldo: ${discount.toFixed(2)}.`;
-      await writeAudit(sql, {
-        companyId: opts.companyId,
-        userId: opts.userId,
-        action: "pronto-pago",
-        entity: "invoice",
-        entityId: inv[0].id,
-        name: inv[0].name,
-        detail: discountDetail,
-      });
-    }
-  }
+  // EL PRONTO PAGO vive en un solo lugar (`earlyPayDiscount`, abajo): lo
+  // llaman el cobro por banco y la aplicación de un saldo a favor, y los dos
+  // tienen que dar el mismo número — el mismo dinero por dos puertas no puede
+  // valer distinto (19-sep-2026, L5).
+  const bonoRes = await earlyPayDiscount(sql, {
+    companyId: opts.companyId,
+    userId: opts.userId,
+    invoiceId: inv[0].id,
+    payDate,
+    residual: newRes,
+  });
+  const discount = bonoRes.discount;
+  const discountDetail = bonoRes.detail;
+  newRes = bonoRes.residual;
 
   if (newRes <= 0.009) {
     await sql`update invoices set paid_date = coalesce(paid_date, ${payDate}::date) where id = ${inv[0].id}`;
   }
-  const cashAfter = cash + signed;
+  // El saldo de la cuenta después: entra (o sale) el depósito COMPLETO, no
+  // solo lo aplicado — el sobrante también está en la cuenta.
+  const cashAfter = cash + (inv[0].kind === "customer" ? bankAmount + sobrante : -(bankAmount + sobrante));
   await writeAudit(sql, {
     companyId: opts.companyId,
     userId: opts.userId,
@@ -2291,6 +2413,9 @@ export async function applyInvoicePayment(
   return {
     ok: true as const,
     applied,
+    /** Lo que no cupo en esta factura y quedó como saldo a favor del socio. */
+    advance: sobrante,
+    advanceName,
     residual: newRes,
     mora: mora.name,
     moraCharge: mora.charge,
@@ -2931,7 +3056,23 @@ export const getLiveStatement = createServerFn({ method: "POST" })
       // ajuste de TC como si fueran productos, e ignoraba "Ocultar pagadas", así
       // que nunca cuadraba con la tabla. Lo arma la pantalla con los mismos
       // renglones que muestra (src/lib/erp/statement-products.ts).
-      result.push({ partner, contacts, rows, ar, ap, byCurrency });
+      // SALDO A FAVOR del cliente (L5): dinero suyo que ya entró y todavía no
+      // se aplicó a ninguna factura. Tiene que salir en SU estado de cuenta —
+      // si no, el papel que se le manda le cobra de más y él sí sabe que pagó.
+      // Se cuenta a la fecha del corte, como todo lo demás de esta pantalla.
+      const favorRows = await sql<{ total: string }>`
+        select coalesce(sum(pm.amount - coalesce((
+          select sum(pa.amount) from payment_allocs pa where pa.payment_id = pm.id
+        ), 0)), 0)::text as total
+        from payments pm
+        where pm.company_id = ${cid} and pm.partner_id = ${partner.id}
+          and pm.kind = 'inbound' and pm.amount > 0 and pm.date <= ${asOf}
+          and pm.reverses_id is null
+          and not exists (select 1 from payments r where r.reverses_id = pm.id)
+          and pm.amount - coalesce((select sum(pa.amount) from payment_allocs pa where pa.payment_id = pm.id), 0) > 0.009
+      `;
+      const aFavor = Math.round(Number(favorRows[0]?.total ?? 0) * 100) / 100;
+      result.push({ partner, contacts, rows, ar, ap, byCurrency, aFavor, arNeto: Math.round((ar - aFavor) * 100) / 100 });
     }
 
     const fegaSplit = splitFegaBundle(pol.fegaRate, pol.commissionRate);

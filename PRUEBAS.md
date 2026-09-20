@@ -628,6 +628,117 @@ Escenario 3, sirve esa.
 **Lo que todavía NO se prueba aquí:** nada del circuito Línea Santa Rosa, que
 sigue apagado. Cuando se encienda, esa prueba se escribe entera.
 
+## ESCENARIO 18 — Un cliente te paga de más: el dinero ya no se pierde (Decisiones 11-13, 19-sep-2026)
+
+**El número que más importa:** si un cliente debe **$700** y deposita
+**$1,000**, en el banco tienen que entrar **$1,000.00** y el cliente tiene que
+quedar con **$300.00 a su favor**. Hasta hoy entraban $700 al banco y los $300
+desaparecían: no estaban en la cartera, no estaban en la caja, y tu
+conciliación contra el estado de cuenta del banco quedaba corta sin que nada
+lo explicara.
+
+**Antes de empezar:** una factura de venta abierta con saldo de $700 (si no
+tienes una, haz un pedido de contado de $700, entrégalo y factúralo), y una
+cuenta de banco con saldo.
+
+### Parte A — El sobrante no se pierde
+
+1. Ve a "Cartera" → "Cuentas por cobrar". Busca la factura de $700 y pulsa
+   **"Registrar cobro"**.
+2. En "Importe" escribe **`1000`** (más de lo que debe, a propósito). Elige la
+   cuenta de banco. Registra.
+3. El aviso verde de arriba tiene que decir, con estas palabras:
+   **"Aplicado $700.00 … Sobró $300.00: quedó como saldo a favor de el cliente
+   (PAG-000N), listo para aplicarse a otra factura."** Anota ese folio.
+4. La factura tiene que quedar en **$0.00** y pagada.
+5. Ve a "Cartera" → "Bancos". El movimiento de ese día tiene que sumar
+   **$1,000.00**, en dos renglones: uno de **$700.00** por la factura y otro de
+   **$300.00** que dice **"Saldo a favor PAG-000N"**. **Los dos suman lo que de
+   verdad depositó el cliente** — eso es lo que hace que tu conciliación
+   cuadre.
+
+### Parte B — Aplicarlo a otra factura
+
+6. Vuelve a "Cuentas por cobrar". Arriba de la tabla tiene que haber un
+   recuadro nuevo: **"Saldo a favor de clientes · $300.00"**, con un botón que
+   dice el nombre del cliente y el importe.
+7. Pulsa ese botón. Se abre **"Saldo a favor de …"**. Abajo, en **"A qué
+   factura"**, salen las facturas abiertas de ese cliente **de la más vieja a
+   la más nueva**, cada una con su **"propuesta"** — eso es lo que el sistema
+   sugiere; tú decides.
+8. Pulsa **"Aplicar"** en una. El aviso dice cuánto se aplicó, cómo quedó el
+   saldo de esa factura y **cuánto saldo a favor queda**.
+9. Si el cliente no tiene otra factura abierta, el cuadro te lo dice con esas
+   palabras y el saldo a favor se queda ahí hasta que haya a qué aplicarlo. No
+   se pierde ni caduca.
+
+### Parte C — Me equivoqué de factura
+
+10. Vuelve a abrir el cuadro de saldo a favor de ese cliente. En **"De dónde
+    viene"**, el renglón del cobro dice **"ya aplicado a FV-000N ($300.00)"**,
+    y ese folio es un enlace.
+11. Pulsa el enlace. El aviso tiene que decir **"$300.00 de PAG-000N regresó al
+    saldo a favor. FV-000N vuelve a deber …"**. La factura vuelve a estar
+    abierta y el dinero está otra vez disponible. **No se movió un peso del
+    banco**: el dinero sí entró, lo único que estaba mal era a qué factura se
+    le acreditó.
+
+### Parte D — El candado, y que su salida funciona
+
+12. Aplica el saldo a favor a **dos** facturas distintas (paso 8, dos veces con
+    importes que quepan).
+13. Ve a "Cartera" y busca ese cobro para revertirlo. Tiene que **negarse**, y
+    el mensaje tiene que decir que está repartido entre 2 facturas y que uses
+    **"Quitar de esta factura"** en el renglón que esté mal.
+14. Haz eso (paso 11) hasta dejarlo en una sola factura o en ninguna. Ahora la
+    reversa sí procede. **Ése es el punto: el bloqueo te manda a un camino que
+    de verdad existe.**
+
+### Parte E — El estado de cuenta le dice al cliente lo que tiene a favor
+
+15. Ve a "Cartera" → "Estado de cuenta" y elige ese cliente. Arriba, junto al
+    saldo grande, tiene que decir **"Saldo a su favor $300.00 · neto …"**.
+16. Pulsa el botón de imprimir / enviar. En el papel, debajo de "Saldo", tienen
+    que salir dos renglones: **"Saldo a su favor: $300.00 (pagos recibidos sin
+    aplicar todavía a una factura)"** y **"Saldo neto: …"**. **Ese es el punto:
+    el cliente sí sabe lo que depositó; si el papel no se lo reconoce, le
+    estás cobrando de más.**
+
+### Parte F — Lo que todavía se niega, a propósito
+
+17. Busca una factura **en dólares** (o cóbrale a una factura en pesos desde
+    una cuenta en dólares) e intenta cobrar **más** de lo que debe.
+18. El sistema tiene que **negarse**, con un mensaje que dice que el importe es
+    mayor que lo que debe y que **captures el importe exacto**. No es un error:
+    es a propósito. El saldo a favor vive en pesos, y guardar ahí un sobrante
+    en dólares haría que US$2,000 se leyeran como $2,000. Se construirá cuando
+    se decida en qué moneda vive un crédito y cómo se aplica a una factura de
+    la otra.
+19. Cobra el importe exacto: eso sí funciona, en las cuatro combinaciones de
+    moneda, igual que siempre.
+
+### Parte G — Lo que el saldo a favor NO regala
+
+20. Toma una factura a crédito que ya esté **vencida** y cóbrale casi todo por
+    banco, dejando un saldo chico (unos cientos). No se le bonifica nada: pagó
+    tarde.
+21. Ahora aplícale un saldo a favor viejo para terminar de saldarla. El sistema
+    **no debe perdonarte el resto**: el descuento por pronto pago se mide por
+    cuándo terminó de entrar el dinero de esa factura, no por la fecha del
+    último pedazo. Si perdonara, estarías regalando el financiamiento a un
+    cliente que pagó tarde — sobre una factura de $111,876.11 eran **$4,900**.
+22. Y al revés, el caso que **sí** debe premiarse: un cliente que te dejó
+    dinero a cuenta antes de que existiera la factura, y con ese dinero se
+    salda completa. Ahí sí se le devuelve el financiamiento entero, porque no
+    le financiaste ni un día. El aviso te dice cuánto se bonificó.
+
+**Lo que todavía NO se prueba aquí:** el sobrante en operaciones con tipo de
+cambio (Parte F: se niega a propósito); devolverle el dinero al cliente en
+efectivo (eso es un pago de salida y todavía no está construido); la nota de
+crédito sobre una factura ya pagada, que **sigue quedándose atrapada** —el
+mecanismo para arreglarla ya existe, le faltan tres pantallas que hay que
+mover juntas—; y capturar los anticipos que traigas del corte de Compaq.
+
 ## Qué no va a poder hacer (para que no pierdas tiempo buscándolo)
 
 Esto no está construido todavía. No es que lo estés haciendo mal — no

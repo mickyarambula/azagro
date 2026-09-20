@@ -71,8 +71,8 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 | Estado | Preguntas |
 |---|---|
 | **ABIERTA** (8) | L8a (ajuste de inventario: ¿pide costo?) · H3 (Sesión D) · H4c (devolución a proveedor) · H4f (candado sin salida en la reversa de devolución) · H5 (lotes y caducidad) · H6 (unidades de medida) · D-B (tasa del pronto pago) · D-C (plazo de Santa Rosa a Azagro) |
-| Resuelta en documento, **no construida** (4) | L3b (Decisión 10: la mora no se ajusta al devolver) · L3c (11) · L5 (12 y 13: el anticipo — del que cuelga L3c) · H2 (tres columnas muertas, no mueven dinero) |
-| Resuelta en documento **y ya construida** (8) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) · **N1 (5, 19-sep-2026: la mora a tasa de cobro, por circuito)** |
+| Resuelta en documento, **no construida** (3) | L3b (Decisión 10: la mora no se ajusta al devolver) · **L3c (11: la NC atrapada — ya tiene con qué, le faltan tres lectores)** · H2 (tres columnas muertas, no mueven dinero) |
+| Resuelta en documento **y ya construida** (9) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) · **L5 (12 y 13, 19-sep-2026: el saldo a favor, en pesos)** |
 | Parcial | H7 (el flete ya viaja por partida; repartir **un** flete de viaje entre productos sigue sin regla) |
 | Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2; captura: Decisión 82) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
 | En construcción / construida | H4d (Decisiones 46 a 54; pasos 0-3 de `PARCIALES.md` hechos) · H4e (Decisión 48; construida el 15-sep-2026) |
@@ -457,10 +457,22 @@ recurrente lo normal es aplicarlo a lo que sigue debiendo; devolver el dinero
 queda como opción disponible, no como regla. HANDOFF "Qué falta" lo listaba
 entre los INCOMPLETOS "sin tocar" — sigue sin construirse: hoy la NC sobre una
 factura pagada queda atrapada, sin aplicarse a nada (LOGICA h.10, Sesión D).
-**Verificado el 19-sep-2026: sigue sin construirse**, y no puede construirse
-antes que L5 — necesita el saldo a favor de la Decisión 12, que tampoco
-existe (`cutover-core.ts:209` lo dice con esas palabras al rechazar un
-anticipo del corte).
+**Sigue sin construir — y ahora ya tiene con qué.** El crédito de una NC que
+no cupo en ninguna factura viva se escribe en la propia NC como `residual`
+**negativo**, y ahí queda atrapado: `applyInvoicePayment` lo rechaza con «esta
+factura ya está saldada» (cualquier negativo cumple `residual <= 0.009`, y el
+mensaje además miente) y `refreshInvoiceResidual` lo colapsaría a $0 la primera
+vez que algo legítimo lo tocara (`Math.max(0, …)`).
+
+El **mecanismo** para arreglarlo se construyó el 19-sep-2026 con L5: el saldo a
+favor (`advance.ts`). Se intentó cerrar L3c el mismo día y **se sacó del
+alcance** porque mover ese crédito a un saldo a favor cambia TRES lectores que
+hay que resolver juntos: el estado de cuenta del cliente, la posición cambiaria
+de una NC en dólares (`fx-position-query.ts` cuenta con ese negativo) y la
+reversa de devolución (paso 8, que tendría que llevarse el crédito consigo).
+A medias, el cliente vería un estado de cuenta más alto de lo que debe — lo
+encontró el revisor de dinero. El motivo queda escrito junto al código
+(`azagro.ts`, `returnSale`).
 
 ### L4a. En un pedido en dólares, ¿el precio se captura en dólares o en pesos? (LOGICA h.14)
 **Cerrada el 18-sep-2026, Decisión 82:** el precio se captura en la moneda del pedido (campo con etiqueta «USD») y se guarda en pesos al TC del documento; pantalla y papel enseñan dólares. Construcción: bloque L4a (`MODELO-NEGOCIO.md` § 13.7).
@@ -507,12 +519,82 @@ nueva (Decisión 13 — misma regla del circuito: el sistema propone, la persona
 confirma o cambia, porque el cliente a veces dice cuál factura está pagando).
 Falta construir el anticipo (tabla, saldo visible, aplicación manual) y la
 pantalla de repartir un depósito entre varias facturas.
-**Verificado el 19-sep-2026: sigue sin construirse.** El sobrante se sigue
-descartando en silencio — `applied = Math.min(opts.amount, residual)`,
-`ops.ts:2072` — y el corte rechaza a propósito los anticipos de Compaq
-«hasta que exista el saldo a favor» (Decisión 71, `cutover-core.ts:214`).
-**De aquí cuelga L3c**: sin saldo a favor no hay dónde poner una NC sobre una
-factura ya pagada.
+**CONSTRUIDA el 19-sep-2026.** Al verificarlo apareció que el defecto era
+**peor** de lo anotado: el sobrante se perdía dos veces. De la cartera
+(`applied = Math.min(...)`) y del **banco**, porque el movimiento se
+registraba por lo aplicado y no por lo depositado (`signed = bankAmount`, en
+las cuatro ramas de moneda). Un depósito de $1,000 contra un saldo de $700
+dejaba $300 que no estaban en cartera, ni en caja, ni en ningún lado — y la
+conciliación contra el banco quedaba descuadrada sin que nada lo explicara.
+
+**La forma: el anticipo no es un documento nuevo.** Un cobro (PAG) ya es un
+documento con folio, fecha, banco y bitácora; un sobrepago es ese mismo cobro,
+parcialmente sin aplicar. Así que el saldo a favor se **deriva**:
+`payments.amount − Σ payment_allocs.amount` (`src/lib/erp/advance.ts`, puro).
+Sin tabla nueva, sin columna, **sin migración**. Y de ahí cae sola la Decisión
+13: un depósito repartido entre varias facturas es un cobro con N
+aplicaciones — las dos mitades de L5 resultaron ser el mismo mecanismo.
+
+**Por qué el sobrante nace como su propio PAG** y no agrandando el del cobro:
+`payments.amount` significa «lo aplicado en pesos» y `fx-cost-query.ts`
+construye el diferencial cambiario del mes sobre esa definición exacta
+(`banco − aplicado`). Cambiarle el significado movería números ya auditados.
+
+**Las salidas, antes de los candados** (metodología § 3): `reversal.ts`
+bloqueaba cualquier PAG que no tuviera exactamente una aplicación, así que un
+saldo a favor habría nacido sin forma de deshacerse — ahora tiene camino
+propio, y el de varias facturas nombra la salida correcta («Quitar de esta
+factura», que es otra intención: el dinero sí entró, lo que estaba mal es a
+qué factura se acreditó). `fx-cost-query.ts` habría contado el banco una vez
+por factura.
+
+**Tres preguntas que salieron al construirlo y que contestó el dueño**
+(19-sep-2026, «¿cómo debería ser?» → criterio técnico con su aval; Decisiones
+93, 94 y 95):
+
+- **Desde cuándo se considera pagada** una factura saldada con un anticipo
+  viejo: el día en que el dinero estuvo disponible **para ella** — la fecha más
+  tarde entre cuándo llegó y cuándo nació. Sobre una FV de $100,000 con 102
+  días vencidos, la respuesta movía entre **$3,683.33** de interés y **$0.00**.
+  El piso vive en `refreshInvoiceResidual`, así que ninguna factura vuelve a
+  quedar «pagada antes de existir».
+- **El pronto pago vale lo mismo por las dos puertas.** Existía solo en el
+  cobro por banco: hasta **$5,416.67** que el cliente recibía por una vía y no
+  por la otra — y el P&L ya descontaba ese bono estimado aunque nadie lo
+  hubiera otorgado. Ahora `earlyPayDiscount` es el único lugar que lo otorga.
+- **El saldo a favor baja lo que ocupa la línea de crédito**, nunca por debajo
+  de cero, y las dos caras (`creditExposure` y la bandeja del inicio) dicen lo
+  mismo. Un cliente con $5,000 a favor puede ordenar $5,000 más que antes.
+
+**Solo en pesos contra pesos, a propósito.** `payments.amount` significa
+pesos, y de ahí leen el saldo a favor, la línea de crédito y el estado de
+cuenta. Un sobrante en una cuenta en dólares serían dólares guardados en una
+columna de pesos: US$2,000 leídos como $2,000, y al aplicarlos desaparecerían
+$34,000 a TC 18 — lo encontró el revisor de dinero en la primera versión, que
+sí los guardaba así. En las otras tres combinaciones de moneda el cobro **se
+detiene antes de escribir nada**, con salida: capturar el importe exacto sigue
+funcionando en las cuatro.
+
+**El estado de cuenta lo enseña**, en pantalla y en el papel que se le manda al
+cliente («Saldo a su favor» y «Saldo neto»): callarlo le cobraría de más, y él
+sí sabe lo que depositó.
+
+**La segunda pasada del revisor encontró la lección de fondo:** los candados se
+habían puesto en `applyInvoicePayment` y la puerta NUEVA —`applyCredit`— nació
+sin ninguno de los tres. Un saldo a favor con un proveedor se podía aplicar a
+una factura de cliente (bajando la cuenta por cobrar sin que entrara un peso);
+un crédito en pesos se podía acreditar a una factura en dólares al TC pactado
+sin registrar el diferencial; y aplicar un anticipo viejo a una factura nueva
+dejaba la fecha de pago ANTES de la factura, con lo que el pronto pago
+bonificaba más días que el plazo completo ($7,583.33 contra un tope de
+$5,416.67). Los tres cerrados, y el piso de días vividos vive ahora en
+`earlyPayBonus`, donde protege todos los caminos.
+
+Fuera de alcance, explícito: el sobrante en operaciones con tipo de cambio,
+devolverle el dinero al cliente (es un pago de salida y merece decisión
+propia), L3c (arriba), y capturar los anticipos del corte de Compaq (Decisión
+71) — eso ya se puede habilitar, pero es otra pieza.
+`scripts/erp-saldo-a-favor.test.mjs`.
 
 ### L6. ¿Cuándo nace la deuda con el proveedor: al capturar la OC, al recibir, o con su factura real? (LOGICA h.16)
 **CONSTRUIDA** (Decisión 14 del dueño, 7-sep-2026; verificada el

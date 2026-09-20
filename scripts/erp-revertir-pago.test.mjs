@@ -65,7 +65,11 @@ test("CENTRAL (cableado): el contra-PAG es del MISMO tipo con importe NEGATIVO, 
   const body = fnBody(src("src/lib/erp/reversal.ts"), "applyReversal");
   assert.ok(body.includes("values (${companyId}, ${pv.payment.kind}, ${cname}, ${partnerId}, ${-pv.payment.amount}"), "mismo kind, importe negativo");
   assert.ok(body.includes("${today}, ${pv.payment.id})\n    returning id"), "reverses_id → el PAG original");
-  assert.ok(body.includes("insert into payment_allocs (payment_id, invoice_id, amount) values (${contra[0]!.id}, ${invoiceId}, ${-pv.payment.amount})"), "contra-abono negativo en la misma factura");
+  // 19-sep-2026 (L5): el contrario contraría LA APLICACIÓN, no el importe del
+  // PAG. Con el saldo a favor un cobro puede estar aplicado en parte; si el
+  // contrario usara el importe del PAG, la factura quedaría debiendo la
+  // diferencia — deuda que nadie contrajo.
+  assert.ok(body.includes("insert into payment_allocs (payment_id, invoice_id, amount) values (${contra[0]!.id}, ${invoiceId}, ${chain.contraAlloc})"), "contra-abono negativo en la misma factura, por lo que esa factura recibió");
   assert.ok(body.includes("values (${companyId}, ${chain.bankMove.bank_id}, ${today}, ${-chain.bankMove.amount}"), "contra-movimiento con importe opuesto");
   assert.ok(body.includes("${userId}, false, ${chain.bankMove.id})"), "nace SIN conciliar y ligado al movimiento original (Decisión 22)");
   const c = src("src/lib/erp/reversal.ts");
@@ -99,7 +103,11 @@ test("la FI se queda (Decisión 21): la reversa no toca interest_invoiced ni nin
 
 test("la factura vuelve a deber por refreshInvoiceResidual: 'paid' → 'open' y paid_date limpia; una 'reversed' no se toca", () => {
   const body = fnBody(src("src/lib/erp/reversal.ts"), "applyReversal");
-  assert.ok(body.includes("const residual = await refreshInvoiceResidual(sql, invoiceId);"), "el saldo se rehace desde los abonos, no se escribe a mano");
+  // 19-sep-2026 (L5): un saldo a favor no está aplicado a ninguna factura, así
+  // que ahí no hay saldo que rehacer. El invariante sigue intacto para todo lo
+  // demás: cuando hay factura, el saldo se rehace desde los abonos.
+  assert.ok(body.includes("chain.isAdvance ? 0 : await refreshInvoiceResidual(sql, invoiceId)"), "el saldo se rehace desde los abonos, no se escribe a mano");
+  assert.ok(body.includes("if (!chain.isAdvance) {"), "y sin factura no nace un abono contrario que apuntaría a la nada");
   const stock = src("src/lib/erp/stock.ts");
   assert.ok(stock.includes("state = 'open', paid_date = null"), "al reabrir, paid_date se limpia");
   // Copia literal de nextInvoiceState: la transición que este paso necesita, y la que prohíbe.

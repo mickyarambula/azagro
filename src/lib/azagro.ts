@@ -2556,9 +2556,25 @@ export const returnSale = createServerFn({ method: "POST" })
     if (leftover <= 0.009) {
       await sql`update invoices set residual = 0, state = 'paid', paid_date = ${today} where id = ${nc[0]!.id}`;
     } else {
+      // NOTA (L3c, Decisión 11 — sigue SIN construir, 19-sep-2026). El crédito
+      // que no cupo en ninguna factura viva queda aquí como `residual`
+      // NEGATIVO, y ahí está atrapado: `applyInvoicePayment` lo rechaza con
+      // «esta factura ya está saldada» (cualquier negativo cumple
+      // `residual <= 0.009`, y el mensaje además miente) y
+      // `refreshInvoiceResidual` lo colapsaría a $0 la primera vez que algo
+      // legítimo lo tocara (`Math.max(0, …)`, `stock.ts`).
+      //
+      // El mecanismo para arreglarlo YA EXISTE desde el 19-sep-2026: el saldo
+      // a favor de L5 (`advance.ts`). Se intentó cerrar aquí el mismo día y se
+      // sacó del alcance porque mover este crédito a un saldo a favor cambia
+      // TRES cosas a la vez que hay que resolver juntas: el estado de cuenta
+      // del cliente (que hoy lo enseña como renglón negativo y dejaría de
+      // hacerlo), la posición cambiaria de una NC en dólares
+      // (`fx-position-query.ts` cuenta con este negativo) y la reversa de
+      // devolución (paso 8, que tendría que llevarse el crédito consigo).
+      // Sin las tres, el cliente vería un estado de cuenta $X más alto.
       await sql`update invoices set residual = ${-leftover}, state = 'open' where id = ${nc[0]!.id}`;
     }
-
     await writeAudit(sql, {
       companyId: m.company_id,
       userId: context.userId,

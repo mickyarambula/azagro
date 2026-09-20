@@ -94,7 +94,12 @@ test("applyInvoicePayment: la rama en dólares ya no excluye al proveedor; el AT
   assert.ok(b.includes('} else if (mode === "usd-con-dolares") {') && b.includes("usdBankSettlement({"), "dólares contra dólares, sin diferencial");
   assert.ok(b.includes('} else if (mode === "mxn-con-dolares") {') && b.includes("mxnInvoicePaidInUsd({"), "pesos pagados con dólares al TC del pago");
   assert.ok(b.includes("${bankUsd ? signed : null}, ${moveFx}"), "el movimiento de banco guarda amount_fx (con el signo de amount) y el TC");
-  assert.ok(b.includes("cash + 0.009 < bankAmount"), "el saldo de la cuenta se compara en SU moneda");
+  // 19-sep-2026 (L5, Decisión 12): se sigue comparando en la moneda de la
+  // cuenta, y ahora contra el importe COMPLETO que sale de ella — no solo
+  // contra lo que se aplica a la factura. De una cuenta sale todo el pago,
+  // incluido el sobrante que queda como saldo a favor.
+  assert.ok(b.includes("cash + 0.009 < bankAmount + sobrante"), "el saldo se compara en SU moneda, contra lo que de verdad sale (aplicado + sobrante)");
+  assert.ok(b.includes("const deposito = depositSplit({ deposited: opts.amount, used: bankAmount });"), "el depósito real y lo consumido se separan");
   assert.ok(b.includes("${payDate}, 'MXN', ${moveFx ?? 1})"), "el PAG está en pesos al pactado y guarda el TC del movimiento (columnas que existían y nadie escribía)");
   assert.ok(b.includes('const signed = inv[0].kind === "customer" ? bankAmount : -bankAmount'), "el banco lleva lo real, con signo por lado (sin cambio)");
 });
