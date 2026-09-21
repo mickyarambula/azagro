@@ -207,7 +207,7 @@ test("la marca es una columna, no el nombre de la categoría que teclea una pers
   assert.ok(mig.includes("alter table expenses add column if not exists is_freight boolean not null default false;"));
   const e = src("src/lib/erp/expenses.ts");
   assert.ok(e.includes("isFreight: z.boolean().optional().default(false),"), "se captura");
-  assert.ok(e.includes("${data.isFreight === true})"), "se guarda");
+  assert.ok(e.includes("${data.isFreight === true}, ${data.eventRef ?? \"\"})"), "se guarda (con la liga del viaje de la Decisión 100 al lado)");
   assert.ok(e.includes("coalesce(e.is_freight, false) as is_freight"), "se devuelve al listado");
   const r = src("src/lib/erp/reports.ts");
   assert.ok(r.includes("coalesce(is_freight, false) as is_freight"), "la utilidad la lee");

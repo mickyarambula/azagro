@@ -295,6 +295,10 @@ export const PURGE = [
     sql: "delete from bank_moves where company_id = $1 and cutover_key is null",
   },
   { step: 3, table: "expenses", kind: "delete", sql: "delete from expenses where company_id = $1" },
+  // Decisión 100: lo que costó traer un viaje. Es dato de operación, como los
+  // gastos: se borra entero. No lleva `cutover_key` porque el corte de Compaq
+  // no importa viajes — importa saldos, existencias y bancos.
+  { step: 3, table: "trip_costs", kind: "delete", sql: "delete from trip_costs where company_id = $1" },
   { step: 4, table: "payments", kind: "delete", children: ["payment_allocs"], sql: "delete from payments where company_id = $1" },
   {
     step: 5,

@@ -85,10 +85,11 @@ export const listExpenses = createServerFn({ method: "GET" })
       invoice_ref: string;
       notes: string;
       is_freight: boolean;
+      event_ref: string;
     }>`
       select e.id, e.name, e.date::text, e.class, c.name as category, e.amount::text,
         p.name as partner, s.name as so_name, po.name as po_name, e.pay_kind, e.invoice_ref, e.notes,
-        coalesce(e.is_freight, false) as is_freight
+        coalesce(e.is_freight, false) as is_freight, coalesce(e.event_ref,'') as event_ref
       from expenses e
       left join expense_categories c on c.id = e.category_id
       left join partners p on p.id = e.partner_id
@@ -208,6 +209,12 @@ export const createExpense = createServerFn({ method: "POST" })
       // gasto de $5,000 sacaba 5,000 DÓLARES de la cuenta y destruía el costo
       // en pesos del resto de los dólares (`usdCashAverage`).
       fxRate: z.number().optional(),
+      // Decisión 100: el viaje de compra que este gasto pagó (el folio de la
+      // recepción, RCP/000N). Deja compararlo contra lo que se comprometió al
+      // capturar el viaje — la misma forma de la Decisión 99, lo comprometido
+      // en el documento y lo pagado en el gasto. Sin esto, «Pagado» en la
+      // pantalla de compras prometía una comparación sin manera de capturarla.
+      eventRef: z.string().optional(),
       // Decisión 99: este gasto ES el flete del pedido, no un costo extra.
       // Marca estructural, no el nombre de la categoría: el flete real manda
       // sobre el cotizado y el cotizado deja de restar. Sin esto, el mismo
@@ -230,6 +237,18 @@ export const createExpense = createServerFn({ method: "POST" })
     // tarjeta seguiría diciendo «todavía no se captura», que sería falso para
     // quien acaba de capturarlo. El flete de una compra va al costo de la
     // mercancía en el kardex, y esa pieza no está construida (ESTADO H7).
+    // El viaje tiene que existir, y pertenecer a la orden de compra ligada: un
+    // folio suelto dejaría un pago colgando de nada.
+    if (data.eventRef) {
+      if (!data.poId) throw new Error("Para ligarlo a un viaje, liga el gasto a la orden de compra que llegó en él");
+      const viaje = await sql<{ n: number }>`
+        select count(*)::int as n from stock_moves m
+        join purchase_orders po on po.company_id = m.company_id and po.name = m.origin
+        where m.company_id = ${cid} and po.id = ${data.poId}
+          and m.event_ref = ${data.eventRef} and m.move_type = 'receipt'
+      `;
+      if (!viaje[0]?.n) throw new Error(`La recepción ${data.eventRef} no pertenece a esa orden de compra`);
+    }
     if (data.isFreight && !data.soId) {
       throw new Error("Marca el flete contra el pedido de venta al que pertenece: el flete de una orden de compra todavía no tiene a dónde ir");
     }
@@ -237,10 +256,10 @@ export const createExpense = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from expenses where company_id = ${cid}`;
     const name = `GAS-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const exp = await sql<{ id: number }>`
-      insert into expenses (company_id, name, date, class, category_id, amount, partner_id, so_id, po_id, invoice_ref, pay_kind, bank_id, notes, created_by, is_freight)
+      insert into expenses (company_id, name, date, class, category_id, amount, partner_id, so_id, po_id, invoice_ref, pay_kind, bank_id, notes, created_by, is_freight, event_ref)
       values (${cid}, ${name}, ${data.date}, ${data.class}, ${data.categoryId}, ${data.amount},
         ${data.partnerId ?? null}, ${data.soId ?? null}, ${data.poId ?? null}, ${data.invoiceRef ?? ""},
-        ${data.payKind}, ${data.bankId ?? null}, ${data.notes ?? ""}, ${context.userId}, ${data.isFreight === true})
+        ${data.payKind}, ${data.bankId ?? null}, ${data.notes ?? ""}, ${context.userId}, ${data.isFreight === true}, ${data.eventRef ?? ""})
       returning id
     `;
     if (data.payKind === "cash" && data.bankId) {

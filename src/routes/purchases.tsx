@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Plus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { HeadBox, StatusPill } from "@/components/erp";
 import { MoneyField, QtyField, UomSelect } from "@/components/fields";
@@ -9,6 +9,7 @@ import { SendButton } from "@/components/send-doc";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
 import { closeShortPurchase, createPurchase, listPurchases, receivePurchase, setPurchaseFxRate } from "@/lib/azagro";
+import { listTripCosts, saveTripCost } from "@/lib/erp/trip-cost";
 import { fxAt, isUsdFx } from "@/lib/erp/fx";
 import { CloseShortButton } from "@/components/close-short";
 import { useAccess } from "@/lib/access";
@@ -135,14 +136,33 @@ function Page() {
   const [fulfillKind, setFulfillKind] = useState<"inventory" | "direct">("inventory");
   const [lines, setLines] = useState([{ productId: 0, qty: 1, unitPrice: 0, uom: "TM", deliverTo: "" }]);
   const [msg, setMsg] = useState<string | null>(null);
+  // Decisión 100: los viajes de TODAS las órdenes de la lista, en una sola
+  // llamada. Una por orden serían N viajes al servidor por carga.
+  const [trips, setTrips] = useState<Awaited<ReturnType<typeof listTripCosts>>["trips"]>([]);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (currency === "USD" && data) setFxRate((f) => (f > 0 ? f : (fxAt(data.fxTable, date)?.rate ?? 0)));
   }, [currency, date, data]);
 
+  async function loadTrips(orders?: Array<{ id: number }>) {
+    const ids = (orders ?? []).map((o) => o.id);
+    if (!ids.length) {
+      setTrips([]);
+      return;
+    }
+    try {
+      setTrips((await listTripCosts({ data: { poIds: ids } })).trips);
+    } catch {
+      // Quien no ve costos de compra no recibe nada, y el renglón no se
+      // dibuja: no es un error que valga la pena enseñarle.
+      setTrips([]);
+    }
+  }
+
   async function load() {
     const d = await listPurchases();
     setData(d);
+    void loadTrips(d.orders);
     setPartnerId((p) => p || d.suppliers[0]?.id || 0);
     setLocationId((l) => l || d.locations[0]?.id || 0);
     setLines((ls) =>
@@ -424,7 +444,8 @@ function Page() {
                   const dest = [...new Set(qlines.map((l) => l.deliver_to).filter(Boolean))];
                   const destLabel = dest.length ? dest.join(" · ") : o.location;
                   return (
-                  <tr key={o.id} className="border-t border-line">
+                  <Fragment key={o.id}>
+                  <tr className="border-t border-line">
                     <td className="px-4 py-3 font-medium">
                       <p>{o.name}</p>
                       {(o.so_name || o.rfq_name) && (
@@ -565,6 +586,8 @@ function Page() {
                       </div>
                     </td>
                   </tr>
+                  <TripCostsRow poId={o.id} poName={o.name} trips={trips.filter((t) => t.poId === o.id)} onSaved={() => loadTrips(data.orders)} onError={setMsg} />
+                  </Fragment>
                   );
                 })}
               </tbody>
@@ -617,5 +640,140 @@ function PoFxLine({ po, onSaved, onError }: { po: { id: number; name: string; fx
       </button>
       <span className="text-[11px] text-warn">sin TC</span>
     </div>
+  );
+}
+
+/**
+ * LO QUE COSTÓ TRAER CADA VIAJE (Decisión 100).
+ *
+ * Un renglón por recepción de esta orden: una orden puede llegar en tres
+ * camiones y cada camión cuesta lo suyo. Se captura el flete y las maniobras
+ * —los cargadores de la descarga—, que son parte del mismo costo de traerla.
+ *
+ * ESTA PIEZA SOLO CAPTURA. Ningún precio, costo ni utilidad se mueve todavía:
+ * meterlo al costo del inventario va junto con el apagador del doble conteo,
+ * en un solo cambio.
+ */
+function TripCostsRow({
+  poId,
+  poName,
+  trips,
+  onSaved,
+  onError,
+}: {
+  poId: number;
+  poName: string;
+  trips: Array<Awaited<ReturnType<typeof listTripCosts>>["trips"][number]>;
+  onSaved: () => Promise<void> | void;
+  onError: (m: string | null) => void;
+}) {
+  const [edit, setEdit] = useState<string | null>(null);
+  const [flete, setFlete] = useState("");
+  const [maniobras, setManiobras] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  if (trips.length === 0) return null;
+  const money = (n: number) => n.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
+  // Cuenta solo los que no tienen FLETE: un viaje siempre tuvo flete, pero no
+  // siempre hubo cargadores. Contar las maniobras faltantes empujaría a
+  // teclear un 0 que nadie verificó.
+  const falta = trips.filter((t) => !t.reversed && t.freight == null).length;
+
+  return (
+    <tr className="border-t border-line/50 bg-soft/40">
+      <td className="px-4 py-3" colSpan={7}>
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">
+          Lo que costó traerla
+          {falta > 0 ? <span className="ml-2 font-medium normal-case text-warn">{falta === 1 ? "1 viaje sin flete capturado" : `${falta} viajes sin flete capturado`}</span> : null}
+        </p>
+        <div className="mt-1.5 space-y-1.5">
+          {trips.map((t) => (
+            <div key={t.eventRef} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+              <span className="font-medium tabular-nums">{t.eventRef}</span>
+              <span className="text-muted tabular-nums">{t.date}</span>
+              {t.reversed ? <span className="text-muted">(recepción revertida — el dinero del fletero ya salió, el costo se queda)</span> : null}
+              {edit === t.eventRef ? (
+                <>
+                  <input
+                    className="erp-input h-7 w-24 text-[12px]"
+                    placeholder="Flete"
+                    inputMode="decimal"
+                    value={flete}
+                    onChange={(e) => setFlete(e.target.value)}
+                  />
+                  <input
+                    className="erp-input h-7 w-28 text-[12px]"
+                    placeholder="Maniobras"
+                    inputMode="decimal"
+                    value={maniobras}
+                    onChange={(e) => setManiobras(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="erp-btn-primary h-7 px-2 text-[11px]"
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        // Vacío se guarda como «sin capturar», no como cero: un
+                        // cero se teclea a propósito cuando el proveedor lo trajo.
+                        await saveTripCost({
+                          data: {
+                            poId,
+                            eventRef: t.eventRef,
+                            freight: flete.trim() === "" ? null : Number(flete),
+                            handling: maniobras.trim() === "" ? null : Number(maniobras),
+                          },
+                        });
+                        setEdit(null);
+                        await onSaved();
+                        onError(null);
+                      } catch (e) {
+                        onError(e instanceof Error ? e.message : "No se pudo guardar");
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    Guardar
+                  </button>
+                  <button type="button" className="erp-btn h-7 px-2 text-[11px]" onClick={() => setEdit(null)}>
+                    Cancelar
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className={t.freight == null ? "text-warn" : "tabular-nums"}>
+                    Flete {t.freight == null ? "sin capturar" : money(t.freight)}
+                  </span>
+                  <span className={t.handling == null ? "text-muted" : "tabular-nums"}>
+                    Maniobras {t.handling == null ? "sin capturar" : money(t.handling)}
+                  </span>
+                  {t.paidN > 0 ? (
+                    <span className="text-muted tabular-nums">
+                      Pagado {money(t.paid)} ({t.paidN === 1 ? "1 gasto" : `${t.paidN} gastos`})
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="text-[11px] text-accent underline decoration-dotted underline-offset-2"
+                    onClick={() => {
+                      setEdit(t.eventRef);
+                      setFlete(t.freight == null ? "" : String(t.freight));
+                      setManiobras(t.handling == null ? "" : String(t.handling));
+                    }}
+                  >
+                    {t.freight == null && t.handling == null ? "Capturar" : "Corregir"}
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[11px] text-muted">
+          Es de {poName}. Todavía no entra al costo del inventario ni cambia ningún precio: eso es el paso siguiente.
+        </p>
+      </td>
+    </tr>
   );
 }

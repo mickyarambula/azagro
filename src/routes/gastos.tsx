@@ -5,6 +5,7 @@ import { Field, FinanceNav, StatusPill } from "@/components/erp";
 import { MoneyField } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
 import { addExpenseCategory, createExpense, listExpenses, setExpenseFreight } from "@/lib/erp/expenses";
+import { listTripCosts } from "@/lib/erp/trip-cost";
 import { exportCsv } from "@/lib/export-csv";
 import { cn, money, todayMx } from "@/lib/utils";
 
@@ -36,6 +37,10 @@ function Page() {
   const [poId, setPoId] = useState("");
   // Decisión 99: este gasto ES el flete del pedido, no un costo extra.
   const [esFlete, setEsFlete] = useState(false);
+  // Decisión 100: el viaje de compra que este gasto pagó, para poder
+  // compararlo contra lo que se comprometió al capturar el viaje.
+  const [eventRef, setEventRef] = useState("");
+  const [viajes, setViajes] = useState<Awaited<ReturnType<typeof listTripCosts>>["trips"]>([]);
   const [payKind, setPayKind] = useState<"cash" | "credit">("cash");
   const [bankId, setBankId] = useState("");
   // Decisión 86: de una cuenta en dólares salen DÓLARES. El importe se captura
@@ -77,6 +82,18 @@ function Page() {
   }
 
   useEffect(() => {
+    const id = Number(poId) || 0;
+    setEventRef("");
+    if (!id) {
+      setViajes([]);
+      return;
+    }
+    void listTripCosts({ data: { poIds: [id] } })
+      .then((r) => setViajes(r.trips))
+      .catch(() => setViajes([]));
+  }, [poId]);
+
+  useEffect(() => {
     void load().catch((e) => setError(e instanceof Error ? e.message : "Error"));
   }, []);
 
@@ -109,6 +126,7 @@ function Page() {
           soId: Number(soId) || undefined,
           poId: Number(poId) || undefined,
           isFreight: cls === "pedido" && esFlete && !!soId,
+          eventRef: cls === "pedido" && poId ? eventRef || undefined : undefined,
           payKind,
           bankId: payKind === "cash" ? Number(bankId) || undefined : undefined,
           fxRate: cuentaUsd ? fxRate : undefined,
@@ -122,6 +140,7 @@ function Page() {
       setSoId("");
       setPoId("");
       setEsFlete(false);
+      setEventRef("");
       await load();
       setError(null);
       setNotes(`Registrado ${r.name}`);
@@ -240,6 +259,19 @@ function Page() {
                     placeholder="Buscar OC…"
                   />
                 </Field>
+                {poId && viajes.length > 0 ? (
+                  <Field label="¿Qué viaje pagó?">
+                    <select className="erp-input" value={eventRef} onChange={(e) => setEventRef(e.target.value)}>
+                      <option value="">Ninguno en particular</option>
+                      {viajes.map((v) => (
+                        <option key={v.eventRef} value={v.eventRef}>
+                          {v.eventRef} · {v.date}
+                          {v.freight == null ? " · flete sin capturar" : ` · flete comprometido ${money(v.freight)}`}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                ) : null}
                 {soId ? (
                   <label className="flex cursor-pointer items-start gap-2 rounded-md border border-line bg-soft px-3 py-2.5">
                     <input type="checkbox" className="mt-0.5" checked={esFlete} onChange={(e) => setEsFlete(e.target.checked)} />
@@ -346,6 +378,7 @@ function Page() {
                     <td className="px-3 py-3">
                       <StatusPill tone={e.class === "financiero" ? "warn" : e.class === "pedido" ? "ok" : "muted"}>{classLabel(e.class)}</StatusPill>
                       {e.is_freight ? <span className="mt-1 block text-[11px] font-semibold text-brand">Flete del pedido</span> : null}
+                      {e.event_ref ? <span className="mt-1 block text-[11px] text-muted">Viaje {e.event_ref}</span> : null}
                       {e.so_name ? (
                         <button
                           type="button"

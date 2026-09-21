@@ -895,8 +895,41 @@ bloque se parte en cuatro piezas (dar dónde vivir al flete de compra · el
 costo del inventario con el apagador en el mismo cambio · el flete obligatorio
 al cotizar · el reparto automático) y **queda fuera** corregir el costo de
 mercancía ya recibida, que necesita un movimiento de kardex de solo valor.
-*Para el dueño, la que lo decide todo: comprando para inventario y entregando
-después, ¿son dos fletes (entrada y salida) o uno solo?*
+**CONTESTADA el 21-sep-2026 (Decisión 100):** son **dos** fletes —uno para
+traerla, otro para llevársela— y además «en ocasiones también se pagan
+cargadores, para descarga y carga». Eso cambia el concepto de «el flete entra
+al costo» a «**lo que costó traerla** entra al costo», maniobras incluidas.
+Lo que cuesta traerla es costo de la **mercancía**; lo que cuesta llevársela es
+costo del **pedido** y vive donde ya vive (el costo puesto de la cotización y
+los gastos del pedido, donde el catálogo ya trae «Descarga / maniobras» y
+«Acomodo en campo»). En directo/brokeraje hay un solo viaje y nunca hay bodega:
+todo es del pedido, como hoy.
+
+**Pieza 1 CONSTRUIDA el 21-sep-2026** (migración 0050, `trip-cost.ts`): se
+captura lo que costó cada viaje —flete y maniobras, un renglón por recepción—
+y **no mueve un peso** de ningún precio, costo ni utilidad. Siguen abiertas la
+pieza 2 (el costo del inventario **con** el apagador del doble conteo en el
+mismo cambio), la 3 (el flete obligatorio al cotizar, con sus dos salidas) y la
+4 (el reparto automático, que espera lo del peso por unidad).
+
+*Anotado para la pieza 2, de la revisión de dinero:* si se revierte una
+recepción y se vuelve a recibir, se mina un `RCP` nuevo y **el viaje viejo
+sigue vivo con su importe** junto al nuevo. Hoy nadie los suma, así que no
+mueve nada; la pieza 2 tiene que decidir explícitamente si un viaje revertido
+entra al costo del inventario. Y su prueba necesita el motor congelado **al
+centavo** (patrón `erp-circuito-lineal`): las de la pieza 1 congelan por texto,
+que alcanza para probar que nada se movió pero no para probar una fórmula.
+
+*Pendiente del dueño para la pieza 4:* ¿se captura el **peso por unidad** en el
+catálogo (saco 50 kg, tambo 200 kg) para poder repartir un camión con unidades
+mezcladas? Hoy el catálogo guarda la unidad y **ninguna columna de peso**
+—verificado en las 49 migraciones—, y hay unas 82 capturas por delante.
+
+*Anotado para la pieza del lado venta:* `quote_lines.other_cost` existe, entra
+al costo puesto del precio (`landed = costo + flete + otros`) y **ninguna
+pantalla lo captura** — muerta como `quotes.freight_total`. Hay que revivirla o
+declararla muerta por escrito; revivirla dejaría un histórico de ceros
+indistinguible de «no se capturó» (regla 9).
 
 ### H8a. Pegar el CSV de saldos abiertos y existencias del corte de Compaq
 **RESUELTA EN CÓDIGO (pendiente operativo).** El importador existe, es

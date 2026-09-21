@@ -17,6 +17,13 @@ const ACTION: Record<string, string> = {
   // cobro veía "saldo-a-favor" en vez de una frase.
   "saldo-a-favor": "Sobrante a favor",
   "aplicar-saldo-a-favor": "Aplicó saldo a favor",
+  // El flete (Decisiones 99 y 100). Sin estas cuatro, la bitácora enseña el
+  // nombre interno de la acción — el mismo defecto que se corrigió arriba.
+  "marcar-flete": "Marcó un gasto como flete del pedido",
+  "desmarcar-flete": "Quitó la marca de flete a un gasto",
+  "flete-de-solicitud": "Capturó el flete de una solicitud",
+  "costo-de-viaje": "Capturó lo que costó traer un viaje",
+  "costo-de-viaje-corregido": "Corrigió lo que costó traer un viaje",
   "quitar-saldo-a-favor": "Quitó saldo a favor",
   "revertir-saldo-a-favor": "Revirtió saldo a favor",
   "mora-ajusta-no": "Apagó el ajuste de mora",

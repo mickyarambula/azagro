@@ -231,7 +231,10 @@ test("forma del plan: cada sentencia va acotada a la empresa, el candado bloquea
   assert.ok(GUARD.company.endsWith("for update") && GUARD.settings.endsWith("for update"), "for update en companies y company_settings");
   assert.deepEqual(
     PURGE.map((s) => s.table),
-    ["expenses", "bank_moves", "expenses", "payments", "invoices", "customer_pos", "purchase_orders", "sales_orders", "vendor_rfqs", "quotes", "customer_requests", "stock_moves", "stock_quants", "documents", "doc_files", "notifications", "folio_counters"],
+    // `trip_costs` (Decisión 100) va junto a los gastos y ANTES de
+    // `purchase_orders`, de la que cuelga: el orden lo borra explícitamente en
+    // vez de dejarlo a la cascada, para que el conteo lo reporte.
+    ["expenses", "bank_moves", "expenses", "trip_costs", "payments", "invoices", "customer_pos", "purchase_orders", "sales_orders", "vendor_rfqs", "quotes", "customer_requests", "stock_moves", "stock_quants", "documents", "doc_files", "notifications", "folio_counters"],
   );
   assert.equal(PURGE[0].kind, "update", "el primer paso rompe el ciclo, no borra");
   assert.ok(PURGE.find((s) => s.table === "invoices").sql.includes("cutover_key is null"), "el corte sobrevive");
@@ -291,7 +294,7 @@ test("central: sobrevive exactamente el corte y los catálogos; la otra empresa 
   // Lo borrado, paso por paso (el conteo que va a bitácora).
   const by = Object.fromEntries(res.deleted.map((d) => [`${d.table}${d.kind === "update" ? ":update" : ""}`, d.count]));
   assert.deepEqual(by, {
-    "expenses:update": 1, bank_moves: 3, expenses: 1, payments: 3, invoices: 4, customer_pos: 1, purchase_orders: 1, sales_orders: 1,
+    "expenses:update": 1, bank_moves: 3, expenses: 1, trip_costs: 0, payments: 3, invoices: 4, customer_pos: 1, purchase_orders: 1, sales_orders: 1,
     vendor_rfqs: 1, quotes: 1, customer_requests: 1, stock_moves: 5, stock_quants: 2, documents: 1, doc_files: 1, notifications: 1, folio_counters: 4,
   });
   assert.deepEqual(Object.fromEntries(res.rebuilt.map((x) => [x.name, x.count])), { existencias: 1, "costo de productos": 2, "cartera del corte": 2, "folios de kardex": 1 });
@@ -301,7 +304,7 @@ test("central: sobrevive exactamente el corte y los catálogos; la otra empresa 
   const alive = Object.fromEntries(Object.entries(after).filter(([t]) => purgeTables().includes(t)));
   // De la empresa 1 queda solo el corte: dos facturas y el renglón de la FV del corte, un INI, un CSV, su proyección y su folio.
   assert.deepEqual(alive, {
-    expenses: 0, bank_moves: 0, payments: 0, payment_allocs: 0, invoices: 2, invoice_lines: 1, customer_pos: 0, customer_po_lines: 0,
+    expenses: 0, trip_costs: 0, bank_moves: 0, payments: 0, payment_allocs: 0, invoices: 2, invoice_lines: 1, customer_pos: 0, customer_po_lines: 0,
     purchase_orders: 0, purchase_lines: 0, sales_orders: 0, sales_lines: 0, vendor_rfqs: 0, vendor_rfq_suppliers: 0, vendor_rfq_lines: 0,
     vendor_rfq_bids: 0, vendor_rfq_targets: 0, quotes: 0, quote_lines: 0, customer_requests: 0, customer_request_lines: 0,
     stock_moves: 1, stock_quants: 1, documents: 0, doc_files: 1, notifications: 0, folio_counters: 1,
