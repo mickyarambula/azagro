@@ -1,0 +1,24 @@
+-- 0049 — El flete del pedido se cuenta UNA vez (Decisión 99, 20-sep-2026).
+--
+-- Hasta hoy la utilidad del pedido hacía `flete cotizado + gastos del pedido`
+-- (`reports.ts`, `parciales.ts`) y luego restaba el total del margen. Y la
+-- pantalla de Gastos invita con esas palabras a capturar ahí «flete de un
+-- pedido». Quien cotizaba $2,000 de flete y después capturaba la factura del
+-- fletero por $2,000 contra ese pedido veía la utilidad $2,000 más baja de lo
+-- que fue: un costo real, restado dos veces.
+--
+-- La regla nueva es la que ese MISMO cálculo ya aplica al costo de la
+-- mercancía tres renglones arriba — «el costo real manda: OC del proveedor,
+-- luego el de la cotización»: el flete pagado manda sobre el cotizado, y el
+-- cotizado queda de respaldo mientras no haya gasto capturado.
+--
+-- Para eso hace falta saber CUÁL gasto es el flete, y saberlo por marca
+-- estructural y no por el nombre de la categoría, que la teclea una persona y
+-- se puede escribir de seis maneras (la misma razón por la que un saldo a
+-- favor se reconoce por su movimiento de banco y no por su memo).
+--
+-- `is_freight` no cambia nada en una base que ya existe: todo gasto viejo nace
+-- en `false`, o sea «no es el flete», que es exactamente como se venían
+-- contando. Lo que cambia es que de aquí en adelante se puede decir que sí.
+
+alter table expenses add column if not exists is_freight boolean not null default false;

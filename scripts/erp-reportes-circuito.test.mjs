@@ -232,7 +232,10 @@ test("cableado: el Panorama y la lista por pedido muestran la protección por se
   assert.ok(p.includes('{conLineal ? <th className="px-3 py-3 text-right font-medium">Financ. S. Rosa</th> : null}'), "Panorama: columna de financiamiento de Santa Rosa");
   assert.ok(p.includes("Santa Rosa · costo real {d.lineCost == null ? \"sin dato\" : money(d.lineCost)} · protección {d.protection == null ? \"sin dato\" : money(d.protection)}"), "lista por pedido: desglose en la celda de costo financiero del lineal");
   assert.ok(p.includes("{circuitLabel(d.circuit)}"), "lista por pedido: el circuito bajo el folio");
-  assert.ok(p.includes('"Circuito", "Venta", "Costo", "Flete", "Costo financiero", "Financ. Santa Rosa", "Costo real línea", "Protección"'), "el CSV lleva circuito, financiamiento de Santa Rosa, costo real y protección");
+  // Decisión 99: la columna del flete cambió de nombre porque cambió de
+  // significado (era «cotizado + gastos del pedido», ahora es «el pagado si lo
+  // hay, si no el cotizado»). El orden de las columnas no se movió.
+  assert.ok(p.includes('"Circuito", "Venta", "Costo", "Flete pagado o cotizado", "Costo financiero", "Financ. Santa Rosa", "Costo real línea", "Protección"'), "el CSV lleva circuito, financiamiento de Santa Rosa, costo real y protección");
   assert.ok(p.includes("Sin pedidos en el periodo."), "lo demás sigue igual");
 });
 

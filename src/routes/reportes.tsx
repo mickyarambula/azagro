@@ -221,7 +221,7 @@ function Page() {
           onClick={() =>
             exportCsv(
               "utilidad-azagro",
-              ["Pedido", "Fecha", "Cliente", "Estado", "Circuito", "Venta", "Costo", "Flete", "Costo financiero", "Financ. Santa Rosa", "Costo real línea", "Protección", "Margen", "%", "Dif. TC pago", "Utilidad final"],
+              ["Pedido", "Fecha", "Cliente", "Estado", "Circuito", "Venta", "Costo", "Flete pagado o cotizado", "Costo financiero", "Financ. Santa Rosa", "Costo real línea", "Protección", "Margen", "%", "Dif. TC pago", "Utilidad final"],
               (deals?.deals ?? []).map((d) => [
                 d.name,
                 d.date,
@@ -366,7 +366,7 @@ function Page() {
               <th className="px-3 py-3 font-medium">Estado</th>
               <th className="px-3 py-3 text-right font-medium">Venta</th>
               <th className="px-3 py-3 text-right font-medium">Costo</th>
-              <th className="px-3 py-3 text-right font-medium">Flete</th>
+              <th className="px-3 py-3 text-right font-medium" title="El flete pagado al fletero si ya se capturó; si no, el que se cotizó (Decisión 99)">Flete pagado o cotizado</th>
               <th className="px-3 py-3 text-right font-medium">Costo financiero</th>
               <th className="px-3 py-3 text-right font-medium">Margen</th>
               {/* Decisión 87: la utilidad final lleva el diferencial del pago al

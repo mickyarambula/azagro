@@ -271,10 +271,85 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 const sum = <T,>(xs: T[], f: (x: T) => number) => xs.reduce((s, x) => s + f(x), 0);
 const sumOrNull = <T,>(xs: T[], f: (x: T) => number | null) => (xs.some((x) => f(x) == null) ? null : r2(sum(xs, (x) => f(x) ?? 0)));
 
+/**
+ * EL FLETE DEL PEDIDO SE CUENTA UNA VEZ, Y EL REAL MANDA (Decisión 99).
+ *
+ * Hasta hoy los dos cálculos de la utilidad hacían `freightQuote + expPedido`
+ * y restaban el total del margen. El flete cotizado es lo que se metió al
+ * PRECIO; el gasto del fletero es el MISMO costo, pagado. Sumar los dos restó
+ * dos veces un solo costo — y la pantalla de Gastos invita con todas sus
+ * letras a capturar ahí «flete de un pedido».
+ *
+ * La regla no es nueva: es la que ese mismo cálculo ya aplica a la mercancía
+ * tres renglones arriba —«el costo real manda: OC del proveedor, luego el de
+ * la cotización»— extendida al flete, que viaja en el mismo costo puesto.
+ *
+ *   · Hay gasto de flete capturado  → ése es el costo. El cotizado no resta.
+ *   · No hay                        → resta el cotizado, que es lo único que
+ *                                     se sabe, y la pantalla lo dice así.
+ *
+ * Cuál gasto es el flete se sabe por **marca estructural** (`is_freight`), no
+ * por el nombre de la categoría, que la teclea una persona: la misma razón por
+ * la que un saldo a favor se reconoce por su movimiento de banco y no por su
+ * memo.
+ *
+ * Y los gastos marcados salen de las OTRAS dos cubetas —`pedido` y `otros`—,
+ * que también se restan del margen: un candado que deja la puerta de al lado
+ * abierta no es un candado.
+ *
+ * Lo que NO cambia: `financeBase`, la base sobre la que corrió el costo
+ * financiero, sigue siendo el costo puesto COTIZADO. Ahí no hay nada que
+ * corregir — al cliente se le cobró el financiamiento sobre ese número, y
+ * recalcularlo con el flete real cambiaría un cargo que ya se hizo.
+ */
+export type DealExpense = { id: number; name: string; class: string; amount: number; isFreight?: boolean };
+
+export type DealFreight = {
+  /** Lo que de verdad costó el flete: Σ gastos marcados. 0 si no hay ninguno. */
+  real: number;
+  /** Cuántos gastos de flete se capturaron. 0 = todavía no se sabe. */
+  n: number;
+  /** Lo que se metió al precio al cotizar. */
+  quoted: number;
+  /** El que resta del margen: el real si lo hay, si no el cotizado. */
+  cost: number;
+  /** De cuál de los dos salió `cost`. */
+  source: "real" | "cotizado";
+  /**
+   * `real − quoted`, con signo: positivo = el viaje salió más caro que lo
+   * comprometido y se lo comió la utilidad. `null` mientras no haya gasto
+   * capturado: sin el número real no hay nada contra qué comparar, y un cero
+   * ahí diría «salió igual», que es distinto de «todavía no se sabe».
+   */
+  diff: number | null;
+  /** Gastos del pedido que NO son el flete: siguen restando aparte. */
+  pedido: number;
+  /** Gastos de otra clase ligados al pedido que NO son el flete. */
+  otros: number;
+};
+
+export function freightOfDeal(quoted: number, expenses: DealExpense[]): DealFreight {
+  const fletes = expenses.filter((e) => e.isFreight === true);
+  const resto = expenses.filter((e) => e.isFreight !== true);
+  const real = r2(sum(fletes, (e) => e.amount));
+  const n = fletes.length;
+  const q = r2(quoted);
+  return {
+    real,
+    n,
+    quoted: q,
+    cost: n > 0 ? real : q,
+    source: n > 0 ? "real" : "cotizado",
+    diff: n > 0 ? r2(real - q) : null,
+    pedido: r2(sum(resto.filter((e) => e.class === "pedido"), (e) => e.amount)),
+    otros: r2(sum(resto.filter((e) => e.class !== "pedido"), (e) => e.amount)),
+  };
+}
+
 export function mergeDealPnl(
   parts: PnlPart[],
   order: {
-    expenses: Array<{ id: number; name: string; class: string; amount: number }>;
+    expenses: DealExpense[];
     mora: number;
     moraPendiente: number;
     uninvoiced: Array<{ productId: number; code: string; name: string; uom: string; qty: number }>;
@@ -343,8 +418,6 @@ export function mergeDealPnl(
   const included = lines.filter((l) => !l.excluded);
   const excludedLines = lines.filter((l) => l.excluded);
   const excluded = { n: excludedLines.length, venta: sum(excludedLines, (l) => l.sale), motivos: [...new Set(excludedLines.map((l) => l.excludeReason!))] };
-  const expPedido = sum(order.expenses.filter((e) => e.class === "pedido"), (e) => e.amount);
-  const expOther = sum(order.expenses.filter((e) => e.class !== "pedido"), (e) => e.amount);
   const revenue = sum(included, (l) => l.revenueLine);
   const clientPrice = sum(included, (l) => l.sale);
   const disbursed = sum(included, (l) => l.disbursed);
@@ -353,18 +426,29 @@ export function mergeDealPnl(
   const protection = sumOrNull(included, (l) => l.protection);
   const cogs = sum(included, (l) => l.cogs);
   const freightQuote = sum(included, (l) => l.freight);
+  // Decisión 99: una sola vez, y el real manda. Las cubetas de gastos salen de
+  // aquí ya sin los fletes, para que no vuelvan a entrar por la otra puerta.
+  const flete = freightOfDeal(freightQuote, order.expenses);
+  const expPedido = flete.pedido;
+  const expOther = flete.otros;
   const otherQuote = sum(included, (l) => l.other);
   const commission = sum(included, (l) => l.commission);
   const layer1 = sum(included, (l) => l.layer1);
   const layer2 = sum(included, (l) => l.layer2);
   const finance = commission + layer1 + layer2;
   const financeBase = sum(included, (l) => l.landed);
-  const freight = freightQuote + expPedido;
+  const freight = flete.cost;
   // Pronto pago y diferencial cambiario: los de cada factura, sumados.
   const discount = sum(parts, (p) => p.pnl.discount);
   const fxIncome = sum(parts, (p) => p.pnl.fxIncome);
   const fxSpread = r2(sum(parts, (p) => p.pnl.fxSpread ?? 0));
-  const margin = revenue - cogs - freight - otherQuote - expOther;
+  // «Otros»: lo cotizado como otros costos MÁS los gastos del pedido que no
+  // son el flete (maniobras, inspección, un viaje aparte) MÁS los de otra
+  // clase. Antes los del pedido entraban al margen escondidos dentro de
+  // `freight`; ahora que el flete se cuenta una sola vez tienen que restar por
+  // su propio lado, o desaparecerían del costo sin que nadie lo notara.
+  const otros = otherQuote + expPedido + expOther;
+  const margin = revenue - cogs - freight - otros;
   const fxCompra = order.fxCompra ?? 0;
   const netProfit = margin + order.mora + fxIncome + fxCompra - finance - discount;
   // Cuánto se ha cobrado: TODAS las facturas, no solo la última.
@@ -419,8 +503,13 @@ export function mergeDealPnl(
     cogs,
     freight,
     freightQuote,
+    /** Decisión 99: lo que de verdad costó el flete, y contra qué se compara. */
+    freightReal: flete.real,
+    freightSource: flete.source,
+    freightDiff: flete.diff,
+    freightN: flete.n,
     expPedido,
-    other: otherQuote + expOther,
+    other: otros,
     commission,
     layer1,
     layer2,

@@ -4,7 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { Field, FinanceNav, StatusPill } from "@/components/erp";
 import { MoneyField } from "@/components/fields";
 import { SearchSelect, asOpts } from "@/components/search-select";
-import { addExpenseCategory, createExpense, listExpenses } from "@/lib/erp/expenses";
+import { addExpenseCategory, createExpense, listExpenses, setExpenseFreight } from "@/lib/erp/expenses";
 import { exportCsv } from "@/lib/export-csv";
 import { cn, money, todayMx } from "@/lib/utils";
 
@@ -34,6 +34,8 @@ function Page() {
   const [partnerId, setPartnerId] = useState("");
   const [soId, setSoId] = useState("");
   const [poId, setPoId] = useState("");
+  // Decisión 99: este gasto ES el flete del pedido, no un costo extra.
+  const [esFlete, setEsFlete] = useState(false);
   const [payKind, setPayKind] = useState<"cash" | "credit">("cash");
   const [bankId, setBankId] = useState("");
   // Decisión 86: de una cuenta en dólares salen DÓLARES. El importe se captura
@@ -56,6 +58,24 @@ function Page() {
     setData(d);
     setBankId((id) => id || String(d.banks[0]?.id ?? ""));
   }
+  /**
+   * Corregir la marca de un gasto ya capturado (Decisión 99). No mueve un
+   * peso: solo cambia a qué renglón del costo pertenece. Sin esto, un flete
+   * capturado antes de la marca se quedaría restando dos veces para siempre.
+   */
+  async function marcarFlete(id: number, isFreight: boolean) {
+    setBusy(true);
+    try {
+      await setExpenseFreight({ data: { id, isFreight } });
+      await load();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "No se pudo cambiar la marca");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     void load().catch((e) => setError(e instanceof Error ? e.message : "Error"));
   }, []);
@@ -88,6 +108,7 @@ function Page() {
           partnerId: Number(partnerId) || undefined,
           soId: Number(soId) || undefined,
           poId: Number(poId) || undefined,
+          isFreight: cls === "pedido" && esFlete && !!soId,
           payKind,
           bankId: payKind === "cash" ? Number(bankId) || undefined : undefined,
           fxRate: cuentaUsd ? fxRate : undefined,
@@ -100,6 +121,7 @@ function Page() {
       setInvoiceRef("");
       setSoId("");
       setPoId("");
+      setEsFlete(false);
       await load();
       setError(null);
       setNotes(`Registrado ${r.name}`);
@@ -206,13 +228,35 @@ function Page() {
                     options={asOpts(data?.purchases, (p) => p.id, (p) => p.name, (p) => p.partner)}
                     onChange={(v) => {
                       setPoId(v);
-                      if (v) setSoId("");
+                      // El flete se marca contra el pedido de VENTA: al cambiar
+                      // a una compra la marca dejaría de significar algo.
+                      if (v) {
+                        setSoId("");
+                        setEsFlete(false);
+                      }
                     }}
                     allowEmpty
                     emptyLabel="—"
                     placeholder="Buscar OC…"
                   />
                 </Field>
+                {soId ? (
+                  <label className="flex cursor-pointer items-start gap-2 rounded-md border border-line bg-soft px-3 py-2.5">
+                    <input type="checkbox" className="mt-0.5" checked={esFlete} onChange={(e) => setEsFlete(e.target.checked)} />
+                    <span className="text-[12px] leading-snug">
+                      <span className="font-semibold">Es el flete de este pedido</span>
+                      <span className="block text-muted">
+                        Márcalo y este importe pasa a ser el flete real: sustituye al que se cotizó, en vez de sumarse encima. Sin
+                        marcar, cuenta como un costo aparte (maniobras, inspección, otro viaje). Se puede corregir después.
+                      </span>
+                    </span>
+                  </label>
+                ) : poId ? (
+                  <p className="rounded-md border border-line bg-soft px-3 py-2.5 text-[12px] leading-snug text-muted">
+                    El flete de una orden de compra todavía no tiene a dónde ir: va al costo de la mercancía en el inventario, y esa
+                    parte no está construida. Si este gasto es el flete de una venta, lígalo al pedido de venta.
+                  </p>
+                ) : null}
               </>
             )}
             <Field label="Forma de pago">
@@ -301,6 +345,17 @@ function Page() {
                     <td className="px-3 py-3 tabular-nums">{e.date}</td>
                     <td className="px-3 py-3">
                       <StatusPill tone={e.class === "financiero" ? "warn" : e.class === "pedido" ? "ok" : "muted"}>{classLabel(e.class)}</StatusPill>
+                      {e.is_freight ? <span className="mt-1 block text-[11px] font-semibold text-brand">Flete del pedido</span> : null}
+                      {e.so_name ? (
+                        <button
+                          type="button"
+                          className="mt-1 block text-[11px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
+                          disabled={busy}
+                          onClick={() => void marcarFlete(e.id, !e.is_freight)}
+                        >
+                          {e.is_freight ? "No es el flete" : "Marcar como flete"}
+                        </button>
+                      ) : null}
                     </td>
                     <td className="px-3 py-3">{e.category ?? "—"}</td>
                     <td className="px-3 py-3">{e.partner ?? "—"}</td>

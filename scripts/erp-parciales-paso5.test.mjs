@@ -131,7 +131,9 @@ test("computeDealPnlMulti: una pasada del motor por factura con lo que facturó,
   assert.ok(body.includes("const expenses = await orderExpenses(sql, companyId, soId);") && body.includes("const { mora, moraPendiente } = await orderMora(sql, companyId, soId);"), "una sola vez");
   assert.ok(body.includes(".filter((r) => r.qty > 0.0001);"), "lo sin facturar (pedido − facturado), solo si hay");
   assert.ok(body.includes("return mergeDealPnl("), "la suma es pura y probada con números");
-  assert.ok(r.includes('import { mergeDealPnl } from "@/lib/erp/parciales";'));
+  // Decisión 99: por el mismo import entra `freightOfDeal`, la regla que evita
+  // que el flete se cuente dos veces. Las dos viven en el módulo puro.
+  assert.ok(r.includes('import { freightOfDeal, mergeDealPnl, type DealExpense } from "@/lib/erp/parciales";'));
 });
 
 // ---------------------------------------------------------------------------
@@ -193,10 +195,23 @@ test("mergeDealPnl: 'cuánto se ha cobrado' mira TODAS las facturas — la prime
 test("mergeDealPnl: gastos y mora del pedido entran UNA vez (no por factura); pronto pago y diferencial cambiario, los de cada factura sumados", () => {
   const a = part("FV-0001", { invoice: { id: 1 }, pnl: { discount: 5, fxIncome: 2 } }, {});
   const b = part("FV-0002", { invoice: { id: 2, name: "FV-0002" }, pnl: { discount: 3, fxIncome: -1 } }, {});
-  const m = mergeDealPnl([a, b], { expenses: [{ id: 1, name: "Flete local", class: "pedido", amount: 100 }, { id: 2, name: "Maniobras", class: "otro", amount: 40 }], mora: 50, moraPendiente: 20, uninvoiced: [] });
-  assert.equal(m.freight, 100, "flete sobre pedido, una vez");
-  assert.equal(m.other, 40);
-  assert.equal(m.margin, 3000 - 1600 - 100 - 40);
+  const gastos = [{ id: 1, name: "Flete local", class: "pedido", amount: 100 }, { id: 2, name: "Maniobras", class: "otro", amount: 40 }];
+  const m = mergeDealPnl([a, b], { expenses: gastos, mora: 50, moraPendiente: 20, uninvoiced: [] });
+  // Decisión 99: un gasto SIN marcar no es el flete —se llame como se llame—,
+  // así que cuenta como costo aparte. Antes entraba a `freight` y de ahí al
+  // margen; ahora entra a `other` y de ahí al margen: la cubeta se movió, el
+  // margen es el mismo número que daba antes, al centavo.
+  assert.equal(m.freight, 0, "no se cotizó flete y ningún gasto está marcado como tal");
+  assert.equal(m.freightSource, "cotizado");
+  assert.equal(m.other, 140, "los dos gastos del pedido, una vez cada uno");
+  assert.equal(m.margin, 3000 - 1600 - 100 - 40, "el margen no se movió: ningún costo se perdió al mover las cubetas");
+  // Y marcándolo, el mismo gasto pasa a ser el flete SIN cambiar el margen:
+  // sigue restando una vez, nada más que por el renglón que le toca.
+  const marcado = mergeDealPnl([a, b], { expenses: [{ ...gastos[0], isFreight: true }, gastos[1]], mora: 50, moraPendiente: 20, uninvoiced: [] });
+  assert.equal(marcado.freight, 100);
+  assert.equal(marcado.freightSource, "real");
+  assert.equal(marcado.other, 40);
+  assert.equal(marcado.margin, m.margin, "marcar un gasto como flete no puede mover la utilidad");
   assert.equal(m.discount, 8);
   assert.equal(m.fxIncome, 1);
   assert.equal(m.mora, 50);

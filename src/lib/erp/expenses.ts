@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { assertCan } from "@/lib/erp/acl";
+import { writeAudit } from "@/lib/erp/audit";
 import { fxToday, isUsdFx, missingFxMessage } from "@/lib/erp/fx";
 import { EXPENSE_CATALOG } from "@/lib/erp/catalog";
 import { todayMx } from "@/lib/utils";
@@ -83,9 +84,11 @@ export const listExpenses = createServerFn({ method: "GET" })
       pay_kind: string;
       invoice_ref: string;
       notes: string;
+      is_freight: boolean;
     }>`
       select e.id, e.name, e.date::text, e.class, c.name as category, e.amount::text,
-        p.name as partner, s.name as so_name, po.name as po_name, e.pay_kind, e.invoice_ref, e.notes
+        p.name as partner, s.name as so_name, po.name as po_name, e.pay_kind, e.invoice_ref, e.notes,
+        coalesce(e.is_freight, false) as is_freight
       from expenses e
       left join expense_categories c on c.id = e.category_id
       left join partners p on p.id = e.partner_id
@@ -120,6 +123,49 @@ export const listExpenses = createServerFn({ method: "GET" })
     // se detiene (regla 9).
     const fx = await fxToday(sql, cid, todayMx());
     return { expenses, categories, partners, sales, purchases, banks, fxToday: fx ? { date: fx.date, rate: Number(fx.rate) } : null };
+  });
+
+/**
+ * CORREGIR LA MARCA DE FLETE DE UN GASTO YA CAPTURADO (Decisión 99).
+ *
+ * Sin esto la Decisión 99 solo serviría para los gastos que nazcan de hoy en
+ * adelante: un flete capturado ayer se quedaría restando dos veces para
+ * siempre, y unas maniobras marcadas por error subirían el margen sin forma de
+ * bajarlo. Un candado sin salida es peor que el bug que tapa.
+ *
+ * No mueve un peso: el importe, la fecha, la cuenta y el movimiento de banco
+ * quedan intactos. Lo único que cambia es a qué renglón del costo pertenece,
+ * y queda en bitácora con el número que se mueve.
+ */
+export const setExpenseFreight = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ id: z.number(), isFreight: z.boolean() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    await assertCan(sql, context.userId, "gastos", "edit");
+    const cid = await companyOf(sql, context.userId);
+    const e = await sql<{ id: number; name: string; amount: string; so_id: number | null; is_freight: boolean }>`
+      select id, name, amount::text, so_id, coalesce(is_freight, false) as is_freight
+      from expenses where id = ${data.id} and company_id = ${cid}
+    `;
+    if (!e[0]) throw new Error("No existe ese gasto");
+    if (data.isFreight && !e[0].so_id) {
+      throw new Error("Marca el flete contra el pedido de venta al que pertenece: el flete de una orden de compra todavía no tiene a dónde ir");
+    }
+    if (e[0].is_freight === data.isFreight) return { ok: true as const, changed: false };
+    await sql`update expenses set is_freight = ${data.isFreight} where id = ${data.id} and company_id = ${cid}`;
+    await writeAudit(sql, {
+      companyId: cid,
+      userId: context.userId,
+      action: data.isFreight ? "marcar-flete" : "desmarcar-flete",
+      entity: "expense",
+      entityId: e[0].id,
+      name: e[0].name,
+      detail: data.isFreight
+        ? `${Number(e[0].amount).toFixed(2)} pasa a ser el flete del pedido: sustituye al cotizado en la utilidad`
+        : `${Number(e[0].amount).toFixed(2)} deja de ser el flete del pedido: vuelve a contar como costo aparte y regresa el flete cotizado`,
+    });
+    return { ok: true as const, changed: true };
   });
 
 export const addExpenseCategory = createServerFn({ method: "POST" })
@@ -162,6 +208,11 @@ export const createExpense = createServerFn({ method: "POST" })
       // gasto de $5,000 sacaba 5,000 DÓLARES de la cuenta y destruía el costo
       // en pesos del resto de los dólares (`usdCashAverage`).
       fxRate: z.number().optional(),
+      // Decisión 99: este gasto ES el flete del pedido, no un costo extra.
+      // Marca estructural, no el nombre de la categoría: el flete real manda
+      // sobre el cotizado y el cotizado deja de restar. Sin esto, el mismo
+      // flete se restaba dos veces de la utilidad.
+      isFreight: z.boolean().optional().default(false),
       invoiceRef: z.string().optional().default(""),
       notes: z.string().optional().default(""),
     }),
@@ -173,14 +224,23 @@ export const createExpense = createServerFn({ method: "POST" })
     if (data.class === "pedido" && !data.soId && !data.poId) {
       throw new Error("Un gasto sobre pedido debe ligarse a una venta o una compra");
     }
+    // Decisión 99: el flete es el flete DE un pedido de venta, porque la
+    // utilidad del pedido lee sus gastos por ahí (`orderExpenses`). Marcado
+    // contra una orden de COMPRA quedaría huérfano: no sustituiría nada y la
+    // tarjeta seguiría diciendo «todavía no se captura», que sería falso para
+    // quien acaba de capturarlo. El flete de una compra va al costo de la
+    // mercancía en el kardex, y esa pieza no está construida (ESTADO H7).
+    if (data.isFreight && !data.soId) {
+      throw new Error("Marca el flete contra el pedido de venta al que pertenece: el flete de una orden de compra todavía no tiene a dónde ir");
+    }
     if (data.payKind === "cash" && !data.bankId) throw new Error("Elige la cuenta de donde sale el dinero");
     const n = await sql<{ c: number }>`select count(*)::int as c from expenses where company_id = ${cid}`;
     const name = `GAS-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const exp = await sql<{ id: number }>`
-      insert into expenses (company_id, name, date, class, category_id, amount, partner_id, so_id, po_id, invoice_ref, pay_kind, bank_id, notes, created_by)
+      insert into expenses (company_id, name, date, class, category_id, amount, partner_id, so_id, po_id, invoice_ref, pay_kind, bank_id, notes, created_by, is_freight)
       values (${cid}, ${name}, ${data.date}, ${data.class}, ${data.categoryId}, ${data.amount},
         ${data.partnerId ?? null}, ${data.soId ?? null}, ${data.poId ?? null}, ${data.invoiceRef ?? ""},
-        ${data.payKind}, ${data.bankId ?? null}, ${data.notes ?? ""}, ${context.userId})
+        ${data.payKind}, ${data.bankId ?? null}, ${data.notes ?? ""}, ${context.userId}, ${data.isFreight === true})
       returning id
     `;
     if (data.payKind === "cash" && data.bankId) {

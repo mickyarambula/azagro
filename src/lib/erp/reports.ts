@@ -7,7 +7,7 @@ import { activeMember, assertCan, canSeeMargins } from "@/lib/erp/acl";
 import { dateDMY, todayMx } from "@/lib/utils";
 import { purchaseFxOfDeal } from "@/lib/erp/deal-supplier";
 import { fxCostOfPeriod } from "@/lib/erp/fx-cost-query";
-import { mergeDealPnl } from "@/lib/erp/parciales";
+import { freightOfDeal, mergeDealPnl, type DealExpense } from "@/lib/erp/parciales";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy, returnedOfInvoices } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
@@ -161,14 +161,29 @@ async function computeDealPnlMulti(
 }
 
 async function orderExpenses(sql: Sql, companyId: number, soId: number) {
-  let expenses: Array<{ id: number; name: string; class: string; amount: number }> = [];
+  let expenses: DealExpense[] = [];
   try {
-    const exp = await sql<{ id: number; name: string; class: string; amount: string }>`
-      select id, name, class, amount::text from expenses where company_id = ${companyId} and so_id = ${soId} order by id
+    // Decisión 99: `is_freight` dice cuál de estos gastos ES el flete del
+    // pedido. La columna nace en 0049; el `coalesce` cubre la base que todavía
+    // no la tiene, donde ningún gasto es flete y todo cuenta como venía.
+    const exp = await sql<{ id: number; name: string; class: string; amount: string; is_freight: boolean }>`
+      select id, name, class, amount::text, coalesce(is_freight, false) as is_freight
+      from expenses where company_id = ${companyId} and so_id = ${soId} order by id
     `;
-    expenses = exp.map((e) => ({ id: e.id, name: e.name, class: e.class, amount: Number(e.amount) }));
+    expenses = exp.map((e) => ({ id: e.id, name: e.name, class: e.class, amount: Number(e.amount), isFreight: e.is_freight === true }));
   } catch {
-    expenses = [];
+    // Si la columna todavía no existe (código adelante de la migración), los
+    // gastos se leen SIN ella y cuentan como contaban antes. Vaciar la lista
+    // los sacaría del costo sin que nadie lo notara, y el margen saldría alto:
+    // de los dos modos de fallar, ése es el peor.
+    try {
+      const exp = await sql<{ id: number; name: string; class: string; amount: string }>`
+        select id, name, class, amount::text from expenses where company_id = ${companyId} and so_id = ${soId} order by id
+      `;
+      expenses = exp.map((e) => ({ id: e.id, name: e.name, class: e.class, amount: Number(e.amount), isFreight: false }));
+    } catch {
+      expenses = [];
+    }
   }
   return expenses;
 }
@@ -483,8 +498,6 @@ async function dealPnlCore(
     motivos: [...new Set(excludedLines.map((l) => l.excludeReason!))],
   };
   const expenses = opts.orderLevel ? await orderExpenses(sql, companyId, soId) : [];
-  const expPedido = expenses.filter((e) => e.class === "pedido").reduce((s, e) => s + e.amount, 0);
-  const expOther = expenses.filter((e) => e.class !== "pedido").reduce((s, e) => s + e.amount, 0);
   const { mora, moraPendiente } = opts.orderLevel ? await orderMora(sql, companyId, soId) : { mora: 0, moraPendiente: 0 };
   // DECISIÓN 87 — el diferencial de la COMPRA entra a la utilidad del pedido.
   // Es del pedido entero, como los gastos y la mora: se lee una sola vez y no
@@ -510,6 +523,13 @@ async function dealPnlCore(
   const protection = protectionKnown ? Math.round(included.reduce((s, l) => s + (l.protection ?? 0), 0) * 100) / 100 : null;
   const cogs = included.reduce((s, l) => s + l.cogs, 0);
   const freightQuote = included.reduce((s, l) => s + l.freight, 0);
+  // Decisión 99 — el flete se cuenta UNA vez y el real manda, igual que el
+  // costo de la mercancía arriba. Las dos cubetas de gastos salen de la misma
+  // regla, ya sin los fletes: si se quedaran, el costo volvería a entrar por
+  // la otra puerta y el doble conteo seguiría, nada más que escondido.
+  const flete = freightOfDeal(freightQuote, expenses);
+  const expPedido = flete.pedido;
+  const expOther = flete.otros;
   const otherQuote = included.reduce((s, l) => s + l.other, 0);
   const commission = included.reduce((s, l) => s + l.commission, 0);
   const layer1 = included.reduce((s, l) => s + l.layer1, 0);
@@ -518,7 +538,7 @@ async function dealPnlCore(
   // Base sobre la que corrió el costo financiero: costo puesto (mercancía +
   // flete + otros), la misma que el precio le cobró al cliente.
   const financeBase = included.reduce((s, l) => s + l.landed, 0);
-  const freight = freightQuote + expPedido;
+  const freight = flete.cost;
   // Descuento por pronto pago: si la factura se liquidó antes del umbral,
   // se bonifican los días hasta el plazo financiero a la tasa de costo.
   // La tasa de COSTO del documento (N1, Decisión 5): en ASR es la TIIE —ese
@@ -552,7 +572,13 @@ async function dealPnlCore(
   const fxIncome = fv[0] ? Number(fv[0].fx_result) : 0;
   const fxSpread = Math.round(included.reduce((s, l) => s + l.fxSpread, 0) * 100) / 100;
   const fxCompra = compraFx.fxCompra;
-  const margin = revenue - cogs - freight - otherQuote - expOther;
+  // «Otros»: lo cotizado como otros costos MÁS los gastos del pedido que no
+  // son el flete (maniobras, inspección, un viaje aparte) MÁS los de otra
+  // clase. Antes los del pedido entraban al margen escondidos dentro de
+  // `freight`; ahora que el flete se cuenta una sola vez tienen que restar por
+  // su propio lado, o desaparecerían del costo sin que nadie lo notara.
+  const otros = otherQuote + expPedido + expOther;
+  const margin = revenue - cogs - freight - otros;
   // Utilidad real de la operación, como el Excel:
   // + venta + mora + diferencial cambiario
   // − costo proveedor − comisión − Capa 1 − Capa 2 − descuento pronto pago.
@@ -600,8 +626,13 @@ async function dealPnlCore(
     cogs,
     freight,
     freightQuote,
+    /** Decisión 99: lo que de verdad costó el flete, y contra qué se compara. */
+    freightReal: flete.real,
+    freightSource: flete.source,
+    freightDiff: flete.diff,
+    freightN: flete.n,
     expPedido,
-    other: otherQuote + expOther,
+    other: otros,
     commission,
     layer1,
     layer2,

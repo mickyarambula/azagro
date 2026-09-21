@@ -696,7 +696,22 @@ function Ficha() {
               hint={pnl.financingBase === "costo_margen" ? `Costo + margen (lo que Santa Rosa desembolsa). Precio al cliente ${money(pnl.clientPrice)}.` : undefined}
             />
             <PnlKpi label="Costo mercancía" value={money(pnl.cogs)} hint="OC, si no cotización, si no catálogo" />
-            <PnlKpi label="Flete / sobre pedido" value={money(pnl.freight)} />
+            <PnlKpi
+              label="Flete"
+              value={money(pnl.freight)}
+              hint={
+                pnl.freightSource === "real"
+                  ? `Lo pagado al fletero, con ${pnl.freightN === 1 ? "1 gasto capturado" : `${pnl.freightN} gastos capturados`} hasta hoy. Se cotizó ${money(pnl.freightQuote)}: ${
+                      pnl.freightDiff == null || Math.abs(pnl.freightDiff) < 0.01
+                        ? "va igual."
+                        : pnl.freightDiff > 0
+                          ? `va ${money(pnl.freightDiff)} por encima, y esa diferencia se la comió la utilidad.`
+                          : `va ${money(Math.abs(pnl.freightDiff))} por debajo — antes de contarlo como ahorro, revisa que no falte capturar un viaje.`
+                    }`
+                  : `Lo que se cotizó. Todavía no se captura el gasto del fletero contra este pedido, así que éste es el único número que se sabe — el real puede salir distinto.`
+              }
+              tone={pnl.freightSource === "real" && pnl.freightDiff != null && pnl.freightDiff > 0.009 ? "bad" : undefined}
+            />
             <PnlKpi
               label="Margen operación"
               value={money(pnl.margin)}
@@ -783,13 +798,23 @@ function Ficha() {
               </tbody>
             </table>
           </div>
+          {pnl.freightSource === "real" ? (
+            <p className="mt-2 text-[12px] text-muted">
+              La columna «Flete» de arriba es el <strong>cotizado</strong> por partida, que es sobre el que se calculó el
+              financiamiento que se le cobró al cliente. El flete que resta de la utilidad es el pagado, {money(pnl.freight)}.
+            </p>
+          ) : null}
           {pnl.expenses.length > 0 && (
             <ul className="mt-2 text-[13px] text-muted">
               {pnl.expenses.map((e) => (
                 <li key={e.id}>
                   Gasto {e.class}: {e.name} · {money(e.amount)}
+                  {e.isFreight ? <span className="ml-1 font-semibold text-brand">— es el flete del pedido</span> : null}
                 </li>
               ))}
+              {/* Decisión 99: el flete ya está en su propio recuadro. Lo demás
+                  resta del margen por su lado y hay que poder verlo sumado. */}
+              {pnl.other > 0.009 ? <li className="mt-1 font-medium text-ink">Otros costos del pedido: {money(pnl.other)} — restan del margen aparte del flete.</li> : null}
             </ul>
           )}
         </div>
@@ -1182,11 +1207,11 @@ function pctDe(fraction: number) {
   return `${(fraction * 100).toFixed(2)} %`;
 }
 
-function PnlKpi({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function PnlKpi({ label, value, hint, tone }: { label: string; value: string; hint?: string; tone?: "bad" }) {
   return (
     <article className="erp-card p-4">
       <p className="text-[11px] uppercase tracking-wide text-muted">{label}</p>
-      <p className="mt-1 text-lg font-semibold tabular-nums">{value}</p>
+      <p className={`mt-1 text-lg font-semibold tabular-nums ${tone === "bad" ? "text-danger" : ""}`}>{value}</p>
       {hint ? <p className="mt-1 text-[11px] leading-snug text-muted">{hint}</p> : null}
     </article>
   );
