@@ -71,9 +71,9 @@ Este archivo pesa ~14,000 palabras; no se lee entero. Cada sección empieza con 
 | Estado | Preguntas |
 |---|---|
 | **ABIERTA** (8) | L8a (ajuste de inventario: ¿pide costo?) · H3 (Sesión D) · H4c (devolución a proveedor) · H4f (candado sin salida en la reversa de devolución) · H5 (lotes y caducidad) · H6 (unidades de medida) · D-B (tasa del pronto pago) · D-C (plazo de Santa Rosa a Azagro) |
-| Resuelta en documento, **no construida** (2) | L3b (Decisión 10: la mora no se ajusta al devolver) · H2 (tres columnas muertas, no mueven dinero) |
-| Resuelta en documento **y ya construida** (10) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) · L5 (12 y 13) · **L3c (11, 19-sep-2026: la NC atrapada)** |
-| Parcial | H7 (el flete ya viaja por partida; repartir **un** flete de viaje entre productos sigue sin regla) |
+| Resuelta en documento, **no construida** (1) | H2 (tres columnas muertas, no mueven dinero) |
+| Resuelta en documento **y ya construida** (11) | L3a (Decisión 9) · L6 (14) · H4a (16) · H4b (15) · H8b (3.d) · D-A (3 y 6) · E2 (1) · N1 (5) · L5 (12 y 13) · L3c (11) · **L3b (10, 20-sep-2026: la mora sobre el cargo menos lo devuelto)** |
+| Parcial | H7 (el doble conteo del flete **cerrado** el 20-sep-2026, Decisión 99; siguen abiertos el reparto de un viaje con unidades mezcladas, el flete dentro del costo del kardex y el flete obligatorio al cotizar) |
 | Resuelta en código | L1 · L2 · L4a (modelo: Decisión 2; captura: Decisión 82) · L4b · L7 · L8b · H1 · H8a (falta el archivo del corte) · E1 · E3 |
 | En construcción / construida | H4d (Decisiones 46 a 54; pasos 0-3 de `PARCIALES.md` hechos) · H4e (Decisión 48; construida el 15-sep-2026) |
 | No es pregunta | N2 (requisito verificado el 5-sep-2026) |
@@ -440,7 +440,7 @@ se bloquea — entra al promedio de hoy y se avisa en pantalla y en bitácora
 (Decisión 27). `CLAUDE.md` regla 2.
 
 ### L3b. ¿La mora ya facturada se ajusta si el cliente devuelve parte del producto? (LOGICA h.11)
-**RESUELTA EN DOCUMENTO (Decisión 10 del dueño, 7-sep-2026), no construida.**
+**RESUELTA EN DOCUMENTO (Decisión 10 del dueño, 7-sep-2026) Y CONSTRUIDA el 20-sep-2026.**
 Se ajusta en proporción a lo devuelto — pero es el comportamiento **por
 omisión**, no una regla fija: quien tenga permiso puede decidir lo contrario
 caso por caso, con bitácora (depende de por qué devolvió: error de Azagro no
@@ -832,6 +832,43 @@ Hoy quien captura escribe el flete de cada partida a mano. La regla de reparto
 (por peso, por importe, por tambo) sigue sin estar escrita en ningún lado, y
 sin esa regla no se puede construir — *para el dueño: ¿cómo se reparte el
 flete de un viaje entre los productos que trae?*
+
+**20-sep-2026 — el dueño contestó la mitad de esto, y salió otra cosa.** Su
+regla: *«el flete no se estima, debes tener conocimiento del costo para poder
+cotizar porque si no puede variar negativamente y afectar el margen»*. Y sobre
+el reparto: por unidades de producto — 20 toneladas y $2,000 de flete son $100
+por tonelada al costo de cada uno. Lo que sigue sin poderse construir es cómo
+sumar un camión con unidades MEZCLADAS (10 toneladas de urea + 200 litros de
+un herbicida no son 210 de nada): el catálogo guarda la unidad pero no cuánto
+pesa. *Para el dueño, ya acotado: ¿se captura el peso por unidad en el
+catálogo (saco 50 kg, tambo 200 kg) para poder repartir cualquier viaje, o el
+reparto automático se ofrece solo cuando todo el camión comparte unidad?* Él
+contestó «hay de todo en los negocios», que empuja hacia lo primero.
+
+Y al investigarlo aparecieron **dos cosas que no eran la pregunta**:
+
+1. **El flete se restaba DOS veces de la utilidad del pedido** — el cotizado y
+   el gasto del fletero. **CERRADO el 20-sep-2026 (Decisión 99, migración
+   0049):** el pagado manda, el cotizado queda de respaldo, la regla vive en
+   un solo lugar (`freightOfDeal`) y la tarjeta enseña la diferencia contra lo
+   comprometido.
+2. **El flete de una ORDEN DE COMPRA no tiene a dónde ir.** La marca de la
+   Decisión 99 es solo contra pedido de venta, porque la utilidad lee sus
+   gastos por ahí; contra una OC quedaría huérfana. Hoy la pantalla lo dice
+   con esas palabras en vez de aceptarla y perderla. **ABIERTO**, y es la
+   misma pieza que el punto 3.
+3. **El flete no entra al costo del kardex** (`receiptUnitCostMxn` toma solo
+   el precio del proveedor): el costo puesto con flete vive únicamente en la
+   cotización, así que la mercancía comprada para inventario —y más la
+   comprada sin pedido— queda costeada sin el flete que se pagó por traerla, y
+   al venderla el margen sale inflado. **ABIERTO**, es la pieza de fondo del
+   bloque, y de ella cuelga también el punto 2.
+
+También quedó apuntado que el campo de flete **nace en cero y nadie tiene que
+decir de dónde salió**: un valor por omisión que decide dinero, justo lo que
+prohíbe la regla 9 (mismo patrón que las Decisiones 64 y 67, «vacío no es
+cero»). La regla del dueño lo vuelve obligatorio, con dos salidas legítimas
+—«lo pone el proveedor» y «el cliente lo recoge»—, y **no está construido**.
 
 ### H8a. Pegar el CSV de saldos abiertos y existencias del corte de Compaq
 **RESUELTA EN CÓDIGO (pendiente operativo).** El importador existe, es
