@@ -846,12 +846,45 @@ export const saveLineFreight = createServerFn({ method: "POST" })
     // Elegir/enviar/aplicar proveedor es un paso DENTRO de la solicitud: quien
     // la edita (quotes:edit) la termina sola, sin pedirle un clic a compras.
     await assertCan(sql, context.userId, "quotes", "edit");
+    // NO SE ESCRIBE UN NÚMERO QUE NO SE PUEDE VER (20-sep-2026).
+    //
+    // A quien no ve costos, esta misma pantalla le manda el flete ENMASCARADO
+    // en cero (:316). Guardar solo exigía `quotes:edit`, que ventas sí tiene,
+    // y el campo guarda al salir de él aunque nadie haya escrito nada: un
+    // vendedor que pasaba el cursor por la columna escribía 0 encima de un
+    // flete real de $3,000 y el precio se armaba sin él, sin un mensaje y sin
+    // bitácora. El permiso de escribir y el de ver tienen que ser el mismo, o
+    // la máscara se convierte en un borrador.
+    const me = await activeMember(sql, context.userId);
+    if (!canSeeCosts(me.role)) {
+      throw new Error("El flete lo captura quien ve los costos de compra (compras, gerencia o administrador)");
+    }
     await assertRequestOpen(sql, companyId, data.requestId);
+    const antes = await sql<{ freight: string }>`
+      select coalesce(freight, 0)::text as freight from customer_request_lines
+      where request_id = ${data.requestId} and product_id = ${data.productId}
+        and request_id in (select id from customer_requests where company_id = ${companyId})
+      limit 1
+    `;
     await sql`
       update customer_request_lines set freight = ${data.freight}
       where request_id = ${data.requestId} and product_id = ${data.productId}
         and request_id in (select id from customer_requests where company_id = ${companyId})
     `;
+    // El flete decide el precio y hasta hoy no dejaba rastro de quién lo puso,
+    // a diferencia de todo lo que tiene veinte renglones arriba.
+    const previo = Number(antes[0]?.freight ?? 0);
+    if (Math.abs(previo - data.freight) > 0.0001) {
+      await writeAudit(sql, {
+        companyId,
+        userId: context.userId,
+        action: "flete-de-solicitud",
+        entity: "customer_request",
+        entityId: data.requestId,
+        name: `producto ${data.productId}`,
+        detail: `flete por unidad ${previo.toFixed(2)} → ${data.freight.toFixed(2)}`,
+      });
+    }
     return { ok: true };
   });
 

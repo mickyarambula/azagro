@@ -701,6 +701,12 @@ function Page() {
                             disabled={locked}
                             value={num(l.freight)}
                             onCommit={(n) => {
+                              // El campo avisa al SALIR de él, haya escrito alguien o no.
+                              // Sin esta comparación, pasar el cursor por la columna
+                              // guardaba el valor que se estaba enseñando — que a quien
+                              // no ve costos se le enseña en cero (segundo candado: el
+                              // servidor ya no acepta la escritura, `saveLineFreight`).
+                              if (Math.abs(n - num(l.freight)) < 0.0001) return;
                               void saveLineFreight({ data: { requestId: id, productId: l.product_id, freight: n } })
                                 .then(load)
                                 .catch((e) => setError(humanError(e)));

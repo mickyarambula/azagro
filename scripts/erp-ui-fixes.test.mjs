@@ -100,8 +100,20 @@ test("cableado: margen, flete y ofertas de RFQ ya no guardan en cada tecla", () 
   const marginOnChange = sol.match(/onChange=\{\(n\) => \{[^}]*void saveLineMargin\(/g) ?? [];
   assert.equal(marginOnChange.length, 0, "el margen ya no debe guardar desde onChange");
 
-  const freightCommit = sol.match(/onCommit=\{\(n\) => \{\s*void saveLineFreight\(/g) ?? [];
+  // El flete lleva el MISMO candado que el margen dos renglones arriba, y por
+  // la misma razón elevada al cuadrado: el campo avisa al salir de él haya
+  // escrito alguien o no, y a quien no ve costos el flete se le enseña
+  // ENMASCARADO en cero — o sea que pasar el cursor por la columna escribía 0
+  // encima de un flete real. Por eso el regex permite código entre el
+  // onCommit y la llamada, como el del margen, y se exige que ese código sea
+  // la comparación.
+  const freightCommit = sol.match(/onCommit=\{\(n\) => \{[\s\S]*?void saveLineFreight\(/g) ?? [];
   assert.equal(freightCommit.length, 1, "el flete debe colgar de onCommit");
+  assert.equal(
+    (sol.match(/if \(Math\.abs\(n - num\(l\.freight\)\) < 0\.0001\) return;/g) ?? []).length,
+    1,
+    "pasar por el campo del flete sin escribir no puede guardar el valor que se estaba enseñando",
+  );
   assert.ok(!/onChange=\{\(n\) => \{\s*void saveLineFreight\(/.test(sol), "el flete ya no debe guardar desde onChange");
 
   for (const [label, source] of [["solicitudes (RFQ inline)", sol], ["rfq.$rfqId", rfq]]) {

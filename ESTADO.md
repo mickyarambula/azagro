@@ -870,6 +870,34 @@ prohíbe la regla 9 (mismo patrón que las Decisiones 64 y 67, «vacío no es
 cero»). La regla del dueño lo vuelve obligatorio, con dos salidas legítimas
 —«lo pone el proveedor» y «el cliente lo recoge»—, y **no está construido**.
 
+**Un bug vivo, encontrado y CERRADO el 20-sep-2026.** A quien no ve costos, la
+comparativa de proveedores le manda el flete **enmascarado en cero**; guardar
+solo exigía `quotes:edit`, que ventas tiene, y el campo guarda al SALIR de él
+aunque nadie haya escrito nada. Un vendedor que pasaba el cursor por la
+columna escribía 0 encima de un flete real y el precio se armaba sin él, sin
+mensaje y sin bitácora. Arreglado con dos candados (el servidor exige
+`canSeeCosts`; la pantalla solo guarda si el número cambió) y con bitácora en
+`saveLineFreight`. La regla general quedó en `CLAUDE.md` § 10: **lo que se
+enmascara no se escribe**. `scripts/erp-flete-no-se-borra.test.mjs`.
+
+**La pasada de solo lectura del bloque (20-sep-2026) encontró lo que lo
+reordena.** Meter el flete al costo del inventario **sin apagar la segunda
+suma** lo contaría dos veces: la cotización toma el costo del inventario y le
+vuelve a sumar el flete (`ops.ts:1024`). Con 100 sacos a $500 y $2,000 de
+viaje, el precio subiría $23.53 por saco — **$2,352.94 cobrados de más al
+cliente en ese camión**, más ≈$153 de financiamiento sobre dinero que no
+existe, y la tarjeta diría $2,000 MENOS de utilidad de la real. Las doce
+pruebas del flete no lo verían: todas le pasan costo y flete por separado.
+Además: cuando el pedido **sí** tiene orden de compra ligada, la utilidad ya
+costea desde la orden (`reports.ts:381`), así que el margen inflado está solo
+en los pedidos surtidos de inventario y en los que nacen sin cotización. El
+bloque se parte en cuatro piezas (dar dónde vivir al flete de compra · el
+costo del inventario con el apagador en el mismo cambio · el flete obligatorio
+al cotizar · el reparto automático) y **queda fuera** corregir el costo de
+mercancía ya recibida, que necesita un movimiento de kardex de solo valor.
+*Para el dueño, la que lo decide todo: comprando para inventario y entregando
+después, ¿son dos fletes (entrada y salida) o uno solo?*
+
 ### H8a. Pegar el CSV de saldos abiertos y existencias del corte de Compaq
 **RESUELTA EN CÓDIGO (pendiente operativo).** El importador existe, es
 idempotente y exige elegir la política de cobro (`src/lib/erp/cutover.ts:152`).
