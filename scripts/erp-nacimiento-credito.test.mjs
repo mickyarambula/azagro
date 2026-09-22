@@ -196,7 +196,22 @@ test("#2 cableado: los cuatro nacimientos pasan por guardSaleTerms, y nadie escr
   assert.ok(dq.includes("const policyCode = days > 0 ? ficha[0]!.policy_code : NO_MORA_POLICY;"), "la política de la ficha; contado = Sin mora");
   assert.ok(dq.includes("await guardSaleTerms(sql, cid, { creditDays: dues.creditDays, policyCode });"), "…pero el resultado pasa por la misma regla");
   const cpo = src("src/lib/erp/cpo.ts");
-  assert.ok(cpo.includes("z.object({ cpoId: z.number(), locationId: z.number(), policyCode: z.string().min(1) })"), "OC del cliente: la política se pide al convertir (Decisión 69 b)");
+  // Decisión 102: al validador se le sumó el flete por partida. La forma
+  // COMPLETA se sigue fijando —aflojarla a dos fragmentos dejaba entrar un
+  // cuarto campo sin que nadie se enterara—, nada más que con el campo nuevo.
+  assert.ok(
+    cpo.includes(`z.object({
+    cpoId: z.number(),
+    locationId: z.number(),
+    policyCode: z.string().min(1),
+    freight: z.array(z.object({
+      lineId: z.number(),
+      freight: z.number().nonnegative().optional(),
+      mode: z.enum(FREIGHT_MODES).optional(),
+    })).optional(),
+  })`),
+    "OC del cliente: la política se pide al convertir (Decisión 69 b), y el flete por partida (Decisión 102)",
+  );
   assert.ok(cpo.includes("await guardSaleTerms(sql, companyId, { creditDays: plazo, policyCode: data.policyCode });"));
   assert.ok(cpo.includes("'own', ${data.policyCode}, ${cpo[0].customer_po_number}") && !cpo.includes("'own', 'NONE'"), "y ya no se escribe 'NONE' en el insert");
   assert.ok(cpo.includes("return { pos, lines, customers, products, policies };"), "la pantalla recibe el catálogo");

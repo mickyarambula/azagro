@@ -8,6 +8,7 @@ import { todayMx } from "@/lib/utils";
 import { rememberTrade } from "@/lib/erp/links";
 import { nearestRate } from "@/lib/erp/credit";
 import { guardSaleTerms } from "@/lib/erp/sale-terms";
+import { assertFreightDeclared, effectiveFreight, FREIGHT_MODES } from "@/lib/erp/freight-terms";
 import { circuitForTerm } from "@/lib/erp/circuits";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
@@ -160,7 +161,17 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   // Decisión 69 (b): la política de cobro se PIDE al convertir, como en el
   // corte; hasta hoy se escribía 'NONE' aquí y un pedido a crédito nacía sin mora.
-  .validator(z.object({ cpoId: z.number(), locationId: z.number(), policyCode: z.string().min(1) }))
+  // Decisión 102: y el flete al cliente se declara por partida, o no nace.
+  .validator(z.object({
+    cpoId: z.number(),
+    locationId: z.number(),
+    policyCode: z.string().min(1),
+    freight: z.array(z.object({
+      lineId: z.number(),
+      freight: z.number().nonnegative().optional(),
+      mode: z.enum(FREIGHT_MODES).optional(),
+    })).optional(),
+  }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
@@ -178,8 +189,11 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
     `;
     if (!cpo[0]) throw new Error("OC no encontrada");
     if (cpo[0].status === "converted") throw new Error("Ya está convertida");
-    const lines = await sql<{ product_id: number; qty: string; uom: string; unit_price: string }>`
-      select product_id, qty::text, uom, unit_price::text from customer_po_lines where cpo_id = ${cpo[0].id}
+    const lines = await sql<{ id: number; product_id: number; qty: string; uom: string; unit_price: string; code: string; name: string }>`
+      select l.id, l.product_id, l.qty::text, l.uom, l.unit_price::text,
+        coalesce(p.code,'') as code, coalesce(p.name,'') as name
+      from customer_po_lines l left join products p on p.id = l.product_id
+      where l.cpo_id = ${cpo[0].id}
     `;
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${companyId}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
@@ -210,6 +224,20 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
     }
     const plazo = partner[0].payment_days;
     await guardSaleTerms(sql, companyId, { creditDays: plazo, policyCode: data.policyCode });
+    // Decisión 102: este camino nunca tuvo dónde guardar el flete, así que
+    // nacía en cero para siempre. Ahora lo acepta y lo guarda.
+    //
+    // `legacy`: la pantalla que convierte todavía no pide el flete, y exigirlo
+    // aquí dejaba el botón «Convertir a pedido» fallando el 100 % de las veces
+    // — el candado antes que la salida, justo lo que no se debe hacer.
+    const flete = new Map((data.freight ?? []).map((f) => [f.lineId, f]));
+    assertFreightDeclared(
+      lines.map((l) => {
+        const f = flete.get(Number(l.id));
+        return { label: `${l.code} ${l.name}`.trim() || `producto ${l.product_id}`, freight: f?.freight ?? null, mode: f?.mode ?? null };
+      }),
+      { legacy: true },
+    );
     const so = await sql<{ id: number }>`
       insert into sales_orders (
         company_id, name, partner_id, date, state, location_id, notes, total,
@@ -227,8 +255,9 @@ export const convertCustomerPO = createServerFn({ method: "POST" })
       const price = priceMxn(line.unit_price);
       const uom = line.uom;
       await sql`
-        insert into sales_lines (so_id, product_id, qty, unit_price, uom)
-        values (${so[0]!.id}, ${line.product_id}, ${qty}, ${price}, ${uom})
+        insert into sales_lines (so_id, product_id, qty, unit_price, uom, freight, freight_mode)
+        values (${so[0]!.id}, ${line.product_id}, ${qty}, ${price}, ${uom},
+          ${flete.get(Number(line.id)) ? effectiveFreight(flete.get(Number(line.id))?.mode, flete.get(Number(line.id))?.freight) : null}, ${flete.get(Number(line.id))?.mode ?? null})
       `;
     }
     await rememberTrade(sql, {

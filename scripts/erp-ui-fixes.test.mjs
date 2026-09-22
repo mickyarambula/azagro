@@ -107,8 +107,32 @@ test("cableado: margen, flete y ofertas de RFQ ya no guardan en cada tecla", () 
   // encima de un flete real. Por eso el regex permite código entre el
   // onCommit y la llamada, como el del margen, y se exige que ese código sea
   // la comparación.
-  const freightCommit = sol.match(/onCommit=\{\(n\) => \{[\s\S]*?void saveLineFreight\(/g) ?? [];
-  assert.equal(freightCommit.length, 1, "el flete debe colgar de onCommit");
+  // Decisión 102: ahora hay DOS escrituras del flete — el importe (al salir
+  // del campo) y el modo (al elegirlo en el selector, que es un clic
+  // deliberado, no «cada tecla»). El regex del onCommit solo debe encontrar la
+  // primera.
+  // Anclado al candado del importe: con dos escrituras del flete (el importe y
+  // el modo) el regex viejo atravesaba bloques y contaba de más.
+  const freightCommit = sol.match(/if \(Math\.abs\(n - num\(l\.freight\)\) < 0\.0001\) return;\s*void saveLineFreight\(/g) ?? [];
+  assert.equal(freightCommit.length, 1, "el importe del flete se guarda al salir del campo, y solo si cambió");
+  // Y LO QUE PROTEGÍA NO SE AFLOJA (incidente del 20-sep-2026: pasar el cursor
+  // por la columna escribía $0 sobre un flete real de $3,000). TODA escritura
+  // del flete desde un campo de dinero tiene que llevar ese candado: si
+  // aparece una segunda sin él, esto falla.
+  // Escrito como código y no como regex: un regex laxo cruzaba bloques y
+  // contaba llamadas de otro campo. Cada escritura del flete tiene que ser, o
+  // un campo de dinero CON el candado, o un clic deliberado en el selector.
+  const escrituras = [...sol.matchAll(/void saveLineFreight\(/g)].map((m) => sol.slice(Math.max(0, m.index - 600), m.index));
+  assert.equal(escrituras.length, 2, "hoy son dos: el importe y el modo");
+  for (const antes of escrituras) {
+    const conCandado = antes.includes("if (Math.abs(n - num(l.freight)) < 0.0001) return;");
+    const esSelector = antes.lastIndexOf("onChange={(e) =>") > antes.lastIndexOf("onCommit={(n) =>");
+    assert.ok(
+      conCandado || esSelector,
+      "una escritura del flete sin el candado del 20-sep y sin ser un clic del selector: por ahí se borraba un flete real con $0",
+    );
+  }
+  assert.ok(sol.includes('<option value="recoge">Lo recoge</option>'), "y el modo se elige, no se teclea");
   assert.equal(
     (sol.match(/if \(Math\.abs\(n - num\(l\.freight\)\) < 0\.0001\) return;/g) ?? []).length,
     1,

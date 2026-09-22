@@ -1,4 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { effectiveFreight } from "@/lib/erp/freight-terms";
 import { rfqMessage } from "@/lib/erp/doc-text";
 import { useEffect, useMemo, useState } from "react";
 import { useAccess } from "@/lib/access";
@@ -700,10 +701,41 @@ function Page() {
                           );
                         })}
                         <td className="px-3 py-2">
+                          <select
+                            className="erp-input mb-1 h-7 w-full text-[11px]"
+                            // El servidor solo deja escribir el flete a quien ve costos
+                            // (CLAUDE.md § 10). Si a los demás se les enseña habilitado,
+                            // la pantalla invita a un botón que va a fallar.
+                            disabled={locked || !data.canSeeCosts}
+                            value={l.freight_mode ?? ""}
+                            onChange={(e) => {
+                              const mode = e.target.value;
+                              void saveLineFreight({
+                                data: {
+                                  requestId: id,
+                                  productId: l.product_id,
+                                  // El importe NO se borra al cambiar de modo: «lo recoge» ya
+                                  // vale cero por sí solo, y así volver a «se le cobra»
+                                  // recupera el número en vez de pedirlo otra vez.
+                                  freight: num(l.freight),
+                                  // `null` = volver a «sin decidir», que es un clic
+                                  // deliberado y no puede ignorarse.
+                                  mode: (mode || null) as "cobrado" | "recoge" | "proveedor" | null,
+                                },
+                              })
+                                .then(load)
+                                .catch((e2) => setError(humanError(e2)));
+                            }}
+                          >
+                            <option value="">Sin decidir</option>
+                            <option value="cobrado">Se le cobra</option>
+                            <option value="recoge">Lo recoge</option>
+                            <option value="proveedor">Lo pone el proveedor</option>
+                          </select>
                           <MoneyField
                             className="w-full"
                             placeholder="0"
-                            disabled={locked}
+                            disabled={locked || !data.canSeeCosts || l.freight_mode !== "cobrado"}
                             value={num(l.freight)}
                             onCommit={(n) => {
                               // El campo avisa al SALIR de él, haya escrito alguien o no.
@@ -712,7 +744,7 @@ function Page() {
                               // no ve costos se le enseña en cero (segundo candado: el
                               // servidor ya no acepta la escritura, `saveLineFreight`).
                               if (Math.abs(n - num(l.freight)) < 0.0001) return;
-                              void saveLineFreight({ data: { requestId: id, productId: l.product_id, freight: n } })
+                              void saveLineFreight({ data: { requestId: id, productId: l.product_id, freight: n, mode: "cobrado" } })
                                 .then(load)
                                 .catch((e) => setError(humanError(e)));
                             }}
@@ -852,7 +884,12 @@ function Page() {
               {lines.map((l) => {
                 const mCash = marginOf(l, "cash");
                 const mCredit = marginOf(l, "credit");
-                const landed = num(l.cost) + num(l.freight);
+                // Decisión 102: el flete EFECTIVO, el mismo que usa el servidor al
+                // cotizar. Con el crudo, la pantalla enseñaba —y la persona
+                // aprobaba— un precio con un flete que ella acaba de declarar
+                // que no se cobra.
+                const fleteEf = effectiveFreight(l.freight_mode, num(l.freight));
+                const landed = num(l.cost) + fleteEf;
                 // Financiamiento por unidad de cada columna: tasa, comisión y base
                 // son del circuito que financia (catálogo, congelado al cotizar).
                 // ASR: comisión + Capa 1 sobre el costo puesto. Lineal: la
@@ -861,7 +898,7 @@ function Page() {
                 // Desglose del plazo acordado (solo informativo).
                 const calc = priceSale({
                   cost: num(l.cost),
-                  freight: num(l.freight),
+                  freight: fleteEf,
                   other: 0,
                   days,
                   tiie: ratePct / 100,
@@ -899,7 +936,20 @@ function Page() {
                     </td>
                     <td className="px-3 py-2.5 text-right tabular-nums">
                       {num(l.cost) > 0 ? money(landed) : <span className="text-warn">Sin costo</span>}
-                      {num(l.freight) > 0 ? <span className="block text-[11px] text-muted">{money(num(l.cost))} + flete {money(num(l.freight))}</span> : null}
+                      {/* Decisión 102: el desglose también con el flete EFECTIVO. Con el
+                          crudo, la celda decía «10,000.00» arriba y «10,000.00 + flete
+                          3,000.00» debajo — se contradecía sola, en la pantalla donde se
+                          aprueba el precio. Cuando el flete está declarado en cero se
+                          dice por qué, en vez de desaparecer el renglón. */}
+                      {fleteEf > 0 ? (
+                        <span className="block text-[11px] text-muted">{money(num(l.cost))} + flete {money(fleteEf)}</span>
+                      ) : num(l.freight) > 0 && l.freight_mode ? (
+                        <span className="block text-[11px] text-muted">
+                          {l.freight_mode === "recoge"
+                            ? "sin flete: lo recoge el cliente"
+                            : "flete incluido en el precio del proveedor"}
+                        </span>
+                      ) : null}
                       {l.cost_currency === "USD" ? <span className="block text-[11px] text-muted">proveedor en USD × TC {num(l.cost_fx)}</span> : null}
                     </td>
                     <td className="px-3 py-2">
@@ -987,7 +1037,7 @@ function Page() {
             const m = marginOf(l, days > 0 ? "credit" : "cash");
             if (!m || !marginValid(m)) return sum;
             // Mismo costo puesto y mismo financiamiento que la fila de arriba.
-            const landed = num(l.cost) + num(l.freight);
+            const landed = num(l.cost) + effectiveFreight(l.freight_mode, num(l.freight));
             const fin = days > 0
               ? financeUnit({ cost: landed, days, tiie: ratePct / 100, costSpread: spreadPct / 100, commissionRate: commissionPct / 100 })
               : 0;

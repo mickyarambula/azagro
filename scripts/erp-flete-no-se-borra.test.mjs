@@ -62,5 +62,10 @@ test("el flete deja rastro de quién lo puso: decide el precio y no tenía bitá
   assert.ok(body.includes('action: "flete-de-solicitud",'), "la acción");
   assert.ok(body.includes("flete por unidad ${previo.toFixed(2)} → ${data.freight.toFixed(2)}"), "con el número de antes y el de después");
   // Solo cuando cambió: pasar el cursor no puede llenar la bitácora de ruido.
-  assert.ok(body.includes("if (Math.abs(previo - data.freight) > 0.0001) {"), "y solo si de verdad cambió");
+  // Decisión 102: el MODO también decide dinero («lo recoge» vale cero), así
+  // que cambiarlo deja rastro aunque el importe no se mueva.
+  assert.ok(
+    body.includes("if (Math.abs(previo - data.freight) > 0.0001 || (data.mode != null && data.mode !== modoPrevio)) {"),
+    "y solo si de verdad cambió el importe o el modo",
+  );
 });

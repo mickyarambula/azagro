@@ -23,6 +23,7 @@ import { circuitTerms, inheritCircuit } from "@/lib/erp/circuits";
 import { seedCircuits } from "@/lib/erp/circuits-seed";
 import { computeDues, TERM_KINDS, type TermKind } from "@/lib/erp/order-terms";
 import { guardSaleTerms } from "@/lib/erp/sale-terms";
+import { assertFreightDeclared, effectiveFreight, FREIGHT_MODES } from "@/lib/erp/freight-terms";
 
 export type Role = AppRole;
 
@@ -1924,6 +1925,11 @@ export const createSale = createServerFn({ method: "POST" })
           productId: z.number(),
           qty: z.number().positive(),
           unitPrice: z.number().nonnegative(),
+          // Decisión 102: el flete de llevársela al cliente, por unidad, y de
+          // dónde salió. Sin modo el pedido no nace: un cero sin decir por qué
+          // no se distingue de un flete que se olvidó.
+          freight: z.number().nonnegative().optional(),
+          freightMode: z.enum(FREIGHT_MODES).optional(),
         }),
       ).min(1),
     }),
@@ -1969,6 +1975,23 @@ export const createSale = createServerFn({ method: "POST" })
     // «Sin mora» — escrito aquí, no heredado de un default de la columna
     // (Decisiones 68 y 69, misma regla y mismo lugar que saveOrder).
     await guardSaleTerms(sql, m.company_id, { creditDays: 0, policyCode: NO_MORA_POLICY });
+    // Decisión 102: este camino nunca tuvo dónde guardar el flete
+    // (`sales_lines` no tenía el campo), así que era cero para siempre y nadie
+    // lo decía. Ahora lo acepta y lo guarda.
+    const nombres = await sql<{ id: number; code: string; name: string }>`
+      select id, code, name from products where company_id = ${m.company_id} and id = any(${data.lines.map((l) => l.productId)})
+    `;
+    assertFreightDeclared(
+      data.lines.map((l) => {
+        const p = nombres.find((x) => x.id === l.productId);
+        return { label: p ? `${p.code} ${p.name}` : `producto ${l.productId}`, freight: l.freight ?? null, mode: l.freightMode ?? null };
+      }),
+      // `legacy`: este camino SÍ acepta el flete declarado, pero todavía no
+      // tiene pantalla que lo pida. Exigirlo lo dejaría trancado, y un candado
+      // sin salida es peor que el bug que tapa: lo que se declare se guarda,
+      // lo que no, queda sin declarar y se ve como tal.
+      { legacy: true },
+    );
     const n = await sql<{ c: number }>`select count(*)::int as c from sales_orders where company_id = ${m.company_id}`;
     const name = `PV-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const so = await sql<{ id: number }>`
@@ -1979,8 +2002,8 @@ export const createSale = createServerFn({ method: "POST" })
     `;
     for (const line of data.lines) {
       await sql`
-        insert into sales_lines (so_id, product_id, qty, unit_price)
-        values (${so[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice})
+        insert into sales_lines (so_id, product_id, qty, unit_price, freight, freight_mode)
+        values (${so[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.freightMode || line.freight != null ? effectiveFreight(line.freightMode, line.freight) : null}, ${line.freightMode ?? null})
       `;
     }
     await rememberTrade(sql, {

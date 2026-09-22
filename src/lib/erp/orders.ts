@@ -16,6 +16,7 @@ import { policy } from "@/lib/erp/ops";
 import { financeUnit, linealPriceFromMargin } from "@/lib/erp/pricing";
 import { marginOf, priceFromMargin, type Offer } from "@/lib/erp/margins";
 import { circuitForTerm, circuitLabel, inheritCircuit, isSelectableCircuit } from "@/lib/erp/circuits";
+import { assertFreightDeclared, effectiveFreight, FREIGHT_MODES } from "@/lib/erp/freight-terms";
 
 type Sql = Awaited<ReturnType<typeof getSql>>;
 
@@ -73,7 +74,17 @@ const orderSchema = z.object({
   // origen) y solo de administrador. Un pedido que vino de cotización hereda
   // el circuito de su cotización y este campo se ignora ahí.
   circuitCode: z.enum(["CONTADO", "ASR"]).optional(),
-  lines: z.array(z.object({ productId: z.number(), qty: z.number().positive(), unitPrice: z.number().nonnegative(), uom: z.string().optional().default("") })).min(1),
+  // Decisión 102: el flete al cliente por partida. OPCIONAL: cuando el
+  // formulario no lo manda, se conserva el que la partida ya tenía en vez de
+  // borrarlo — el pedido se guarda muchas veces y el flete se declara una.
+  lines: z.array(z.object({
+    productId: z.number(),
+    qty: z.number().positive(),
+    unitPrice: z.number().nonnegative(),
+    uom: z.string().optional().default(""),
+    freight: z.number().nonnegative().optional(),
+    freightMode: z.enum(FREIGHT_MODES).optional(),
+  })).min(1),
 });
 
 export const orderLookups = createServerFn({ method: "GET" })
@@ -617,8 +628,59 @@ export const saveOrder = createServerFn({ method: "POST" })
     }
 
     let id = data.id;
+    // Decisión 102: el flete declarado de las partidas que se van a borrar y
+    // reescribir. Sin esta foto, confirmar un pedido lo perdía.
+    let fleteAntes = new Map<number, { freight: number | null; mode: string | null }>();
     let name = (data.name ?? "").trim().toUpperCase();
     const state = data.confirm ? "confirmed" : "draft";
+
+    // DECISIÓN 102 — LAS DOS VALIDACIONES VAN ANTES DE ESCRIBIR NADA.
+    //
+    // La primera versión las puso después del `update sales_orders` y del
+    // `delete from sales_lines`, y este handler no corre en transacción: al
+    // dispararse dejaban un pedido confirmado con el total nuevo y cero
+    // partidas. Es exactamente el defecto que la revisión cazó en
+    // `quoteFromRequest` la vuelta anterior, mudado de archivo. Un candado que
+    // se dispara tarde no detiene el documento: lo deja a medias.
+    if (id) {
+      const previas = await sql<{ product_id: number; freight: string | null; freight_mode: string | null }>`
+        select product_id, freight::text as freight, freight_mode from sales_lines where so_id = ${id} order by id
+      `;
+      // La partida es `sales_lines.id`, no el producto (regla 5e). El
+      // formulario no manda ids, así que la única llave disponible es el
+      // producto — y con DOS renglones del mismo producto esa llave cruza: el
+      // de $500 se reescribiría con el flete del de $1,200.
+      const repetidos = new Set(
+        previas.map((l) => l.product_id).filter((pid, i, todos) => todos.indexOf(pid) !== i),
+      );
+      // Perder callado un número que decide dinero es lo que la regla 9
+      // combate: si el producto se repite Y alguna de esas partidas declaró su
+      // flete, se detiene y nombra la salida.
+      if (previas.some((l) => repetidos.has(l.product_id) && (l.freight_mode || Number(l.freight ?? 0) > 0.0001))) {
+        throw new Error(
+          `Este pedido tiene el mismo producto en dos partidas y una de ellas trae flete declarado. ` +
+          `Al guardar no hay forma de saber cuál flete le toca a cuál renglón, así que se detiene en vez de borrarlo: ` +
+          `junta las partidas repetidas en una sola y vuelve a guardar.`,
+        );
+      }
+      fleteAntes = new Map(
+        previas
+          .filter((l) => !repetidos.has(l.product_id))
+          .map((l) => [l.product_id, { freight: l.freight == null ? null : Number(l.freight), mode: l.freight_mode }]),
+      );
+    }
+    // El cuarto nacimiento de una venta. Con `legacy`, como los otros dos sin
+    // pantalla: acepta y guarda lo que se declare, no tranca. Si la lista de
+    // la regla dice CUATRO y solo llaman tres, el que falta se sale sin que
+    // nadie lo note — la lección de los seis lectores de la mora.
+    assertFreightDeclared(
+      data.lines.map((l) => ({
+        label: `producto ${l.productId}`,
+        freight: l.freight ?? fleteAntes.get(l.productId)?.freight ?? null,
+        mode: l.freightMode ?? fleteAntes.get(l.productId)?.mode ?? null,
+      })),
+      { legacy: true },
+    );
 
     let auditEdit: { detail: string; folio: string } | null = null;
     if (id) {
@@ -731,6 +793,12 @@ export const saveOrder = createServerFn({ method: "POST" })
           state = ${data.confirm ? "confirmed" : current[0].state}
         where id = ${id} and company_id = ${companyId}
       `;
+      // DECISIÓN 102 — guardar un pedido BORRA sus partidas y las vuelve a
+      // escribir. El flete declarado vive en la partida, así que sin esta foto
+      // se perdía al confirmar: un pedido con «se le cobra $500 por saco»
+      // quedaba sin flete y sin modo, el costo puesto bajaba $50,000 en 100
+      // sacos y la utilidad subía otro tanto. Y confirmar es el paso
+      // obligatorio para poder entregar.
       await sql`delete from sales_lines where so_id = ${id}`;
     } else {
       if (!name) name = await nextOrderName(sql, companyId);
@@ -755,9 +823,24 @@ export const saveOrder = createServerFn({ method: "POST" })
     }
 
     for (const line of data.lines) {
+      // Lo que venga en el formulario manda; lo que no, se CONSERVA de la foto.
+      // La MISMA mezcla que usa la validación de arriba: lo que el formulario
+      // manda pisa, lo que no manda se toma de la foto. Tenerlas distintas
+      // hacía que mandar el modo SIN el importe validara contra el flete viejo
+      // y escribiera cero — $50,000 de costo puesto desaparecidos en 100 sacos
+      // —, y al revés, mandar el importe sin modo borraba un «lo recoge».
+      const prev = fleteAntes.get(line.productId);
+      const fl = line.freightMode !== undefined || line.freight !== undefined
+        ? {
+            // El efectivo, resuelto de una vez: guardar el crudo junto a la
+            // etiqueta obliga a cada lector a interpretarlos, y ahí discreparon.
+            freight: effectiveFreight(line.freightMode ?? prev?.mode, line.freight ?? prev?.freight),
+            mode: line.freightMode ?? prev?.mode ?? null,
+          }
+        : prev ?? { freight: null, mode: null };
       await sql`
-        insert into sales_lines (so_id, product_id, qty, unit_price, uom)
-        values (${id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom ?? ""})
+        insert into sales_lines (so_id, product_id, qty, unit_price, uom, freight, freight_mode)
+        values (${id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom ?? ""}, ${fl.freight}, ${fl.mode})
       `;
     }
     await rememberTrade(sql, {

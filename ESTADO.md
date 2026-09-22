@@ -864,11 +864,12 @@ Y al investigarlo aparecieron **dos cosas que no eran la pregunta**:
    al venderla el margen sale inflado. **ABIERTO**, es la pieza de fondo del
    bloque, y de ella cuelga también el punto 2.
 
-También quedó apuntado que el campo de flete **nace en cero y nadie tiene que
+También quedó apuntado que el campo de flete **nacía en cero y nadie tenía que
 decir de dónde salió**: un valor por omisión que decide dinero, justo lo que
-prohíbe la regla 9 (mismo patrón que las Decisiones 64 y 67, «vacío no es
-cero»). La regla del dueño lo vuelve obligatorio, con dos salidas legítimas
-—«lo pone el proveedor» y «el cliente lo recoge»—, y **no está construido**.
+prohíbe la regla 9. **CERRADO el 22-sep-2026 (Decisión 102, pieza 3):** se
+declara o el documento no nace, con las dos salidas legítimas —«lo pone el
+proveedor» y «el cliente lo recoge»—, y de paso se le dio a `sales_lines` el
+campo que nunca tuvo: una venta directa nacía con flete cero para siempre.
 
 **Un bug vivo, encontrado y CERRADO el 20-sep-2026.** A quien no ve costos, la
 comparativa de proveedores le manda el flete **enmascarado en cero**; guardar
@@ -911,9 +912,21 @@ y **no mueve un peso** de ningún precio, costo ni utilidad. **Pieza 2 CONSTRUID
 de entrada y las maniobras entran al costo del kardex repartidos entre lo que
 vino en ese camión, **y el apagador del doble conteo va en el mismo cambio**.
 El reparto resultó estar aquí adentro, así que la vieja pieza 4 ya no existe
-por separado. Queda abierta la **pieza 3** (el flete al cliente obligatorio al
-cotizar, con sus dos salidas: «lo pone el proveedor» y «el cliente lo
-recoge»).
+por separado. **Pieza 3 CONSTRUIDA el 22-sep-2026** (migración 0052, Decisión 102): el flete
+al cliente se declara, con sus dos salidas, y `sales_lines` estrena el campo
+que nunca tuvo. **El bloque del flete está completo** (piezas 1 a 3; la vieja
+pieza 4 resultó estar dentro de la 2).
+
+**ABIERTO de la pieza 3 — dos caminos crean partidas sin declarar el flete.**
+`createQuote` (la pantalla «Nueva cotización» de `/quotes`) y `reviseQuote`
+(agregar una partida en una revisión) escriben flete 0 sin modo y no pasan por
+la regla; al aceptar, `legacy` las deja pasar. O sea que **la exigencia se
+puede esquivar cotizando por la pantalla principal de Cotizaciones**. Cerrarlo
+pide ponerles el selector a esas dos pantallas — no se hizo aquí porque poner
+el candado antes que la salida fue exactamente el NO PASA de esta pieza.
+Tampoco hay pantalla que escriba el flete en `sales_lines`: hoy la columna
+nueva solo la llenan caminos sin pantalla, así que en la práctica el flete del
+pedido sigue leyéndose de la cotización.
 
 *Resuelto en la pieza 2:* el viaje viejo sigue vivo con su importe después de
 revertir, pero ya no importa — cada movimiento del kardex lleva su propio

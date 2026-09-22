@@ -443,8 +443,11 @@ test("la revisión acepta partidas nuevas, les resuelve costo y actualiza el ped
   // Decisión 101: la partida nueva toma el costo del catálogo, que desde la
   // pieza 2 es costo PUESTO — así que congela también cuánto de él es flete,
   // o al cotizarla se sumaría el flete dos veces.
-  assert.ok(body.includes("insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in)"), "entra a la cotización");
-  assert.ok(body.includes("${fleteDentroNuevo(line.productId)})"), "con el apagador congelado");
+  // Decisión 102: la partida nueva de una revisión nace SIN declarar (flete 0,
+  // modo null explícito). Escribirlo explícito es lo que impide que la
+  // revisión borre un modo ya declarado de otra partida.
+  assert.ok(body.includes("insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in, freight_mode)"), "entra a la cotización");
+  assert.ok(body.includes("${fleteDentroNuevo(line.productId)}, null)"), "con el apagador congelado, y el modo del flete explícito (Decisión 102)");
   assert.ok(body.includes("partida nueva ×"), "queda en la bitácora de la revisión");
   assert.ok(body.includes("await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev)"), "a crédito sigue exigiendo costo");
   // Sincronía con el pedido en borrador.

@@ -6,6 +6,7 @@ import { getSql, withTx } from "@/lib/db";
 import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, noMoraMessage, pctRate, policyChargesInterest, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates, NO_MORA_POLICY} from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { guardSaleTerms } from "@/lib/erp/sale-terms";
+import { assertFreightDeclared } from "@/lib/erp/freight-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
@@ -1138,6 +1139,7 @@ export const duplicateQuote = createServerFn({ method: "POST" })
       uom: string;
       freight: string;
       other_cost: string;
+      freight_mode: string | null;
       margin_cash_mode: string | null;
       margin_cash_pct: string | null;
       margin_cash_nominal: string | null;
@@ -1146,7 +1148,7 @@ export const duplicateQuote = createServerFn({ method: "POST" })
       margin_credit_nominal: string | null;
     }>`
       select ql.product_id, p.code, ql.qty::text, coalesce(ql.uom,'') as uom,
-        coalesce(ql.freight,0)::text as freight, coalesce(ql.other_cost,0)::text as other_cost,
+        coalesce(ql.freight,0)::text as freight, ql.freight_mode, coalesce(ql.other_cost,0)::text as other_cost,
         ql.margin_cash_mode, ql.margin_cash_pct::text as margin_cash_pct, ql.margin_cash_nominal::text as margin_cash_nominal,
         ql.margin_credit_mode, ql.margin_credit_pct::text as margin_credit_pct, ql.margin_credit_nominal::text as margin_credit_nominal
       from quote_lines ql join products p on p.id = ql.product_id
@@ -1249,6 +1251,10 @@ export const duplicateQuote = createServerFn({ method: "POST" })
         freight: Number(l.freight),
         otherCost: Number(l.other_cost),
         costFreightIn: fleteDentroDe(l.product_id),
+        // Decisión 102: el modo viaja con el importe. Sin él, duplicar una
+        // cotización con flete producía una que nunca se podía aceptar, y el
+        // selector solo existe en la pantalla de la solicitud: sin salida.
+        freightMode: l.freight_mode,
         cash,
         credit,
         unitPrice,
@@ -1279,13 +1285,13 @@ export const duplicateQuote = createServerFn({ method: "POST" })
     `;
     for (const line of priced) {
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in, freight_mode,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
         -- Decisión 101: duplicar re-resuelve el costo con el catálogo de HOY
         -- (costoDe), así que el desglose se calcula de hoy también — no se
         -- hereda de la cotización vieja, que congeló otro número.
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.otherCost}, ${line.cash}, ${line.credit}, 'MXN', null, ${line.costFreightIn ?? 0},
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.otherCost}, ${line.cash}, ${line.credit}, 'MXN', null, ${line.costFreightIn ?? 0}, ${line.freightMode ?? null},
           ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
           ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
           ${line.marginCredit ? "captura" : null}, ${line.financeUnit}, ${line.disbursedUnit})
@@ -1558,8 +1564,8 @@ export const reviseQuote = createServerFn({ method: "POST" })
       const nueva = nuevos.find((x) => x.id === line.productId);
       if (nueva) {
         await sql`
-          insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in)
-          values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)}, 0, ${line.cashPrice}, ${line.creditPrice}, ${fleteDentroNuevo(line.productId)})
+          insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in, freight_mode)
+          values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)}, 0, ${line.cashPrice}, ${line.creditPrice}, ${fleteDentroNuevo(line.productId)}, null)
         `;
         // Decisión 77: el costo de catálogo es pesos.
         await sql`update quote_lines set cost_currency = 'MXN', cost_fx = null where quote_id = ${q[0].id} and product_id = ${line.productId}`;
@@ -1763,6 +1769,19 @@ export const decideQuote = createServerFn({ method: "POST" })
     // Decisiones 68 y 69: la misma regla única que saveOrder — la política
     // tiene que existir en el catálogo y cuadrar con el plazo.
     await guardSaleTerms(sql, cid, { creditDays: dues.creditDays, policyCode });
+    // Decisión 102: aceptar una cotización es uno de los cuatro nacimientos de
+    // una venta, así que aquí también se exige que el flete al cliente esté
+    // DECLARADO. `legacy`: una cotización de antes de esta pieza —sin modo y
+    // sin importe— sigue pudiendo aceptarse; lo ya capturado no se toca.
+    const flLines = await sql<{ code: string; name: string; freight: string; freight_mode: string | null }>`
+      select p.code, p.name, coalesce(ql.freight,0)::text as freight, ql.freight_mode
+      from quote_lines ql join products p on p.id = ql.product_id
+      where ql.quote_id = ${q[0].id}
+    `;
+    assertFreightDeclared(
+      flLines.map((l) => ({ label: `${l.code} ${l.name}`, freight: Number(l.freight), mode: l.freight_mode })),
+      { legacy: true },
+    );
     const priceMode = days > 0 ? "financed" : "cash";
     const fulfillKind = data.fulfillKind ?? "inventory";
     const routeKind = fulfillKind === "direct" ? "supplier" : "own";

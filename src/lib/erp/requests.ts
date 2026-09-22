@@ -4,6 +4,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
+import { assertFreightDeclared, effectiveFreight, FREIGHT_MODES, FREIGHT_MODE_LABEL } from "@/lib/erp/freight-terms";
 import { missingRateMessage } from "@/lib/erp/credit";
 import { todayMx } from "@/lib/utils";
 import { priceSale } from "@/lib/erp/pricing";
@@ -62,6 +63,10 @@ async function ensure(sql: Sql) {
   // Margen único anterior (previo a 0017). Sin default y sin NOT NULL: una
   // partida nueva nace SIN margen y la pantalla lo dice. Ya no existe el 12%
   // por omisión (migración 0018).
+  // Decisión 102: la pantalla de la solicitud selecciona `freight_mode`. En una
+  // base donde esta tabla nació por aquí y la 0052 no corrió, esa consulta
+  // truena — el mismo respaldo que ya tienen las columnas de margen.
+  await sql.query(`alter table customer_request_lines add column if not exists freight_mode text`);
   await sql.query(`alter table customer_request_lines add column if not exists margin_mode text`);
   await sql.query(`alter table customer_request_lines add column if not exists margin_pct numeric(8,4)`);
   await sql.query(`alter table customer_request_lines add column if not exists margin_nominal numeric(14,4)`);
@@ -251,6 +256,7 @@ export const getRequest = createServerFn({ method: "POST" })
       uom: string;
       cost: string;
       freight: string;
+      freight_mode: string | null;
       supplier_id: number | null;
       cost_currency: string | null;
       cost_fx: string | null;
@@ -270,7 +276,7 @@ export const getRequest = createServerFn({ method: "POST" })
       margin_credit_nominal: string | null;
       margin_credit_source: string | null;
     }>`
-      select l.id, l.product_id, pr.code, pr.name as product, l.qty::text, l.uom, l.cost::text, l.freight::text,
+      select l.id, l.product_id, pr.code, pr.name as product, l.qty::text, l.uom, l.cost::text, l.freight::text, l.freight_mode,
         l.supplier_id, l.cost_currency, l.cost_fx::text as cost_fx,
         coalesce((select sum(quantity) from stock_quants q where q.product_id = l.product_id),0)::text as on_hand,
         coalesce((select sum(q.quantity) from stock_quants q join locations lo on lo.id = q.location_id where q.product_id = l.product_id and lo.loc_type = 'internal'),0)::text as on_hand_own,
@@ -318,6 +324,7 @@ export const getRequest = createServerFn({ method: "POST" })
         ...l,
         cost: "0",
         freight: "0",
+        freight_mode: null,
         margin_pct: null,
         margin_nominal: null,
         margin_cash_pct: null,
@@ -326,9 +333,11 @@ export const getRequest = createServerFn({ method: "POST" })
         margin_credit_nominal: null,
       }));
       const maskedRfq = rfq ? { ...rfq, bids: rfq.bids.map((b) => ({ ...b, unit_price: "0" })) } : null;
-      return { request: head[0], lines: maskedLines, suppliers, links, rfq: maskedRfq, quote, orders };
+      // Decisión 102: la pantalla necesita saberlo para no ofrecer un selector
+      // que el servidor va a rechazar (CLAUDE.md § 10).
+      return { request: head[0], lines: maskedLines, suppliers, links, rfq: maskedRfq, quote, orders, canSeeCosts: false };
     }
-    return { request: head[0], lines, suppliers, links, rfq, quote, orders };
+    return { request: head[0], lines, suppliers, links, rfq, quote, orders, canSeeCosts: true };
   });
 
 /**
@@ -839,7 +848,17 @@ export const applyCheapest = createServerFn({ method: "POST" })
 
 export const saveLineFreight = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(z.object({ requestId: z.number(), productId: z.number(), freight: z.number().nonnegative() }))
+  // Decisión 102: el importe Y de dónde salió. Un cero sin modo no se
+  // distingue de un flete que se olvidó.
+  .validator(z.object({
+    requestId: z.number(),
+    productId: z.number(),
+    freight: z.number().nonnegative(),
+    // `null` explícito = volver a «sin decidir»; ausente = no se toca. Sin
+    // esta distinción, elegir «Sin decidir» se ignoraba en silencio y no había
+    // forma de regresar una partida a sin declarar.
+    mode: z.enum(FREIGHT_MODES).nullable().optional(),
+  }))
   .handler(async ({ context, data }) => {
     const sql = await getSql();
     const companyId = await cid(sql, context.userId);
@@ -860,21 +879,25 @@ export const saveLineFreight = createServerFn({ method: "POST" })
       throw new Error("El flete lo captura quien ve los costos de compra (compras, gerencia o administrador)");
     }
     await assertRequestOpen(sql, companyId, data.requestId);
-    const antes = await sql<{ freight: string }>`
-      select coalesce(freight, 0)::text as freight from customer_request_lines
+    const antes = await sql<{ freight: string; freight_mode: string | null }>`
+      select coalesce(freight, 0)::text as freight, freight_mode from customer_request_lines
       where request_id = ${data.requestId} and product_id = ${data.productId}
         and request_id in (select id from customer_requests where company_id = ${companyId})
       limit 1
     `;
     await sql`
-      update customer_request_lines set freight = ${data.freight}
+      update customer_request_lines set freight = ${data.freight},
+        freight_mode = case when ${data.mode === undefined} then freight_mode else ${data.mode ?? null} end
       where request_id = ${data.requestId} and product_id = ${data.productId}
         and request_id in (select id from customer_requests where company_id = ${companyId})
     `;
     // El flete decide el precio y hasta hoy no dejaba rastro de quién lo puso,
     // a diferencia de todo lo que tiene veinte renglones arriba.
     const previo = Number(antes[0]?.freight ?? 0);
-    if (Math.abs(previo - data.freight) > 0.0001) {
+    const modoPrevio = antes[0]?.freight_mode ?? null;
+    // El MODO también decide dinero —«lo recoge» vale cero— así que cambiarlo
+    // deja rastro aunque el importe no se mueva.
+    if (Math.abs(previo - data.freight) > 0.0001 || (data.mode != null && data.mode !== modoPrevio)) {
       await writeAudit(sql, {
         companyId,
         userId: context.userId,
@@ -882,7 +905,7 @@ export const saveLineFreight = createServerFn({ method: "POST" })
         entity: "customer_request",
         entityId: data.requestId,
         name: `producto ${data.productId}`,
-        detail: `flete por unidad ${previo.toFixed(2)} → ${data.freight.toFixed(2)}`,
+        detail: `flete por unidad ${previo.toFixed(2)} → ${data.freight.toFixed(2)}${data.mode ? ` · ${FREIGHT_MODE_LABEL[data.mode]}` : ""}`,
       });
     }
     return { ok: true };
@@ -975,6 +998,7 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       uom: string;
       cost: string;
       freight: string;
+      freight_mode: string | null;
       cost_currency: string | null;
       cost_fx: string | null;
       margin_mode: string | null;
@@ -987,7 +1011,7 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       margin_credit_pct: string | null;
       margin_credit_nominal: string | null;
     }>`
-      select l.product_id, p.code, l.qty::text, l.uom, l.cost::text, l.freight::text,
+      select l.product_id, p.code, l.qty::text, l.uom, l.cost::text, l.freight::text, l.freight_mode,
         l.cost_currency, l.cost_fx::text as cost_fx,
         l.margin_mode, l.margin_pct::text as margin_pct,
         l.margin_nominal::text as margin_nominal,
@@ -1025,13 +1049,25 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     // en el lineal el margen es sobre la factura a Santa Rosa (costo + margen)
     // y esa factura es lo que se financia.
     const priced = lines.map((l) => {
+      // DECISIÓN 102 — EL FLETE EFECTIVO SE RESUELVE UNA VEZ, ARRIBA, Y DE AQUÍ
+      // LO TOMAN EL PRECIO Y LO GUARDADO.
+      //
+      // La versión anterior lo resolvía solo donde se guarda, y el precio
+      // siguió leyendo el importe crudo: con «lo recoge» y $3,000 tecleados de
+      // antes, la cotización guardaba 0 y le cobraba al cliente $34,090.91 de
+      // más en 10 toneladas, con $30,000 de utilidad que no existía. Es el
+      // mismo defecto de la revisión anterior, mudado del lector al escritor.
+      //
+      // Calcularlo en el lugar donde se GUARDA no basta: tiene que calcularse
+      // donde se DECIDE, y de ahí salir para todos.
+      const flete = effectiveFreight(l.freight_mode, Number(l.freight));
       // Ya se validó arriba: contado siempre tiene margen, y crédito lo tiene
       // siempre que la cotización lleve plazo. A 0 días no hay precio a crédito.
       const mCash = marginOf(l, "cash")!;
       const mCredit = marginOf(l, "credit");
       const cashCalc = priceSale({
         cost: Number(l.cost),
-        freight: Number(l.freight),
+        freight: flete,
         other: 0,
         days: 0,
         tiie: Math.max(0, data.tiie),
@@ -1046,7 +1082,7 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
       const creditCalc = mCredit
         ? priceSale({
             cost: Number(l.cost),
-            freight: Number(l.freight),
+            freight: flete,
             other: 0,
             days: data.creditDays,
             tiie: Math.max(0, data.tiie),
@@ -1071,7 +1107,21 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
         // Decisión 76: en qué moneda dio el costo el proveedor y con qué TC se pasó a pesos.
         costCurrency: l.cost_currency ?? "MXN",
         costFx: l.cost_fx != null ? Number(l.cost_fx) : null,
-        freight: Number(l.freight),
+        // DECISIÓN 102 — a la cotización viaja el flete EFECTIVO, ya resuelto:
+        // «lo recoge» y «lo pone el proveedor» valen cero aquí, de una vez.
+        //
+        // Guardar el importe crudo junto a la etiqueta obligaba a cada lector a
+        // interpretarlos, y dos lectores discreparon en las dos direcciones en
+        // dos revisiones seguidas: primero la utilidad ignoraba un flete que el
+        // precio sí cobraba; después, al conservar el importe al cambiar de
+        // modo, el precio cobró $3,000 que la utilidad ya no contaba —
+        // $34,090.90 de más al cliente en 10 toneladas. El número se congela
+        // una vez, al nacer el documento, y los lectores leen y ya.
+        //
+        // El importe crudo se queda en la SOLICITUD, que es donde la persona
+        // todavía está decidiendo y puede cambiar de opinión sin perderlo.
+        freight: flete,
+        freightMode: l.freight_mode,
         cash,
         credit,
         unitPrice,
@@ -1097,6 +1147,15 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     });
     const total = priced.reduce((s, l) => s + l.qty * l.unitPrice, 0);
     const n = await sql<{ c: number }>`select count(*)::int as c from quotes where company_id = ${companyId}`;
+    // DECISIÓN 102 — el candado va DONDE ESTÁ LA SALIDA (esta pantalla tiene el
+    // selector) y **ANTES DE ESCRIBIR NADA**. La primera versión lo puso una
+    // línea después del `insert into quotes`, y como este handler no corre en
+    // transacción, cada intento fallido dejaba una cotización ENVIADA con su
+    // total y sin una sola partida — y quemaba un folio. Un candado que se
+    // dispara tarde no detiene el documento: lo deja a medias.
+    assertFreightDeclared(
+      priced.map((l) => ({ label: `producto ${l.productId}`, freight: l.freight, mode: l.freightMode })),
+    );
     const name = `COT-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const until = data.validUntil;
     const mode = req[0].delivery_mode === "campo" ? "Puesta en campo" : req[0].delivery_mode === "pickup" ? "Recolección del cliente" : "Entrega en bodega";
@@ -1126,14 +1185,14 @@ export const quoteFromRequest = createServerFn({ method: "POST" })
     `;
     for (const line of priced) {
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in, freight_mode,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
         -- Decisión 101, apagador en CERO y dicho a propósito: el costo de una
         -- solicitud es el precio del PROVEEDOR (la oferta que ganó el RFQ), no
         -- el promedio del kardex. Ese número nunca llevó flete adentro, así que
         -- el flete capturado aquí suma una vez, como siempre.
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.cash}, ${line.credit}, ${line.costCurrency}, ${line.costFx}, 0,
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.cash}, ${line.credit}, ${line.costCurrency}, ${line.costFx}, 0, ${line.freightMode ?? null},
           ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
           ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
           ${line.marginCredit ? "captura" : null}, ${line.financeUnit}, ${line.disbursedUnit})

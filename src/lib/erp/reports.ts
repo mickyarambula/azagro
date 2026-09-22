@@ -8,6 +8,7 @@ import { dateDMY, todayMx } from "@/lib/utils";
 import { purchaseFxOfDeal } from "@/lib/erp/deal-supplier";
 import { fxCostOfPeriod } from "@/lib/erp/fx-cost-query";
 import { freightOfDeal, mergeDealPnl, type DealExpense } from "@/lib/erp/parciales";
+import { freightSpoken } from "@/lib/erp/freight-terms";
 import { daysBetween, earlyPayBonus, financeCost, nearestRate } from "@/lib/erp/credit";
 import { policy, returnedOfInvoices } from "@/lib/erp/ops";
 import { ensureRefCost, resolveCost } from "@/lib/erp/cost";
@@ -345,6 +346,8 @@ async function dealPnlCore(
     quote_cost: string | null;
     out_freight: string | null;
     out_cost: string | null;
+    sale_freight_mode: string | null;
+    sale_freight: string;
     quote_freight: string;
     quote_other: string;
     quote_disbursed: string | null;
@@ -394,6 +397,18 @@ async function dealPnlCore(
           and m.freight_unit is not null
           and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
       ) as out_cost,
+      -- Decisión 102: el flete del PEDIDO manda cuando está declarado ahí. Un
+      -- pedido nacido sin cotización (venta directa, OC del cliente) no tenía
+      -- dónde guardarlo y su flete era cero para siempre. Sin declarar, se
+      -- sigue leyendo de la cotización por producto, como siempre — así
+      -- ningún pedido anterior a esta pieza cambia de número.
+      sl.freight_mode as sale_freight_mode,
+      coalesce(sl.freight,0)::text as sale_freight,
+      -- Decisión 102: NO se trae ql.freight_mode a propósito. El flete
+      -- guardado ya es el efectivo (se resolvió al nacer el documento), así
+      -- que aquí no hay nada que interpretar — y un campo traído sin usar es
+      -- la semilla exacta del defecto: el próximo que lo vea lo interpreta, y
+      -- vuelve a haber dos criterios sobre el mismo número.
       coalesce(ql.freight,0)::text as quote_freight,
       coalesce(ql.other_cost,0)::text as quote_other,
       ql.disbursed_unit::text as quote_disbursed
@@ -442,7 +457,15 @@ async function dealPnlCore(
     const excludeReason =
       sinTiieMotivo ?? (poSinTc ? "OC en dólares sin tipo de cambio (captúralo en Compras)" : sinCosto ? "sin costo (ni OC, ni cotización, ni kardex, ni referencia)" : null);
     const excluded = excludeReason != null;
-    const freightUnit = Number(l.quote_freight);
+    // Decisión 102: el flete guardado YA es el efectivo —se resolvió al nacer
+    // el documento—, así que aquí solo se lee. Interpretarlo otra vez fue el
+    // error de las dos revisiones anteriores.
+    //
+    // Si el PEDIDO dice algo de su flete, manda el pedido; si está en blanco,
+    // se lee de la cotización, como siempre, y ningún pedido viejo se mueve.
+    const freightUnit = freightSpoken(l.sale_freight_mode, Number(l.sale_freight))
+      ? Number(l.sale_freight)
+      : Number(l.quote_freight);
     const otherUnit = Number(l.quote_other);
     const sale = qty * saleUnit;
     const cogs = excluded ? 0 : qty * costUnit;
