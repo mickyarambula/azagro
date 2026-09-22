@@ -114,6 +114,27 @@ async function chainForReceipt(sql: Sql, companyId: number, poId: number, role: 
   `;
   const live = moves.filter((m) => !m.reversed_by);
 
+  // UN CAMIÓN, UNA REVERSA (21-sep-2026). Esta función junta los movimientos
+  // por ORDEN, sin mirar el evento, y de las facturas del proveedor se queda
+  // con UNA sola. Con dos recepciones revertiría TODAS las entradas del kardex
+  // —la mercancía completa regresa— y marcaría revertida una sola FP: la otra
+  // se quedaría viva, sin mercancía detrás, o sea debiéndole al proveedor algo
+  // que ya no se tiene. Inconsistente y en silencio.
+  //
+  // El lado de las ENTREGAS ya tenía este candado, con el razonamiento escrito
+  // (`delivery-reversal.ts`); el de las recepciones nunca lo tuvo. Se detiene
+  // antes de tocar nada y manda al camino por evento, que sí filtra bien.
+  const eventosVivos = await sql<{ n: number }>`
+    select count(distinct event_ref)::int as n from stock_moves m
+    where m.company_id = ${companyId} and m.origin = ${o.name} and m.move_type = 'receipt' and m.event_ref is not null
+      and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+  `;
+  if ((eventosVivos[0]?.n ?? 0) > 1) {
+    blockers.push(
+      `${o.name} llegó en ${eventosVivos[0]!.n} recepciones distintas. Revertirla completa dejaría viva la factura del proveedor ` +
+      `de las otras, sin mercancía detrás. Revierte la recepción que quieras deshacer, una por una.`,
+    );
+  }
   if (o.state === "cancelled") blockers.push(`${o.name} está cancelada.`);
   if (!moves.length) blockers.push(`${o.name} no tiene entradas registradas en el kardex: no hay recepción que revertir.`);
   else if (!live.length) blockers.push(`La recepción de ${o.name} ya está revertida (${moves.map((m) => m.reversed_by).join(", ")}).`);

@@ -9,7 +9,7 @@ import { SendButton } from "@/components/send-doc";
 import { letterhead, logoSrc, printHtml } from "@/lib/print-doc";
 import { expedienteFor, PURCHASE_ORDER_NOTE } from "@/lib/erp/doc-text";
 import { closeShortPurchase, createPurchase, listPurchases, receivePurchase, setPurchaseFxRate } from "@/lib/azagro";
-import { listTripCosts, saveTripCost } from "@/lib/erp/trip-cost";
+import { listTripCosts, savePlannedTrip, saveTripCost } from "@/lib/erp/trip-cost";
 import { fxAt, isUsdFx } from "@/lib/erp/fx";
 import { CloseShortButton } from "@/components/close-short";
 import { useAccess } from "@/lib/access";
@@ -139,6 +139,7 @@ function Page() {
   // Decisión 100: los viajes de TODAS las órdenes de la lista, en una sola
   // llamada. Una por orden serían N viajes al servidor por carga.
   const [trips, setTrips] = useState<Awaited<ReturnType<typeof listTripCosts>>["trips"]>([]);
+  const [planned, setPlanned] = useState<Awaited<ReturnType<typeof listTripCosts>>["planned"]>([]);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (currency === "USD" && data) setFxRate((f) => (f > 0 ? f : (fxAt(data.fxTable, date)?.rate ?? 0)));
@@ -151,11 +152,14 @@ function Page() {
       return;
     }
     try {
-      setTrips((await listTripCosts({ data: { poIds: ids } })).trips);
+      const r = await listTripCosts({ data: { poIds: ids } });
+      setTrips(r.trips);
+      setPlanned(r.planned);
     } catch {
       // Quien no ve costos de compra no recibe nada, y el renglón no se
       // dibuja: no es un error que valga la pena enseñarle.
       setTrips([]);
+      setPlanned([]);
     }
   }
 
@@ -586,7 +590,7 @@ function Page() {
                       </div>
                     </td>
                   </tr>
-                  <TripCostsRow poId={o.id} poName={o.name} trips={trips.filter((t) => t.poId === o.id)} onSaved={() => loadTrips(data.orders)} onError={setMsg} />
+                  <TripCostsRow poId={o.id} poName={o.name} trips={trips.filter((t) => t.poId === o.id)} planned={planned.find((p) => p.poId === o.id) ?? null} onSaved={() => loadTrips(data.orders)} onError={setMsg} />
                   </Fragment>
                   );
                 })}
@@ -658,21 +662,29 @@ function TripCostsRow({
   poId,
   poName,
   trips,
+  planned,
   onSaved,
   onError,
 }: {
   poId: number;
   poName: string;
   trips: Array<Awaited<ReturnType<typeof listTripCosts>>["trips"][number]>;
+  planned: Awaited<ReturnType<typeof listTripCosts>>["planned"][number] | null;
   onSaved: () => Promise<void> | void;
   onError: (m: string | null) => void;
 }) {
   const [edit, setEdit] = useState<string | null>(null);
+  const [editPlan, setEditPlan] = useState(false);
+  const [planFlete, setPlanFlete] = useState("");
+  const [planManiobras, setPlanManiobras] = useState("");
   const [flete, setFlete] = useState("");
   const [maniobras, setManiobras] = useState("");
   const [busy, setBusy] = useState(false);
 
-  if (trips.length === 0) return null;
+  // Se dibuja también SIN viajes: mientras no esté capturado lo que va a
+  // costar traerla, recibir se detiene, y hay que poder capturarlo antes de
+  // que llegue el camión (Decisión 101).
+  if (trips.length === 0 && !planned) return null;
   const money = (n: number) => n.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
   // Cuenta solo los que no tienen FLETE: un viaje siempre tuvo flete, pero no
   // siempre hubo cargadores. Contar las maniobras faltantes empujaría a
@@ -682,6 +694,63 @@ function TripCostsRow({
   return (
     <tr className="border-t border-line/50 bg-soft/40">
       <td className="px-4 py-3" colSpan={7}>
+        {planned ? (
+          <div className="mb-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Lo que va a costar traerla</p>
+            {planned.freight == null || planned.handling == null ? (
+              <p className="mt-0.5 text-[12px] text-warn">
+                Sin capturar. <strong>No se puede recibir hasta que esté</strong>: el flete entra al costo de la mercancía en el
+                momento de recibir, y después ya no puede. Si el proveedor la trae sin cobrar flete, teclea 0.
+              </p>
+            ) : (
+              <p className="mt-0.5 text-[12px] text-muted tabular-nums">
+                Flete {money(planned.freight)} · Maniobras {money(planned.handling)} · Total {money(planned.freight + planned.handling)}
+              </p>
+            )}
+            {editPlan ? (
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <input className="erp-input h-7 w-24 text-[12px]" placeholder="Flete" inputMode="decimal" value={planFlete} onChange={(e) => setPlanFlete(e.target.value)} />
+                <input className="erp-input h-7 w-28 text-[12px]" placeholder="Maniobras" inputMode="decimal" value={planManiobras} onChange={(e) => setPlanManiobras(e.target.value)} />
+                <button
+                  type="button"
+                  className="erp-btn-primary h-7 px-2 text-[11px]"
+                  disabled={busy || planFlete.trim() === "" || planManiobras.trim() === ""}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await savePlannedTrip({ data: { poId, freight: Number(planFlete), handling: Number(planManiobras) } });
+                      setEditPlan(false);
+                      await onSaved();
+                      onError(null);
+                    } catch (e) {
+                      onError(e instanceof Error ? e.message : "No se pudo guardar");
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Guardar
+                </button>
+                <button type="button" className="erp-btn h-7 px-2 text-[11px]" onClick={() => setEditPlan(false)}>Cancelar</button>
+                <span className="text-[11px] text-muted">Los dos: un viaje sin maniobras se captura con 0.</span>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="mt-1 text-[11px] text-accent underline decoration-dotted underline-offset-2"
+                onClick={() => {
+                  setEditPlan(true);
+                  setPlanFlete(planned.freight == null ? "" : String(planned.freight));
+                  setPlanManiobras(planned.handling == null ? "" : String(planned.handling));
+                }}
+              >
+                {planned.freight == null ? "Capturar antes de recibir" : "Corregir"}
+              </button>
+            )}
+          </div>
+        ) : null}
+        {trips.length > 0 ? (
+        <>
         <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">
           Lo que costó traerla
           {falta > 0 ? <span className="ml-2 font-medium normal-case text-warn">{falta === 1 ? "1 viaje sin flete capturado" : `${falta} viajes sin flete capturado`}</span> : null}
@@ -754,25 +823,34 @@ function TripCostsRow({
                       Pagado {money(t.paid)} ({t.paidN === 1 ? "1 gasto" : `${t.paidN} gastos`})
                     </span>
                   ) : null}
-                  <button
-                    type="button"
-                    className="text-[11px] text-accent underline decoration-dotted underline-offset-2"
-                    onClick={() => {
-                      setEdit(t.eventRef);
-                      setFlete(t.freight == null ? "" : String(t.freight));
-                      setManiobras(t.handling == null ? "" : String(t.handling));
-                    }}
-                  >
-                    {t.freight == null && t.handling == null ? "Capturar" : "Corregir"}
-                  </button>
+                  {t.capitalized ? (
+                    <span className="text-[11px] text-muted">
+                      Ya entró al costo de esta mercancía; para cambiarlo hay que revertir la recepción.
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="text-[11px] text-accent underline decoration-dotted underline-offset-2"
+                      onClick={() => {
+                        setEdit(t.eventRef);
+                        setFlete(t.freight == null ? "" : String(t.freight));
+                        setManiobras(t.handling == null ? "" : String(t.handling));
+                      }}
+                    >
+                      {t.freight == null && t.handling == null ? "Capturar" : "Corregir"}
+                    </button>
+                  )}
                 </>
               )}
             </div>
           ))}
         </div>
         <p className="mt-1.5 text-[11px] text-muted">
-          Es de {poName}. Todavía no entra al costo del inventario ni cambia ningún precio: eso es el paso siguiente.
+          Es de {poName}. Ya está adentro del costo de esa mercancía en el inventario: por eso no se vuelve a capturar al
+          cotizar, y por eso no se puede cambiar después de recibir.
         </p>
+        </>
+        ) : null}
       </td>
     </tr>
   );

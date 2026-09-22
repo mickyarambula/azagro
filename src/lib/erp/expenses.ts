@@ -145,11 +145,19 @@ export const setExpenseFreight = createServerFn({ method: "POST" })
     const sql = await getSql();
     await assertCan(sql, context.userId, "gastos", "edit");
     const cid = await companyOf(sql, context.userId);
-    const e = await sql<{ id: number; name: string; amount: string; so_id: number | null; is_freight: boolean }>`
-      select id, name, amount::text, so_id, coalesce(is_freight, false) as is_freight
+    const e = await sql<{ id: number; name: string; amount: string; so_id: number | null; is_freight: boolean; event_ref: string }>`
+      select id, name, amount::text, so_id, coalesce(is_freight, false) as is_freight, coalesce(event_ref,'') as event_ref
       from expenses where id = ${data.id} and company_id = ${cid}
     `;
     if (!e[0]) throw new Error("No existe ese gasto");
+    // Decisión 101: el MISMO candado que al crear el gasto. `createExpense` se
+    // detenía y esta puerta no: un candado que deja la puerta de al lado
+    // abierta no es un candado (regla 5g).
+    if (data.isFreight && e[0].event_ref) {
+      throw new Error(
+        "Este gasto ya está ligado a un viaje, así que su costo ya entró al de la mercancía. Marcarlo también como flete del pedido lo restaría dos veces.",
+      );
+    }
     if (data.isFreight && !e[0].so_id) {
       throw new Error("Marca el flete contra el pedido de venta al que pertenece: el flete de una orden de compra todavía no tiene a dónde ir");
     }
@@ -248,6 +256,15 @@ export const createExpense = createServerFn({ method: "POST" })
           and m.event_ref = ${data.eventRef} and m.move_type = 'receipt'
       `;
       if (!viaje[0]?.n) throw new Error(`La recepción ${data.eventRef} no pertenece a esa orden de compra`);
+    }
+    // Decisión 101: un gasto ligado a un VIAJE ya entró al costo de la
+    // mercancía en el kardex. Marcarlo además como flete del pedido lo
+    // restaría una segunda vez de la utilidad — el doble conteo de la Decisión
+    // 99, entrando por la puerta de al lado.
+    if (data.isFreight && data.eventRef) {
+      throw new Error(
+        "Este gasto ya está ligado a un viaje, así que su costo ya entró al de la mercancía. Marcarlo también como flete del pedido lo restaría dos veces.",
+      );
     }
     if (data.isFreight && !data.soId) {
       throw new Error("Marca el flete contra el pedido de venta al que pertenece: el flete de una orden de compra todavía no tiene a dónde ir");

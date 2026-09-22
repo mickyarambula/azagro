@@ -697,7 +697,7 @@ function Ficha() {
             />
             <PnlKpi label="Costo mercancía" value={money(pnl.cogs)} hint="OC, si no cotización, si no catálogo" />
             <PnlKpi
-              label="Flete"
+              label="Flete al cliente"
               value={money(pnl.freight)}
               hint={
                 pnl.freightSource === "real"

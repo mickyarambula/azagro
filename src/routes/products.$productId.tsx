@@ -38,6 +38,7 @@ function Ficha() {
       ref_cost_currency: "MXN",
       list_price: num(p.list_price),
       min_stock: num(p.min_stock),
+      unit_weight: p.unit_weight == null ? null : num(p.unit_weight),
     });
     setRefCostOk(p.can_edit_ref_cost);
     setCostSource(p.cost_source);

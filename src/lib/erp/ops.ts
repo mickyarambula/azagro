@@ -14,7 +14,7 @@ import { financeBase, financeUnit, linealMarginFromPrice, priceSale, type Financ
 import { quoteStillBlocks } from "@/lib/erp/request-lock";
 import { formatTerms, ladderFor, parseTerms } from "@/lib/erp/ladder";
 import { marginFromPrice, marginOf, marginText, normalizeMargin, OFFER_LABEL, type Offer } from "@/lib/erp/margins";
-import { assertCostForCredit, ensureRefCost, productCosts, resolveCost } from "@/lib/erp/cost";
+import { assertCostForCredit, ensureRefCost, freightInsideCost, productCosts, resolveCost } from "@/lib/erp/cost";
 import { ensureInvoiceExtras, refreshInvoiceResidual } from "@/lib/erp/stock";
 import { nextDocFolio } from "@/lib/erp/folios";
 import { groupPolicyUsage } from "@/lib/erp/policy-usage";
@@ -1020,7 +1020,24 @@ export const createQuote = createServerFn({ method: "POST" })
     const costs = await productCosts(sql, cid);
     for (const line of priced) {
       const p = costs.find((c) => c.id === line.productId);
-      const cost = line.cost > 0 ? line.cost : resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost;
+      const pick = resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost });
+      const cost = line.cost > 0 ? line.cost : pick.cost;
+      // Decisión 101 — el apagador: cuánto flete de entrada ya trae ese costo.
+      // Se CONGELA con la partida; recalcularlo después leería el promedio de
+      // hoy, que ya no es el de cuando se cotizó.
+      const costFreightIn = freightInsideCost({ cost, source: pick.source, avgFreight: p?.freight_in_cost, captured: line.cost > 0 });
+      // AQUÍ NO VA UN CANDADO, y el primer intento puso uno mal (21-sep-2026).
+      //
+      // Desde la pieza 2 este campo significa «el flete que NO está dentro del
+      // costo»: el de llevársela al cliente. Cobrar entrega sobre mercancía
+      // que ya trae su flete de entrada adentro es legítimo y suma bien —
+      // mercancía + traerla + llevársela. Rechazarlo era un candado sin salida
+      // sobre el único camino que existe para capturar ese flete.
+      //
+      // Lo que apaga el doble conteo no es un `throw`, es que el costo ya
+      // venga con el flete adentro y el campo se llame por lo que es. Lo que
+      // se congela aquí (`cost_freight_in`) explica ese costo: de cuánto de él
+      // es flete, para que la cifra se pueda desarmar después.
       const landed = cost + (line.freight ?? 0) + (line.other ?? 0);
       const conMargen = landed > 0.0001;
       // La base del financiamiento es del circuito (Decisión 4):
@@ -1042,10 +1059,10 @@ export const createQuote = createServerFn({ method: "POST" })
       }
       const mCash = conMargen ? marginFromPrice({ price: line.cash, landed, finance: 0, mode: "nominal" }) : null;
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price, cost_currency, cost_fx,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit}, 'MXN', null,
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit}, 'MXN', null, ${costFreightIn},
           ${mCash?.mode ?? null}, ${mCash?.pct ?? null}, ${mCash?.nominal ?? null}, ${mCash ? "captura" : null},
           ${mCredit?.mode ?? null}, ${mCredit?.pct ?? null}, ${mCredit?.nominal ?? null}, ${mCredit ? "captura" : null}, ${Number(fin.toFixed(4))}, ${disbursed})
       `;
@@ -1174,6 +1191,14 @@ export const duplicateQuote = createServerFn({ method: "POST" })
     }
     await assertCostForCredit(sql, cid, oldLines.map((l) => l.product_id), old[0].credit_days);
     const costs = await productCosts(sql, cid);
+    // Decisión 101: duplicar re-resuelve el costo con el catálogo de HOY, así
+    // que su apagador también se calcula de hoy — no se hereda de la
+    // cotización vieja, que congeló otro número.
+    const fleteDentroDe = (productId: number) => {
+      const p = costs.find((c) => c.id === productId);
+      const pick = resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost });
+      return freightInsideCost({ cost: pick.cost, source: pick.source, avgFreight: p?.freight_in_cost, captured: false });
+    };
     const costoDe = (productId: number) => {
       const p = costs.find((c) => c.id === productId);
       return resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost;
@@ -1223,6 +1248,7 @@ export const duplicateQuote = createServerFn({ method: "POST" })
         cost,
         freight: Number(l.freight),
         otherCost: Number(l.other_cost),
+        costFreightIn: fleteDentroDe(l.product_id),
         cash,
         credit,
         unitPrice,
@@ -1253,10 +1279,13 @@ export const duplicateQuote = createServerFn({ method: "POST" })
     `;
     for (const line of priced) {
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, cash_price, credit_price, cost_currency, cost_fx,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.otherCost}, ${line.cash}, ${line.credit}, 'MXN', null,
+        -- Decisión 101: duplicar re-resuelve el costo con el catálogo de HOY
+        -- (costoDe), así que el desglose se calcula de hoy también — no se
+        -- hereda de la cotización vieja, que congeló otro número.
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unitPrice}, ${line.uom}, ${line.cost}, ${line.freight}, ${line.otherCost}, ${line.cash}, ${line.credit}, 'MXN', null, ${line.costFreightIn ?? 0},
           ${line.marginCash.mode}, ${line.marginCash.pct}, ${line.marginCash.nominal}, 'captura',
           ${line.marginCredit?.mode ?? null}, ${line.marginCredit?.pct ?? null}, ${line.marginCredit?.nominal ?? null},
           ${line.marginCredit ? "captura" : null}, ${line.financeUnit}, ${line.disbursedUnit})
@@ -1461,6 +1490,14 @@ export const reviseQuote = createServerFn({ method: "POST" })
       const p = costos.find((c) => c.id === productId);
       return resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost;
     };
+    // Decisión 101: una partida NUEVA toma el costo del catálogo, que desde la
+    // pieza 2 es costo PUESTO. Hay que congelar cuánto de él es flete, o al
+    // cotizarla se sumaría el flete otra vez.
+    const fleteDentroNuevo = (productId: number) => {
+      const p = costos.find((c) => c.id === productId);
+      const pick = resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost });
+      return freightInsideCost({ cost: pick.cost, source: pick.source, avgFreight: p?.freight_in_cost, captured: false });
+    };
     const marginUpdates = new Map<
       number,
       { cash: ReturnType<typeof marginFromPrice>; credit: ReturnType<typeof marginFromPrice>; fin: number; disbursed: number | null }
@@ -1521,8 +1558,8 @@ export const reviseQuote = createServerFn({ method: "POST" })
       const nueva = nuevos.find((x) => x.id === line.productId);
       if (nueva) {
         await sql`
-          insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price)
-          values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)}, 0, ${line.cashPrice}, ${line.creditPrice})
+          insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in)
+          values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)}, 0, ${line.cashPrice}, ${line.creditPrice}, ${fleteDentroNuevo(line.productId)})
         `;
         // Decisión 77: el costo de catálogo es pesos.
         await sql`update quote_lines set cost_currency = 'MXN', cost_fx = null where quote_id = ${q[0].id} and product_id = ${line.productId}`;

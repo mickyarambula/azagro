@@ -635,7 +635,12 @@ function Page() {
                       {invited.map((s) => (
                         <th key={s.id} className="w-40 px-3 py-2.5 text-right font-medium">{s.name}</th>
                       ))}
-                      <th className="w-[7.5rem] px-3 py-2.5 text-right font-medium">Flete / UoM</th>
+                      <th
+                        className="w-[8.5rem] px-3 py-2.5 text-right font-medium"
+                        title="El flete que NO está dentro del costo (Decisión 101). Si la mercancía sale de bodega, lo de traerla ya está adentro del costo del inventario y aquí solo va lo de llevársela al cliente."
+                      >
+                        Flete al cliente / UoM
+                      </th>
                     </tr>
                   </thead>
                   <tbody>

@@ -907,23 +907,49 @@ todo es del pedido, como hoy.
 
 **Pieza 1 CONSTRUIDA el 21-sep-2026** (migración 0050, `trip-cost.ts`): se
 captura lo que costó cada viaje —flete y maniobras, un renglón por recepción—
-y **no mueve un peso** de ningún precio, costo ni utilidad. Siguen abiertas la
-pieza 2 (el costo del inventario **con** el apagador del doble conteo en el
-mismo cambio), la 3 (el flete obligatorio al cotizar, con sus dos salidas) y la
-4 (el reparto automático, que espera lo del peso por unidad).
+y **no mueve un peso** de ningún precio, costo ni utilidad. **Pieza 2 CONSTRUIDA el 21-sep-2026** (migración 0051, Decisión 101): el flete
+de entrada y las maniobras entran al costo del kardex repartidos entre lo que
+vino en ese camión, **y el apagador del doble conteo va en el mismo cambio**.
+El reparto resultó estar aquí adentro, así que la vieja pieza 4 ya no existe
+por separado. Queda abierta la **pieza 3** (el flete al cliente obligatorio al
+cotizar, con sus dos salidas: «lo pone el proveedor» y «el cliente lo
+recoge»).
 
-*Anotado para la pieza 2, de la revisión de dinero:* si se revierte una
-recepción y se vuelve a recibir, se mina un `RCP` nuevo y **el viaje viejo
-sigue vivo con su importe** junto al nuevo. Hoy nadie los suma, así que no
-mueve nada; la pieza 2 tiene que decidir explícitamente si un viaje revertido
-entra al costo del inventario. Y su prueba necesita el motor congelado **al
-centavo** (patrón `erp-circuito-lineal`): las de la pieza 1 congelan por texto,
-que alcanza para probar que nada se movió pero no para probar una fórmula.
+*Resuelto en la pieza 2:* el viaje viejo sigue vivo con su importe después de
+revertir, pero ya no importa — cada movimiento del kardex lleva su propio
+`freight_unit`, así que la reversa saca exactamente lo que metió y el viaje
+nuevo entra con el suyo. La prueba del motor congelado **al centavo** existe
+(`scripts/erp-flete-al-kardex.test.mjs`, patrón `erp-circuito-lineal`).
 
-*Pendiente del dueño para la pieza 4:* ¿se captura el **peso por unidad** en el
-catálogo (saco 50 kg, tambo 200 kg) para poder repartir un camión con unidades
-mezcladas? Hoy el catálogo guarda la unidad y **ninguna columna de peso**
-—verificado en las 49 migraciones—, y hay unas 82 capturas por delante.
+**ABIERTO — lo que el fletero cobró de MÁS que lo planeado no resta en ningún
+lado.** El gasto ligado a un viaje sale de la utilidad del pedido (ya está
+dentro del costo de la mercancía), pero si se planearon $2,000 y el fletero
+cobró $2,600, esos $600 quedan fuera de los dos y la utilidad sale alta. **Y es peor si la recepción se revierte:** ahí el flete ya no está en ningún costo y el gasto sigue excluido, así que faltan los $2,600 completos. El
+intento de netearlo se revirtió el 21-sep-2026 tras un NO PASA de la revisión:
+restaba lo capitalizado a CADA gasto del viaje en vez de al conjunto (dos
+gastos movían la utilidad $2,500 según cómo se capturaron), neteaba contra
+viajes revertidos, y dejaba colar un gasto de viaje como flete del pedido. El
+arreglo bueno va **por viaje, no por gasto**, y necesita su propio motor
+congelado: es su pieza. Mitiga que `/compras` sí enseña «Pagado $X» junto al
+viaje, y que el resultado de la empresa no se descuadra (su costo son las
+facturas del proveedor, no el kardex).
+
+**ABIERTO, anotado de la pasada de lectura de la pieza 2 y NO resuelto:** un
+camión que trae DOS órdenes de compra. `receivePartial` recibe un solo `poId` y
+el costo del viaje es único por evento, así que no hay dónde decir «estos dos
+eventos son el mismo camión»: tecleado en los dos, el dinero del fletero se
+cuenta doble. *Para el dueño: ¿pasa seguido?* También queda abierto el desfase
+de mes entre el gasto del fletero (resta el mes que se paga) y el costo puesto
+(llega a la tarjeta cuando se vende) — no es doble conteo, son dos cortes del
+mismo hecho, y ya existía con la compra misma.
+
+**El peso por unidad, decidido el 21-sep con criterio del dueño:** se reparte
+por **peso**, porque el peso es lo que consume el camión; **nunca por importe**
+(sesga el costo de la urea hacia abajo y el del producto caro hacia arriba). La
+columna existe (`products.unit_weight`, 0051) y es **nullable**: no se captura
+de entrada para los 82 productos, se pide **solo** cuando un camión trae
+unidades mezcladas y falta ese peso — ahí el reparto se detiene y lo pide, o se
+teclea a mano. Falta la pantalla que lo pida en ese momento y lo guarde.
 
 *Anotado para la pieza del lado venta:* `quote_lines.other_cost` existe, entra
 al costo puesto del precio (`landed = costo + flete + otros`) y **ninguna

@@ -440,7 +440,11 @@ test("la revisión acepta partidas nuevas, les resuelve costo y actualiza el ped
   const body = fnBody(ops, "reviseQuote");
   assert.ok(body.includes("const nuevasIds = data.lines.filter((l) => !oldLines.some((o) => o.product_id === l.productId))"), "detecta las partidas nuevas");
   assert.ok(body.includes("resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost }).cost"), "costo por el orden único (kardex → referencia)");
-  assert.ok(body.includes("insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price)"), "entra a la cotización");
+  // Decisión 101: la partida nueva toma el costo del catálogo, que desde la
+  // pieza 2 es costo PUESTO — así que congela también cuánto de él es flete,
+  // o al cotizarla se sumaría el flete dos veces.
+  assert.ok(body.includes("insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in)"), "entra a la cotización");
+  assert.ok(body.includes("${fleteDentroNuevo(line.productId)})"), "con el apagador congelado");
   assert.ok(body.includes("partida nueva ×"), "queda en la bitácora de la revisión");
   assert.ok(body.includes("await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev)"), "a crédito sigue exigiendo costo");
   // Sincronía con el pedido en borrador.

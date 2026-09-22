@@ -2,7 +2,8 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql, type Sql } from "@/lib/db";
-import { assertCan } from "@/lib/erp/acl";
+import { activeMember, assertCan, canSeeCosts } from "@/lib/erp/acl";
+import { maskAmounts } from "@/lib/erp/audit-mask";
 
 async function cid(sql: Sql, userId: string) {
   const rows = await sql<{ company_id: number }>`select company_id from members where user_id = ${userId} and status = 'active' limit 1`;
@@ -48,6 +49,32 @@ export async function writeAudit(
   `;
 }
 
+/**
+ * Acciones cuyo DETALLE lleva un costo de compra. Quien no puede ver esos
+ * costos (regla 10) ve el renglón —quién, qué y cuándo— pero no el importe.
+ * Si se agrega una acción que imprima un costo de compra y no se pone aquí, el
+ * número se sale por la bitácora sin que nadie lo note.
+ */
+const COSTO_DE_COMPRA = new Set([
+  // El costo del viaje (Decisiones 100 y 101).
+  "costo-de-viaje",
+  "costo-de-viaje-corregido",
+  "costo-de-viaje-planeado",
+  "costo-de-viaje-planeado-corregido",
+  "recibir",
+  "flete-de-solicitud",
+  // Las que ya imprimían un costo de compra desde antes. Estaban abiertas y se
+  // cierran aquí: la lista solo sirve si está completa.
+  "elegir-proveedor",            // «costo 4500 → 4200», el precio del proveedor
+  "precio-producto",             // «costo 500 → 520» y el de referencia
+  "crear-oc",                    // el total de la orden de compra
+  "cancelar-oc",
+  "revertir-fp",
+  "revertir-recepcion",          // «promedio 9357.1429», que ya incluye el flete
+  "devolucion-sin-costo-origen", // «entró al promedio de hoy 520.0000»
+  "devolver",                    // «costo de salida 520.0000», que ya trae el flete adentro
+]);
+
 export const listAudit = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -68,6 +95,8 @@ export const listAudit = createServerFn({ method: "POST" })
     const companyId = await cid(sql, context.userId);
     await assertCan(sql, context.userId, "settings", "view");
     await ensureAudit(sql);
+    const me = await activeMember(sql, context.userId);
+    const verCostos = canSeeCosts(me.role);
     const q = (data?.q ?? "").trim();
     const action = (data?.action ?? "").trim();
     const userId = (data?.userId ?? "").trim();
@@ -97,7 +126,12 @@ export const listAudit = createServerFn({ method: "POST" })
       from audit_log a
       left join members m on m.user_id = a.user_id and m.company_id = a.company_id
       where a.company_id = ${companyId}
-        and (${q} = '' or a.name ilike ${"%" + q + "%"} or a.detail ilike ${"%" + q + "%"})
+        and (${q} = '' or a.name ilike ${"%" + q + "%"} or (
+          -- El buscador no puede ser un oráculo del número que la máscara
+          -- esconde: quien no ve costos tecleaba el importe y veía si el
+          -- renglón aparecía. Para esas acciones, solo se busca por nombre.
+          a.detail ilike ${"%" + q + "%"} and (${verCostos} or not (a.action = any(${[...COSTO_DE_COMPRA]})))
+        ))
         and (${action} = '' or a.action = ${action})
         and (${userId} = '' or a.user_id = ${userId})
         and (${fromTs}::timestamptz is null or a.created_at >= ${fromTs}::timestamptz)
@@ -112,5 +146,18 @@ export const listAudit = createServerFn({ method: "POST" })
       select m.user_id, coalesce(nullif(m.display_name,''), nullif(m.email,''), m.user_id) as who
       from members m where m.company_id = ${companyId} order by who
     `;
-    return { rows, actions: actions.map((a) => a.action), users, limit, offset };
+    // EL MISMO NÚMERO QUE UNA PUERTA ESCONDE, LA OTRA NO LO PUBLICA (regla 10,
+    // 21-sep-2026). La bitácora pide `settings:view`, que la plantilla de
+    // administración tiene — pero administración NO ve costos de compra. Sin
+    // esta máscara, el costo de un viaje enmascarado en Compras se leía
+    // completo aquí, con su importe.
+    // Se tapa el IMPORTE, no el renglón. Tapar el detalle completo escondía
+    // cosas que administración sí necesita y que no son un costo: el motivo
+    // obligatorio de una cancelación, y la liga «Recepción RCP/0001 · nace
+    // FP-0001 por pagar», que es su trabajo. Los importes se imprimen siempre
+    // con decimales (`toFixed`), los folios nunca: por ahí se distinguen.
+    const visibles = verCostos
+      ? rows
+      : rows.map((r) => (COSTO_DE_COMPRA.has(r.action) ? { ...r, detail: maskAmounts(r.detail) } : r));
+    return { rows: visibles, actions: actions.map((a) => a.action), users, limit, offset };
   });

@@ -1,4 +1,5 @@
 import { creditDetail, creditExceededMessage, creditExceededSummary, creditExposure, creditRoom } from "@/lib/erp/credit-limit";
+import { isStop, splitTripCost, tripShare } from "@/lib/erp/trip-split";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getSql, withTx } from "@/lib/db";
@@ -11,7 +12,7 @@ import { seedAcl, type AppRole } from "@/lib/erp/acl";
 import { activeMember, assertCan, canRevert, canSeeCosts, canSeeSalePrices, memberScope } from "@/lib/erp/acl";
 import { applyInvoicePayment, issueMoraInvoice, policy } from "@/lib/erp/ops";
 import { addDays, nearestRate, NO_MORA_POLICY, requireRate } from "@/lib/erp/credit";
-import { avgCostAt, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
+import { avgCostAt, deliveredFreightUnit, deliveredUnitCost, ensureInvoiceExtras, ensureStock, postStock, refreshInvoiceResidual, seedOpeningLedger } from "@/lib/erp/stock";
 import { nextDocFolio } from "@/lib/erp/folios";
 import { costToMxn, fxAt, isUsdFx, loadFxTable, missingFxMessage, receiptUnitCostMxn, saleToMxn, supplierInvoiceAmounts } from "@/lib/erp/fx";
 import { writeAudit } from "@/lib/erp/audit";
@@ -837,6 +838,13 @@ export const saveProduct = createServerFn({ method: "POST" })
       // Decisión 77: se captura declarando moneda y se guarda en pesos.
       ref_cost_currency: z.enum(["MXN", "USD"]).optional(),
       ref_cost_fx: z.number().positive().optional(),
+      // Decisión 101: cuánto pesa UNA unidad, para poder repartir el flete de
+      // un camión con unidades mezcladas (10 toneladas y 200 litros no se
+      // suman). Opcional: no se captura de entrada para todo el catálogo, se
+      // pide cuando un viaje se topa con que le falta. `null` explícito lo
+      // borra; no mandarlo lo deja como estaba.
+      unit_weight: z.number().positive().nullable().optional(),
+      weight_uom: z.string().optional(),
     }),
   )
   .handler(async ({ context, data }) => {
@@ -881,6 +889,13 @@ export const saveProduct = createServerFn({ method: "POST" })
         update products set code=${code}, name=${data.name}, category=${category},
           product_type=${data.product_type}, uom=${data.uom}, cost=${data.cost},
           list_price=${data.list_price}, min_stock=${data.min_stock},
+          unit_weight = case when ${data.unit_weight === undefined} then unit_weight else ${data.unit_weight ?? null} end,
+          -- El peso se captura SIEMPRE en kilos (así lo pide la pantalla), y
+          -- se deja escrito: todo el reparto por peso supone que los productos
+          -- de un camión están en la misma unidad, y un producto en kilos
+          -- junto a otro en libras repartiría mal sin avisar.
+          weight_uom = case when ${data.unit_weight === undefined} then weight_uom
+            else (case when ${data.unit_weight ?? null}::numeric is null then null else 'KG' end) end,
           ref_cost = coalesce(${data.ref_cost ?? null}, ref_cost),
           ref_cost_currency = coalesce(${refCur}, ref_cost_currency),
           ref_cost_fx = case when ${refCur}::text is null then ref_cost_fx else ${refFx} end
@@ -956,8 +971,10 @@ export const getProduct = createServerFn({ method: "POST" })
       list_price: string;
       min_stock: string;
       on_hand: string;
+      unit_weight: string | null;
     }>`
       select p.id, p.code, p.name, p.category, p.product_type, p.uom, p.cost::text, p.list_price::text, p.min_stock::text,
+        p.unit_weight::text as unit_weight,
         coalesce(p.ref_cost,0)::text as ref_cost,
         coalesce((select sum(quantity) from stock_quants q where q.product_id = p.id),0)::text as on_hand
       from products p
@@ -1442,6 +1459,89 @@ export const setPurchaseFxRate = createServerFn({ method: "POST" })
  * entraba al kardex sin cuenta por pagar. Dejarla exportada era dejar la
  * trampa puesta para el siguiente que la llamara.
  */
+/**
+ * LA PARTE DEL FLETE QUE LE TOCA A ESTA RECEPCIÓN (Decisión 101).
+ *
+ * El flete planeado es de la ORDEN: «lo que va a costar traer esta compra».
+ * Si llega en dos camiones, cada recepción capitaliza la parte proporcional a
+ * lo que trajo — tomarlo completo las dos veces capitalizaría el doble de lo
+ * que se le pagó al fletero, y ese error sube directo al precio del cliente.
+ *
+ * La última recepción se lleva EXACTAMENTE lo que falte, para que la suma
+ * cierre al centavo contra lo planeado y el redondeo no deje centavos sueltos
+ * ni de más. Y nunca se capitaliza más de lo planeado: si alguien sube el
+ * número a media orden, lo ya capitalizado no se puede deshacer.
+ */
+async function tripShareOfReceipt(
+  sql: Sql,
+  companyId: number,
+  poId: number,
+  lines: Array<{ lineId: number; qty: number }>,
+  plan: { freight: number; handling: number },
+) {
+  const ls = await sql<{ id: number; product_id: number; qty: string; qty_received: string; qty_closed_short: string; uom: string; unit_weight: string | null }>`
+    select pl.id, pl.product_id, pl.qty::text, pl.qty_received::text,
+      coalesce(pl.qty_closed_short,0)::text as qty_closed_short,
+      coalesce(nullif(pl.uom,''), p.uom, '') as uom, p.unit_weight::text as unit_weight
+    from purchase_lines pl join products p on p.id = pl.product_id
+    where pl.po_id = ${poId}
+  `;
+  const linea = (id: number) => ls.find((x) => x.id === id);
+  // LA MISMA BASE que el reparto dentro del camión (`splitBasis`): por peso,
+  // porque el peso es lo que consume el camión. Sumar cantidades crudas
+  // mezclaría toneladas con litros — con 10 TON de urea y 1,000 L de foliar,
+  // al camión de urea le cargaba $207.92 de $21,000 cuando le tocan
+  // $19,090.91, y el precio de la urea salía $2,221 por tonelada por debajo.
+  const share = tripShare({
+    order: ls.map((x) => ({ lineId: x.id, qty: Number(x.qty), uom: x.uom, unitWeight: x.unit_weight == null ? null : Number(x.unit_weight) })),
+    now: lines.map((l) => {
+      const x = linea(l.lineId);
+      return { lineId: l.lineId, qty: l.qty, uom: x?.uom ?? "", unitWeight: x?.unit_weight == null ? null : Number(x.unit_weight) };
+    }),
+  });
+  if (isStop(share)) throw new Error(share.stop);
+
+  // Lo YA capitalizado se DERIVA, y una recepción revertida no cuenta: su
+  // mercancía regresó, así que su parte del flete vuelve a estar disponible.
+  // Sin esto, la salida que el sistema nombra —revertir y volver a recibir—
+  // dejaba la mercancía entrando SIN flete.
+  const ya = await sql<{ f: string; h: string }>`
+    select coalesce(sum(coalesce(t.freight,0)),0)::text as f, coalesce(sum(coalesce(t.handling,0)),0)::text as h
+    from trip_costs t
+    where t.company_id = ${companyId} and t.po_id = ${poId} and t.capitalized_at is not null
+      and exists (
+        select 1 from stock_moves m
+        where m.company_id = t.company_id and m.event_ref = t.event_ref and m.move_type = 'receipt'
+          and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+      )
+  `;
+  const restaF = Math.max(0, Math.round((plan.freight - Number(ya[0]?.f ?? 0)) * 100) / 100);
+  const restaH = Math.max(0, Math.round((plan.handling - Number(ya[0]?.h ?? 0)) * 100) / 100);
+  // EL ATAJO DEL RESTO, ACOTADO (21-sep-2026). Cuando la orden se recibe
+  // COMPLETA, la última recepción se lleva lo que falte para que la suma
+  // cierre al centavo contra lo planeado.
+  //
+  // Pero solo si llegó completa. Contar lo cerrado corto como «ya no queda
+  // pendiente» hacía que el mismo hecho diera dos costos distintos según el
+  // orden en que se usaron dos pantallas: llegan 50 de 100 y los otros 50 ya
+  // no van a llegar → recibir y después cerrar corto capitalizaba $1,000
+  // ($520/saco); cerrar corto y después recibir, $2,000 ($540/saco). Veinte
+  // pesos por saco, escritos en el kardex para siempre, decididos por el orden
+  // de captura.
+  //
+  // Con esto, el reparto va SIEMPRE contra la cantidad original de la orden:
+  // los mismos hechos dan el mismo costo. El flete de lo que nunca llegó no se
+  // capitaliza —no hubo mercancía que traer— y se queda como gasto del viaje.
+  const cerrado = ls.reduce((a, x) => a + Number(x.qty_closed_short), 0);
+  const pend = ls.reduce((a, x) => a + Number(x.qty) - Number(x.qty_received) - Number(x.qty_closed_short), 0);
+  const pendienteDespues = pend - lines.reduce((a, l) => a + l.qty, 0);
+  if (pendienteDespues <= 0.0001 && cerrado <= 0.0001) return { freight: restaF, handling: restaH };
+  return {
+    freight: Math.min(restaF, Math.round(plan.freight * share.frac * 100) / 100),
+    handling: Math.min(restaH, Math.round(plan.handling * share.frac * 100) / 100),
+  };
+}
+
 export const receivePurchase = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(z.object({
@@ -1449,14 +1549,21 @@ export const receivePurchase = createServerFn({ method: "POST" })
     // BLOQUE DE PARCIALES, paso 1: cantidad por partida, opcional. Sin esto,
     // el camino de hoy — recibir todo lo pendiente — no cambia en nada.
     lines: z.array(z.object({ lineId: z.number(), qty: z.number().positive() })).optional(),
+    // Decisión 101: el costo del viaje NO se manda por aquí. Recibir pide solo
+    // `purchases:deliver` —el almacén—, que por la regla 10 no ve costos;
+    // aceptarlo aquí sería una tercera puerta al mismo número sin el candado
+    // que tienen las otras dos (regla 5g: una puerta nueva al dinero nace con
+    // los candados de la vieja o no nace). Se captura en la orden de compra.
   }))
   .handler(async ({ context, data }) => {
     return withTx(async (sql) => {
     const m = await requireCompany(sql, context.userId);
     await assertCan(sql, context.userId, "purchases", "deliver");
-    const po = await sql<{ id: number; location_id: number; name: string; state: string; fulfill_kind: string; currency: string; fx_rate: string }>`
+    const po = await sql<{ id: number; location_id: number; name: string; state: string; fulfill_kind: string; currency: string; fx_rate: string; planned_freight: string | null; planned_handling: string | null }>`
       select id, location_id, name, state, coalesce(fulfill_kind,'inventory') as fulfill_kind,
-        coalesce(currency,'MXN') as currency, coalesce(fx_rate,1)::text as fx_rate from purchase_orders
+        coalesce(currency,'MXN') as currency, coalesce(fx_rate,1)::text as fx_rate,
+        planned_freight::text as planned_freight, planned_handling::text as planned_handling
+      from purchase_orders
       where id = ${data.poId} and company_id = ${m.company_id}
       for update
     `;
@@ -1485,6 +1592,31 @@ export const receivePurchase = createServerFn({ method: "POST" })
       : pend.map((l) => ({ lineId: l.id, qty: Number(l.pending) })).filter((l) => l.qty > 0.0001);
     if (!lines.length) throw new Error("No queda nada pendiente por recibir en esta orden.");
     const parcial = Boolean(data.lines && data.lines.length);
+    // DECISIÓN 101 — lo que costó traer el viaje entra al costo EN EL ACTO de
+    // recibir: después ya no puede, porque el promedio del inventario no se
+    // corrige hacia atrás (regla 2). Y quien recibe es el almacén, que por la
+    // regla 10 no ve costos. Por eso se captura antes, en la orden de compra.
+    //
+    // Sin capturar, recibir SE DETIENE — igual que ya se detiene sin plazo de
+    // pago del proveedor (Decisión 30) —, y el mensaje nombra la salida. Un
+    // cero se teclea a propósito cuando el proveedor la trae sin cobrar flete;
+    // vacío no es cero.
+    //
+    // Y es de la ORDEN, no de cada camión: si un pedido llega en dos viajes,
+    // cada recepción capitaliza LA PARTE QUE LE TOCA. Tomarlo completo las dos
+    // veces capitalizaría $4,000 sobre $2,000 pagados y le subiría el precio
+    // al cliente $23.53 por saco — justo lo que esta pieza existe para evitar.
+    const plan = po[0].planned_freight != null && po[0].planned_handling != null
+      ? { freight: Number(po[0].planned_freight), handling: Number(po[0].planned_handling) }
+      : null;
+    const trip = plan ? await tripShareOfReceipt(sql, m.company_id, po[0].id, lines, plan) : null;
+    if (!trip) {
+      throw new Error(
+        `Antes de recibir ${po[0].name} hay que capturar lo que costó traerla: el flete y las maniobras del viaje. ` +
+        `Se capturan en la orden de compra, y si el proveedor la trae sin cobrar flete se teclea 0. ` +
+        `Después de recibir ya no puede entrar al costo de la mercancía.`,
+      );
+    }
     const r = await receivePartial(sql, {
       companyId: m.company_id,
       userId: context.userId,
@@ -1492,6 +1624,7 @@ export const receivePurchase = createServerFn({ method: "POST" })
       poName: po[0].name,
       locationId: po[0].location_id,
       lines,
+      trip,
     });
     await writeAudit(sql, {
       companyId: m.company_id,
@@ -1500,7 +1633,8 @@ export const receivePurchase = createServerFn({ method: "POST" })
       entity: "purchase",
       entityId: po[0].id,
       name: po[0].name,
-      detail: `${parcial ? "Recepción parcial" : "Recepción"} ${r.eventRef}${r.fp ? ` · nace ${r.fp} por pagar` : ""}`,
+      detail: `${parcial ? "Recepción parcial" : "Recepción"} ${r.eventRef}${r.fp ? ` · nace ${r.fp} por pagar` : ""}` +
+        ` · costo del viaje ${(trip.freight + trip.handling).toFixed(2)} (flete ${trip.freight.toFixed(2)} + maniobras ${trip.handling.toFixed(2)})`,
     });
     return { ok: true, fp: r.fp, eventRef: r.eventRef };
     });
@@ -1522,6 +1656,13 @@ export async function receivePartial(
     poName: string;
     locationId: number;
     lines: Array<{ lineId: number; qty: number }>;
+    /**
+     * Lo que costó traer ESTE viaje (Decisión 101). Llega resuelto por el
+     * llamador —de la orden de compra o capturado al recibir—, no se lee de
+     * `trip_costs` aquí: el folio del evento se mina en esta misma función, así
+     * que el renglón todavía no existe cuando haría falta.
+     */
+    trip?: { freight: number; handling: number } | null;
   },
 ) {
   const rows = await sql<{ last_number: number }>`
@@ -1538,32 +1679,92 @@ export async function receivePartial(
   `;
   if (!poFx[0]) throw new Error("Orden de compra no encontrada");
 
-  const received: Array<{ productId: number; qty: number; unitPrice: number }> = [];
-  for (const l of opts.lines) {
-    const line = await sql<{ id: number; product_id: number; qty: string; qty_received: string; qty_closed_short: string; unit_price: string }>`
-      select id, product_id, qty::text, qty_received::text, coalesce(qty_closed_short,0)::text as qty_closed_short, unit_price::text from purchase_lines
-      where id = ${l.lineId} and po_id = ${opts.poId}
-      for update
+  // DOS PASADAS, Decisión 101. El reparto del flete necesita conocer TODAS las
+  // partidas del viaje antes de postear la primera: si una se posteara antes
+  // de saber qué más venía en el camión, cargaría un flete que no le toca.
+  //
+  // Y antes de nada, agregar por partida: el validador no exige que `lineId`
+  // venga una sola vez. Hoy no importa porque el `update` de `qty_received`
+  // ocurre dentro de la misma vuelta; al partir el bucle, dos renglones con el
+  // mismo `lineId` se validarían los dos contra el MISMO pendiente y meterían
+  // el doble al kardex y a la factura del proveedor.
+  const porPartida = new Map<number, number>();
+  for (const l of opts.lines) porPartida.set(l.lineId, (porPartida.get(l.lineId) ?? 0) + l.qty);
+
+  // Pasada 1: bloquear, validar y juntar. `uom` y el peso por unidad vienen de
+  // aquí porque son lo que decide cómo se reparte el viaje (Decisión 100).
+  const plan: Array<{ lineId: number; productId: number; qty: number; unitPrice: string; uom: string; unitWeight: number | null }> = [];
+  for (const [lineId, qty] of porPartida) {
+    const line = await sql<{
+      id: number; product_id: number; qty: string; qty_received: string; qty_closed_short: string;
+      unit_price: string; uom: string; unit_weight: string | null;
+    }>`
+      select pl.id, pl.product_id, pl.qty::text, pl.qty_received::text,
+        coalesce(pl.qty_closed_short,0)::text as qty_closed_short, pl.unit_price::text,
+        coalesce(nullif(pl.uom,''), p.uom, '') as uom, p.unit_weight::text as unit_weight
+      from purchase_lines pl join products p on p.id = pl.product_id
+      where pl.id = ${lineId} and pl.po_id = ${opts.poId}
+      for update of pl
     `;
     if (!line[0]) throw new Error("Esa partida no está en la orden");
     // Paso 7: lo cerrado corto no se recibe (ya nunca va a llegar).
     const pending = Number(line[0].qty) - Number(line[0].qty_received) - Number(line[0].qty_closed_short);
-    if (l.qty > pending + 0.0001) {
+    if (qty > pending + 0.0001) {
       throw new Error(`No puedes recibir más de lo pendiente (${pending}) en ${line[0].product_id}`);
     }
+    plan.push({
+      lineId,
+      productId: line[0].product_id,
+      qty,
+      unitPrice: line[0].unit_price,
+      uom: line[0].uom,
+      unitWeight: line[0].unit_weight == null ? null : Number(line[0].unit_weight),
+    });
+  }
+
+  // El reparto del costo del viaje entre lo que vino en ESTE camión. Se detiene
+  // (no adivina) cuando el camión trae unidades mezcladas y falta un peso.
+  const tripTotal = Math.round(((opts.trip?.freight ?? 0) + (opts.trip?.handling ?? 0)) * 100) / 100;
+  const split = splitTripCost({ total: tripTotal, lines: plan.map((x) => ({ lineId: x.lineId, qty: x.qty, uom: x.uom, unitWeight: x.unitWeight })) });
+  if (isStop(split)) throw new Error(split.stop);
+  const fleteUnit = new Map(split.perLine.map((x) => [x.lineId, x.unit]));
+
+  // Pasada 2: postear. El flete se suma FUERA de `receiptUnitCostMxn`: esa
+  // función es donde el precio del proveedor deja de ser dólares, y el flete se
+  // paga en pesos — meterlo adentro lo multiplicaría por el tipo de cambio.
+  const received: Array<{ productId: number; qty: number; unitPrice: number }> = [];
+  for (const x of plan) {
     await postStock(sql, {
       companyId: opts.companyId,
       userId: opts.userId,
       moveType: "receipt",
       origin: opts.poName,
-      productId: line[0].product_id,
-      quantity: l.qty,
+      productId: x.productId,
+      quantity: x.qty,
       locationTo: opts.locationId,
-      unitCost: receiptUnitCostMxn({ unitPrice: line[0].unit_price, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName }),
+      unitCost: receiptUnitCostMxn({ unitPrice: x.unitPrice, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName }) + (fleteUnit.get(x.lineId) ?? 0),
+      freightUnit: fleteUnit.get(x.lineId) ?? 0,
       eventRef,
     });
-    await sql`update purchase_lines set qty_received = qty_received + ${l.qty} where id = ${l.lineId}`;
-    received.push({ productId: line[0].product_id, qty: l.qty, unitPrice: Number(line[0].unit_price) });
+    await sql`update purchase_lines set qty_received = qty_received + ${x.qty} where id = ${x.lineId}`;
+    // NUNCA el flete aquí: de esto nace la cuenta por pagar, y al proveedor se
+    // le debe su mercancía, no lo que cobró el fletero.
+    received.push({ productId: x.productId, qty: x.qty, unitPrice: Number(x.unitPrice) });
+  }
+
+  // El viaje queda escrito con lo que de verdad se capitalizó, en la MISMA
+  // transacción: un viaje capturado después de recibir no puede llegar al
+  // costo (el promedio no se corrige hacia atrás), y sin esta marca se vería
+  // idéntico a uno que sí entró.
+  if (tripTotal > 0.0001 || opts.trip) {
+    await sql`
+      insert into trip_costs (company_id, event_ref, po_id, freight, handling, created_by, capitalized_at, capitalized_amount)
+      values (${opts.companyId}, ${eventRef}, ${opts.poId}, ${opts.trip?.freight ?? null}, ${opts.trip?.handling ?? null},
+        ${opts.userId}, now(), ${tripTotal})
+      on conflict (company_id, event_ref) do update set
+        freight = excluded.freight, handling = excluded.handling,
+        capitalized_at = excluded.capitalized_at, capitalized_amount = excluded.capitalized_amount
+    `;
   }
 
   const remaining = await sql<{ n: number }>`
@@ -2494,6 +2695,10 @@ export const returnSale = createServerFn({ method: "POST" })
         // devolución: entra al promedio de hoy — que es lo que postStock hace
         // solo — y se avisa en pantalla y en bitácora, con folio y número.
         const exitCost = await deliveredUnitCost(sql, m.company_id, so[0].name, src.product_id);
+        // Decisión 101: regresa con el MISMO desglose con el que salió. Si el
+        // costo trae flete y el desglose no, el promedio queda explicado a
+        // medias en cuanto entre el siguiente camión.
+        const exitFreight = await deliveredFreightUnit(sql, m.company_id, so[0].name, src.product_id);
         const avgBefore = await avgCostAt(sql, m.company_id, src.product_id, so[0].location_id);
         const mv = await postStock(sql, {
           companyId: m.company_id,
@@ -2504,6 +2709,7 @@ export const returnSale = createServerFn({ method: "POST" })
           quantity: take.qty,
           locationTo: so[0].location_id,
           unitCost: exitCost ?? undefined,
+          freightUnit: exitFreight ?? undefined,
           date: today,
         });
         const avgAfter = await avgCostAt(sql, m.company_id, src.product_id, so[0].location_id);

@@ -25,6 +25,41 @@ export function resolveCost(i: { avgCost: number | string | null | undefined; re
   return { cost: 0, source: "ninguno" as CostSource };
 }
 
+/**
+ * CUÁNTO FLETE DE ENTRADA TRAE ADENTRO ESE COSTO (Decisión 101) — el apagador
+ * del doble conteo, en un solo lugar.
+ *
+ * Desde la pieza 2, el promedio del kardex es costo PUESTO: ya lleva el flete
+ * de traer la mercancía. La cotización toma ese costo y le suma el flete otra
+ * vez (`landed = costo + flete + otros`), así que sin esta cuenta el mismo
+ * dinero se cobraría dos veces — $23.53 por saco en un camión de 100 sacos a
+ * $500 con $2,000 de flete.
+ *
+ * Solo el promedio del kardex lo trae. El costo de REFERENCIA es precio de
+ * proveedor (para lo que nunca entra a bodega), y un costo capturado a mano es
+ * lo que alguien tecleó: ninguno de los dos lleva flete adentro.
+ *
+ * Se devuelve para CONGELARSE con la partida (`quote_lines.cost_freight_in`),
+ * no para recalcularse después: el costo se congela al cotizar y el promedio
+ * de hoy ya no es el de entonces.
+ */
+export function freightInsideCost(i: {
+  /** El costo que se va a usar, ya resuelto. */
+  cost: number;
+  source: CostSource;
+  /** `products.freight_in_cost`: cuánto del promedio de hoy es flete. */
+  avgFreight: number | string | null | undefined;
+  /** true = alguien tecleó el costo; entonces no viene del kardex. */
+  captured: boolean;
+}) {
+  if (i.captured || i.source !== "kardex") return 0;
+  const f = Number(i.avgFreight) || 0;
+  if (!(f > 0)) return 0;
+  // Nunca más que el costo mismo: si por un dato viejo el flete saliera mayor,
+  // apagar de más dejaría el precio por debajo del costo.
+  return Math.min(Math.max(0, f), Math.max(0, i.cost));
+}
+
 export function costSourceLabel(source: CostSource) {
   if (source === "kardex") return "promedio móvil del kardex";
   if (source === "referencia") return "costo de referencia";
@@ -36,12 +71,15 @@ export async function ensureRefCost(sql: Sql) {
   await sql`alter table products add column if not exists ref_cost numeric(14,4) not null default 0`;
 }
 
-export type ProductCostRow = { id: number; code: string; name: string; cost: string; ref_cost: string };
+export type ProductCostRow = { id: number; code: string; name: string; cost: string; ref_cost: string; freight_in_cost: string };
 
 export async function productCosts(sql: Sql, companyId: number) {
   await ensureRefCost(sql);
+  // `freight_in_cost` (migración 0051): cuánto del promedio es flete de
+  // entrada. Es el número que apaga la segunda suma al cotizar.
   return await sql<ProductCostRow>`
-    select id, code, name, coalesce(cost,0)::text as cost, coalesce(ref_cost,0)::text as ref_cost
+    select id, code, name, coalesce(cost,0)::text as cost, coalesce(ref_cost,0)::text as ref_cost,
+      coalesce(freight_in_cost,0)::text as freight_in_cost
     from products where company_id = ${companyId}
   `;
 }

@@ -159,14 +159,32 @@ export async function deliveredUnitCost(sql: Sql, companyId: number, origin: str
   return weightedCost(rows.map((r) => ({ qty: Number(r.quantity), unitCost: Number(r.unit_cost) })));
 }
 
+/**
+ * La parte de FLETE del costo con el que salió (Decisión 101), ponderada igual
+ * que el costo. Una devolución regresa con el costo con el que salió (Decisión
+ * 9) y ese costo traía flete: suponerlo cero diluiría el desglose del promedio
+ * sin que nadie lo notara.
+ */
+export async function deliveredFreightUnit(sql: Sql, companyId: number, origin: string, productId: number) {
+  const rows = await sql<{ quantity: string; freight_unit: string | null }>`
+    select quantity::text, freight_unit::text as freight_unit
+    from stock_moves
+    where company_id = ${companyId} and origin = ${origin}
+      and product_id = ${productId} and move_type = 'delivery' and freight_unit is not null
+    order by id
+  `;
+  if (!rows.length) return null;
+  return weightedCost(rows.map((r) => ({ qty: Number(r.quantity), unitCost: Number(r.freight_unit) })));
+}
+
 /** Promedio de una bodega para un producto, tal como está ahora (Decisión 20: se enseña). */
 export async function avgCostAt(sql: Sql, companyId: number, productId: number, locationId: number) {
   return (await readQuant(sql, companyId, productId, locationId)).avg;
 }
 
 async function readQuant(sql: Sql, companyId: number, productId: number, locationId: number) {
-  const rows = await sql<{ quantity: string; avg_cost: string }>`
-    select quantity::text, coalesce(avg_cost, 0)::text as avg_cost
+  const rows = await sql<{ quantity: string; avg_cost: string; avg_freight: string }>`
+    select quantity::text, coalesce(avg_cost, 0)::text as avg_cost, coalesce(avg_freight, 0)::text as avg_freight
     from stock_quants
     where company_id = ${companyId} and product_id = ${productId} and location_id = ${locationId}
   `;
@@ -175,33 +193,50 @@ async function readQuant(sql: Sql, companyId: number, productId: number, locatio
   return {
     qty: Number(rows[0]?.quantity ?? 0),
     avg: Number(rows[0]?.avg_cost ?? 0) || fallback,
+    // Sin respaldo del catálogo a propósito: un promedio de costo que no
+    // existe se puede rellenar con el del catálogo, pero «cuánto de eso era
+    // flete» no se puede adivinar — y adivinarlo lo restaría dos veces.
+    avgFreight: Number(rows[0]?.avg_freight ?? 0),
     fallback,
   };
 }
 
-async function writeQuant(sql: Sql, companyId: number, productId: number, locationId: number, qty: number, avg: number) {
+async function writeQuant(sql: Sql, companyId: number, productId: number, locationId: number, qty: number, avg: number, avgFreight?: number) {
   await sql`
-    insert into stock_quants (company_id, product_id, location_id, quantity, avg_cost)
-    values (${companyId}, ${productId}, ${locationId}, ${qty}, ${avg})
+    insert into stock_quants (company_id, product_id, location_id, quantity, avg_cost, avg_freight)
+    values (${companyId}, ${productId}, ${locationId}, ${qty}, ${avg}, ${avgFreight ?? 0})
     on conflict (company_id, product_id, location_id)
-    do update set quantity = excluded.quantity, avg_cost = excluded.avg_cost
+    do update set quantity = excluded.quantity, avg_cost = excluded.avg_cost,
+      -- Una SALIDA no manda la parte de flete: se conserva la que había. Pasarla
+      -- como 0 borraría el desglose del costo que se queda en la bodega.
+      avg_freight = coalesce(${avgFreight ?? null}, stock_quants.avg_freight)
   `;
 }
 
 async function refreshProductCost(sql: Sql, companyId: number, productId: number) {
-  const row = await sql<{ avg: string }>`
+  const row = await sql<{ avg: string; avg_f: string }>`
     select (
       case when coalesce(sum(quantity), 0) > 0.0001
         then sum(quantity * avg_cost) / sum(quantity)
         else 0
       end
-    )::text as avg
+    )::text as avg,
+    (
+      case when coalesce(sum(quantity), 0) > 0.0001
+        then sum(quantity * coalesce(avg_freight,0)) / sum(quantity)
+        else 0
+      end
+    )::text as avg_f
     from stock_quants
     where company_id = ${companyId} and product_id = ${productId} and quantity > 0.0001
   `;
   const avg = Number(row[0]?.avg ?? 0);
   if (avg > 0) {
-    await sql`update products set cost = ${avg} where id = ${productId} and company_id = ${companyId}`;
+    // Decisión 101: el costo del catálogo pasa a ser costo PUESTO, y al lado
+    // queda cuánto de él es flete. Ese segundo número es el que apaga la
+    // segunda suma cuando se cotiza; los dos se escriben juntos o el costo
+    // quedaría explicado a medias.
+    await sql`update products set cost = ${avg}, freight_in_cost = ${Number(row[0]?.avg_f ?? 0)} where id = ${productId} and company_id = ${companyId}`;
   }
 }
 
@@ -237,6 +272,14 @@ export async function postStock(
     reversesId?: number | null;
     /** BLOQUE DE PARCIALES, paso 0(b): a cuál recepción/entrega pertenece este movimiento. */
     eventRef?: string | null;
+    /**
+     * Decisión 101: cuánto de `unitCost` es flete de entrada. El costo ya
+     * viene sumado; esto es la DESCOMPOSICIÓN, para poder explicar el promedio
+     * (Decisión 20) y para que la utilidad sepa que ese costo ya lo trae
+     * adentro. Los otros diez llamadores no lo mandan y no cambian: sin él,
+     * null, que es «este movimiento no lleva flete» — un hecho, no un cero.
+     */
+    freightUnit?: number;
   },
 ) {
   await ensureStock(sql);
@@ -267,6 +310,11 @@ export async function postStock(
   }
 
   let unitCost = Math.max(0, Number(opts.unitCost) || 0);
+  // Decisión 101: la parte de flete del costo. Si el llamador no la manda, se
+  // DERIVA del mismo lugar del que sale el costo — así toda SALIDA se lleva su
+  // parte sin que cada llamador tenga que acordarse, que es justo lo que
+  // dejaba a la utilidad del pedido sin ver el flete.
+  let freightUnit: number | null = opts.freightUnit == null ? null : Math.max(0, Number(opts.freightUnit));
 
   if (fromId) {
     const onHand = await qtyFromMoves(sql, opts.companyId, opts.productId, fromId);
@@ -279,12 +327,30 @@ export async function postStock(
           : "Stock insuficiente en origen. Revisa el kardex.",
       );
     }
-    if (unitCost <= 0) unitCost = cached.avg;
+    if (unitCost <= 0) {
+      unitCost = cached.avg;
+      // El costo sale del promedio de la bodega, así que su parte de flete
+      // también: es la misma cifra, partida en dos.
+      if (freightUnit == null) freightUnit = Math.min(cached.avgFreight, unitCost);
+    }
   }
 
   if (toId && unitCost <= 0) {
     const dest = await readQuant(sql, opts.companyId, opts.productId, toId);
     unitCost = dest.avg || dest.fallback;
+    if (freightUnit == null) freightUnit = Math.min(dest.avgFreight, unitCost);
+  }
+
+  // Un contrario saca —o mete— EXACTAMENTE lo que el original metió, flete
+  // incluido: los llamadores le pasan el costo del movimiento original, así
+  // que su parte de flete se lee del mismo sitio en vez de pedirle a cada uno
+  // que se acuerde. Sin esto, revertir dejaría el kardex cuadrado en costo y
+  // descuadrado en su desglose.
+  if (freightUnit == null && opts.reversesId) {
+    const orig = await sql<{ freight_unit: string | null }>`
+      select freight_unit::text as freight_unit from stock_moves where id = ${opts.reversesId} and company_id = ${opts.companyId}
+    `;
+    if (orig[0]?.freight_unit != null) freightUnit = Math.max(0, Number(orig[0].freight_unit));
   }
 
   const ref = await nextRef(sql, opts.companyId, opts.moveType);
@@ -293,11 +359,12 @@ export async function postStock(
   await sql`
     insert into stock_moves (
       company_id, ref, move_type, date, origin, location_from, location_to,
-      product_id, quantity, unit_cost, created_by, reverses_id, event_ref
+      product_id, quantity, unit_cost, created_by, reverses_id, event_ref, freight_unit
     )
     values (
       ${opts.companyId}, ${ref}, ${opts.moveType}, ${day}, ${opts.origin},
-      ${fromId}, ${toId}, ${opts.productId}, ${qty}, ${unitCost}, ${opts.userId}, ${opts.reversesId ?? null}, ${opts.eventRef ?? null}
+      ${fromId}, ${toId}, ${opts.productId}, ${qty}, ${unitCost}, ${opts.userId}, ${opts.reversesId ?? null}, ${opts.eventRef ?? null},
+      ${freightUnit}
     )
   `;
 
@@ -311,11 +378,19 @@ export async function postStock(
     const prev = await readQuant(sql, opts.companyId, opts.productId, toId);
     const qtyBefore = nextQty - qty;
     const avg = movingAverage(Math.max(0, qtyBefore), prev.avg || prev.fallback, qty, unitCost);
-    await writeQuant(sql, opts.companyId, opts.productId, toId, nextQty, avg);
+    // Decisión 101: la parte de flete se promedia con EL MISMO promedio móvil.
+    // Si se promediara distinto, «de este costo, tanto es flete» dejaría de
+    // cuadrar contra el costo mismo en cuanto entrara el segundo camión.
+    // Una ENTRADA que no dice su parte de flete no la tiene en cero: hereda la
+    // del promedio de la bodega a la que entra (una devolución vuelve con el
+    // costo con el que salió, y ese costo traía flete). Suponerla cero
+    // diluiría el desglose sin que nadie lo notara.
+    const avgF = movingAverage(Math.max(0, qtyBefore), prev.avgFreight, qty, Math.max(0, freightUnit ?? 0));
+    await writeQuant(sql, opts.companyId, opts.productId, toId, nextQty, avg, avgF);
   }
 
   await refreshProductCost(sql, opts.companyId, opts.productId);
-  return { ref, unitCost };
+  return { ref, unitCost, freightUnit };
 }
 
 /** Si hay existencia sin movimiento, abre el kardex con un saldo inicial (una sola vez). */

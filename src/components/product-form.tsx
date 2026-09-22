@@ -14,6 +14,8 @@ export type ProductDraft = {
   ref_cost_currency: "MXN" | "USD";
   list_price: number;
   min_stock: number;
+  /** Decisión 101: kilos que pesa UNA unidad. Vacío = sin capturar, no cero. */
+  unit_weight?: number | null;
 };
 
 export function ProductFields({
@@ -77,6 +79,20 @@ export function ProductFields({
         </Field>
         <Field label="Mínimo de existencia">
           <input className="erp-input" type="number" step="0.01" value={form.min_stock} onChange={(e) => setForm({ ...form, min_stock: Number(e.target.value) })} />
+        </Field>
+        <Field label="Kilos por unidad">
+          <input
+            className="erp-input"
+            type="number"
+            step="0.001"
+            placeholder="Sin capturar"
+            value={form.unit_weight ?? ""}
+            onChange={(e) => setForm({ ...form, unit_weight: e.target.value.trim() === "" ? null : Number(e.target.value) })}
+          />
+          <p className="mt-1 text-[11px] leading-snug text-muted">
+            Cuánto pesa <strong>una</strong> {form.uom || "unidad"} (un saco de urea, 50). Solo hace falta cuando un camión trae
+            unidades que no se pueden sumar entre sí —toneladas y litros—: ahí es lo que deja repartir el flete por peso.
+          </p>
         </Field>
       </div>
       {canEditRefCost && (

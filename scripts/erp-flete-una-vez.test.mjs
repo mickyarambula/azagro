@@ -210,7 +210,9 @@ test("la marca es una columna, no el nombre de la categoría que teclea una pers
   assert.ok(e.includes("${data.isFreight === true}, ${data.eventRef ?? \"\"})"), "se guarda (con la liga del viaje de la Decisión 100 al lado)");
   assert.ok(e.includes("coalesce(e.is_freight, false) as is_freight"), "se devuelve al listado");
   const r = src("src/lib/erp/reports.ts");
-  assert.ok(r.includes("coalesce(is_freight, false) as is_freight"), "la utilidad la lee");
+  // La consulta cambió de forma con la Decisión 101 (ahora netea lo
+  // capitalizado del viaje), pero sigue leyendo la marca igual.
+  assert.ok(r.includes("coalesce(e.is_freight, false) as is_freight"), "la utilidad la lee");
   // Nunca por el nombre de la categoría.
   assert.ok(!/category[^\n]*===[^\n]*[Ff]lete/.test(r) && !/category[^\n]*===[^\n]*[Ff]lete/.test(src("src/lib/erp/parciales.ts")), "no se reconoce por el texto");
 });
@@ -314,7 +316,10 @@ test("si la columna todavía no existe, los gastos se leen sin ella: nunca desap
   // pedido del costo, en silencio y a favor del margen.
   const r = src("src/lib/erp/reports.ts");
   const q = r.slice(r.indexOf("async function orderExpenses"), r.indexOf("async function orderMora"));
-  assert.equal((q.match(/select id, name, class, amount::text/g) || []).length, 2, "la consulta de respaldo, sin la columna");
+  // Una sola vez: la consulta principal cambió de forma con la Decisión 101
+  // (excluye los gastos ligados a un viaje, cuyo costo ya está en la
+  // mercancía); la de respaldo conserva el select pelón, y es la de aquí.
+  assert.equal((q.match(/select id, name, class, amount::text/g) || []).length, 1, "la consulta de respaldo, sin la columna");
   assert.ok(q.includes("isFreight: false"), "y ahí ningún gasto es flete: cuentan como contaban antes");
   assert.ok(q.includes("de los dos modos de fallar, ése es el peor"), "y queda dicho por qué");
 });

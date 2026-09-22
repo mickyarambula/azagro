@@ -24,6 +24,7 @@ function Nuevo() {
     ref_cost_currency: "MXN",
     list_price: 0,
     min_stock: 0,
+    unit_weight: null,
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

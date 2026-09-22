@@ -54,8 +54,8 @@ export const listTripCosts = createServerFn({ method: "POST" })
     await assertCan(sql, context.userId, "purchases", "view");
     // El costo de un viaje es costo de compra: quien no lo ve, no lo recibe.
     // Lista VACÍA, no un cero enmascarado — ése fue el defecto de ayer.
-    if (!canSeeCosts(m.role)) return { puedeVer: false as const, trips: [] };
-    if (!data.poIds.length) return { puedeVer: true as const, trips: [] };
+    if (!canSeeCosts(m.role)) return { puedeVer: false as const, trips: [], planned: [] };
+    if (!data.poIds.length) return { puedeVer: true as const, trips: [], planned: [] };
     // Toda la lista de una vez: la pantalla enseña N órdenes y una llamada por
     // orden serían N viajes al servidor y N barridos de gastos por carga.
     const trips = await sql<{
@@ -67,10 +67,11 @@ export const listTripCosts = createServerFn({ method: "POST" })
       handling: string | null;
       partner: string | null;
       notes: string;
+      capitalized: boolean;
     }>`
       select e.po_id, e.event_ref, min(e.day)::text as date, bool_and(e.reversed) as reversed,
         t.freight::text as freight, t.handling::text as handling, p.name as partner,
-        coalesce(t.notes, '') as notes
+        coalesce(t.notes, '') as notes, (t.capitalized_at is not null) as capitalized
       from (
         select po.id as po_id, m.event_ref, m.date as day,
           exists (select 1 from stock_moves r where r.reverses_id = m.id) as reversed
@@ -81,7 +82,7 @@ export const listTripCosts = createServerFn({ method: "POST" })
       ) e
       left join trip_costs t on t.company_id = ${m.company_id} and t.event_ref = e.event_ref
       left join partners p on p.id = t.partner_id
-      group by e.po_id, e.event_ref, t.freight, t.handling, p.name, t.notes
+      group by e.po_id, e.event_ref, t.freight, t.handling, p.name, t.notes, t.capitalized_at
       order by min(e.day), e.event_ref
     `;
     // Lo PAGADO del mismo viaje, para poder compararlo con lo comprometido
@@ -97,8 +98,21 @@ export const listTripCosts = createServerFn({ method: "POST" })
         `
       : [];
     const pagado = new Map(pagados.map((r) => [r.event_ref, { amount: Number(r.amount), n: r.n }]));
+    // Lo PLANEADO por orden: es lo que la recepción va a tomar, y sin ello
+    // recibir se detiene (Decisión 101). La pantalla lo pide antes de que
+    // llegue el camión.
+    const planned = await sql<{ id: number; name: string; planned_freight: string | null; planned_handling: string | null }>`
+      select id, name, planned_freight::text as planned_freight, planned_handling::text as planned_handling
+      from purchase_orders where company_id = ${m.company_id} and id = any(${data.poIds})
+    `;
     return {
       puedeVer: true as const,
+      planned: planned.map((p) => ({
+        poId: p.id,
+        name: p.name,
+        freight: p.planned_freight == null ? null : Number(p.planned_freight),
+        handling: p.planned_handling == null ? null : Number(p.planned_handling),
+      })),
       trips: trips.map((t) => ({
         poId: t.po_id,
         eventRef: t.event_ref,
@@ -110,6 +124,9 @@ export const listTripCosts = createServerFn({ method: "POST" })
         handling: t.handling == null ? null : Number(t.handling),
         partner: t.partner,
         notes: t.notes,
+        // Ya entró al costo de la mercancía: no se puede corregir (el promedio
+        // no se recalcula hacia atrás). La pantalla ofrece la salida real.
+        capitalized: t.capitalized === true,
         paid: pagado.get(t.event_ref)?.amount ?? 0,
         paidN: pagado.get(t.event_ref)?.n ?? 0,
       })),
@@ -121,6 +138,69 @@ export const listTripCosts = createServerFn({ method: "POST" })
  * significa «sin capturar» y se distingue de un cero capturado a propósito,
  * que es lo que se teclea cuando el proveedor lo trajo sin cobrar el flete.
  */
+/**
+ * LO QUE SE ESPERA PAGAR POR TRAER ESTA ORDEN (Decisión 101).
+ *
+ * Se captura ANTES de recibir, por quien ve costos. De ahí lo toma la
+ * recepción y entra al costo de la mercancía en el acto — después ya no
+ * puede, porque el promedio del inventario no se corrige hacia atrás.
+ *
+ * Los dos importes juntos, y un cero se teclea a propósito cuando el proveedor
+ * la trae sin cobrar flete: vacío no es cero.
+ */
+export const savePlannedTrip = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(z.object({ poId: z.number(), freight: z.number().nonnegative(), handling: z.number().nonnegative() }))
+  .handler(async ({ context, data }) => {
+    const sql = await getSql();
+    const m = await companyOf(sql, context.userId);
+    await assertCan(sql, context.userId, "purchases", "edit");
+    if (!canSeeCosts(m.role)) throw new Error(SIN_COSTOS);
+    const po = await sql<{ id: number; name: string; state: string; planned_freight: string | null; planned_handling: string | null }>`
+      select id, name, state, planned_freight::text as planned_freight, planned_handling::text as planned_handling
+      from purchase_orders where id = ${data.poId} and company_id = ${m.company_id}
+    `;
+    if (!po[0]) throw new Error("Orden de compra no encontrada");
+    if (po[0].state === "cancelled") throw new Error(`${po[0].name} está cancelada.`);
+    // Subir lo planeado a media orden es inocuo (la siguiente recepción toma
+    // menos). BAJARLO por debajo de lo que ya entró al costo, no: deja flete
+    // fantasma dentro del inventario y el promedio no se corrige hacia atrás.
+    const ya = await sql<{ f: string; h: string }>`
+      select coalesce(sum(coalesce(t.freight,0)),0)::text as f, coalesce(sum(coalesce(t.handling,0)),0)::text as h
+      from trip_costs t
+      where t.company_id = ${m.company_id} and t.po_id = ${data.poId} and t.capitalized_at is not null
+        and exists (
+          select 1 from stock_moves mv
+          where mv.company_id = t.company_id and mv.event_ref = t.event_ref and mv.move_type = 'receipt'
+            and not exists (select 1 from stock_moves r where r.reverses_id = mv.id)
+        )
+    `;
+    const capF = Number(ya[0]?.f ?? 0);
+    const capH = Number(ya[0]?.h ?? 0);
+    if (data.freight + 0.0001 < capF || data.handling + 0.0001 < capH) {
+      throw new Error(
+        `De ${po[0].name} ya entraron al costo de la mercancía ${(capF + capH).toFixed(2)} de viaje ` +
+        `(flete ${capF.toFixed(2)} + maniobras ${capH.toFixed(2)}). No se puede planear menos que eso: ` +
+        `ese costo ya está dentro del inventario y el promedio no se recalcula hacia atrás. Si está mal, revierte la recepción.`,
+      );
+    }
+    await sql`
+      update purchase_orders set planned_freight = ${data.freight}, planned_handling = ${data.handling}
+      where id = ${data.poId} and company_id = ${m.company_id}
+    `;
+    const num = (v: string | null) => (v == null ? "sin capturar" : Number(v).toFixed(2));
+    await writeAudit(sql, {
+      companyId: m.company_id,
+      userId: context.userId,
+      action: po[0].planned_freight == null ? "costo-de-viaje-planeado" : "costo-de-viaje-planeado-corregido",
+      entity: "purchase_order",
+      entityId: po[0].id,
+      name: po[0].name,
+      detail: `flete ${num(po[0].planned_freight)} → ${data.freight.toFixed(2)} · maniobras ${num(po[0].planned_handling)} → ${data.handling.toFixed(2)}`,
+    });
+    return { ok: true as const };
+  });
+
 export const saveTripCost = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -152,10 +232,20 @@ export const saveTripCost = createServerFn({ method: "POST" })
         and event_ref = ${data.eventRef} and move_type = 'receipt'
     `;
     if (!existe[0]?.n) throw new Error(`La recepción ${data.eventRef} no pertenece a ${po[0].name}`);
-    const antes = await sql<{ freight: string | null; handling: string | null }>`
-      select freight::text as freight, handling::text as handling from trip_costs
-      where company_id = ${m.company_id} and event_ref = ${data.eventRef}
+    const antes = await sql<{ freight: string | null; handling: string | null; capitalized_at: string | null }>`
+      select freight::text as freight, handling::text as handling, capitalized_at::text as capitalized_at
+      from trip_costs where company_id = ${m.company_id} and event_ref = ${data.eventRef}
     `;
+    // Decisión 101: lo que YA entró al costo de la mercancía no se corrige
+    // aquí. El promedio del inventario no se recalcula hacia atrás, así que
+    // cambiar el número dejaría el viaje diciendo una cosa y el costo otra —
+    // peor que no poder cambiarlo. La salida es revertir la recepción.
+    if (antes[0]?.capitalized_at) {
+      throw new Error(
+        `${data.eventRef} ya entró al costo de la mercancía: ese número no se puede cambiar sin recalcular el inventario hacia atrás. ` +
+        `Si está mal, revierte la recepción y vuelve a recibirla con el costo correcto.`,
+      );
+    }
     await sql`
       insert into trip_costs (company_id, event_ref, po_id, partner_id, freight, handling, notes, created_by)
       values (${m.company_id}, ${data.eventRef}, ${po[0].id}, ${data.partnerId ?? null},

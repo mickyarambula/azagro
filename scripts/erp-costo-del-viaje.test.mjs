@@ -22,33 +22,55 @@ const src = (p) => readFileSync(join(root, p), "utf8");
 // ---------------------------------------------------------------------------
 // 1. Lo que esta pieza NO toca — la mitad importante
 // ---------------------------------------------------------------------------
-test("el costo con el que entra la mercancía al inventario NO cambió", () => {
+test("el costo con el que entra la mercancía al inventario YA lleva el flete (pieza 2, Decisión 101)", () => {
+  // Esta prueba nació en la pieza 1 fijando lo contrario —«nada se mueve»— y
+  // eso era correcto entonces: sin el apagador del doble conteo, meter el
+  // flete al costo le habría cobrado $2,352.94 de más al cliente por camión.
+  // La pieza 2 trae las dos mitades en el mismo cambio, así que aquí se
+  // invierte: ahora fija que el flete SÍ entra, y cómo.
   const a = src("src/lib/azagro.ts");
   assert.ok(
-    a.includes("unitCost: receiptUnitCostMxn({ unitPrice: line[0].unit_price, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName }),"),
-    "la recepción sigue entrando al precio del proveedor, byte a byte",
+    a.includes("receiptUnitCostMxn({ unitPrice: x.unitPrice, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName }) + (fleteUnit.get(x.lineId) ?? 0),"),
+    "el flete repartido se suma al costo de entrada",
   );
-  assert.ok(!a.includes("trip_costs"), "azagro.ts ni se entera de que existen los costos de viaje");
+  assert.ok(
+    a.includes("freightUnit: fleteUnit.get(x.lineId) ?? 0,"),
+    "y el kardex guarda cuánto de ese costo es flete, para poder explicarlo (Decisión 20)",
+  );
+  // Fuera de la conversión a pesos: el flete se paga en pesos y adentro lo
+  // multiplicaría el tipo de cambio de la orden.
+  assert.ok(!/receiptUnitCostMxn\(\{[^}]*flete/i.test(a), "la suma va FUERA de receiptUnitCostMxn");
+  assert.ok(a.includes("trip_costs"), "y el viaje queda escrito con lo que se capitalizó, en la misma transacción");
+  assert.ok(a.includes("capitalized_at = excluded.capitalized_at"), "con la marca de que ya entró al costo");
 });
 
-test("el precio y la utilidad NO leen el costo del viaje: si lo hicieran, el flete se contaría dos veces", () => {
-  // La cotización toma el costo del inventario y le vuelve a sumar el flete
-  // (`ops.ts`). Con 100 sacos a $500 y $2,000 de viaje, el precio subiría
-  // $23.53 por saco — $2,352.94 cobrados de más en ese camión.
+test("nadie más lee la tabla de viajes: el flete llega al costo por el kardex, no por una segunda consulta", () => {
+  // El motor de precios y la cascada del costo NO saben que existen los
+  // viajes. Si los leyeran, sumarían el flete por su cuenta además del que ya
+  // trae el costo — el doble conteo, entrando por otra puerta.
   for (const p of ["src/lib/erp/ops.ts", "src/lib/erp/pricing.ts", "src/lib/erp/reports.ts", "src/lib/erp/cost.ts", "src/lib/erp/stock.ts", "src/lib/erp/parciales.ts"]) {
-    assert.ok(!src(p).includes("trip_costs"), `${p} no debe leer el costo del viaje todavía`);
-    assert.ok(!src(p).includes("tripCost"), `${p} no debe leer el costo del viaje todavía`);
+    assert.ok(!src(p).includes("trip_costs"), `${p} no debe leer la tabla de viajes`);
+    assert.ok(!src(p).includes("tripCost"), `${p} no debe leer la tabla de viajes`);
   }
+  // Y LA FÓRMULA NO CAMBIA. El apagador es un dato congelado, no una resta:
+  // restar apagaría un flete de SALIDA contra uno de ENTRADA sin decirlo.
   assert.ok(src("src/lib/erp/ops.ts").includes("const landed = cost + (line.freight ?? 0) + (line.other ?? 0);"), "el costo puesto de la cotización, intacto");
   assert.ok(src("src/lib/erp/reports.ts").includes("const landed = cogs + freight + other;"), "el costo puesto de la utilidad, intacto");
 });
 
-test("y la pantalla lo dice, para que nadie crea que ya está haciendo algo", () => {
-  const p = src("src/routes/purchases.tsx");
-  assert.ok(
-    p.includes("Todavía no entra al costo del inventario ni cambia ningún precio: eso es el paso siguiente."),
-    "el aviso en pantalla",
-  );
+test("la utilidad del pedido NO pierde el flete de entrada cuando hay orden de compra ligada", () => {
+  // El precio del proveedor no lleva flete. Si la utilidad siguiera costeando
+  // desde la OC, el flete de entrada desaparecería del costo del pedido y la
+  // utilidad saldría de MÁS — $2,000 en un camión de $2,000. Perderlo, no
+  // doblarlo: el error contrario, igual de caro.
+  const r = src("src/lib/erp/reports.ts");
+  assert.ok(r.includes("const salioConFlete = outFreight > 0.00001 && outCost > 0;"), "la condición es un hecho del kardex, no una etiqueta");
+  assert.ok(r.includes("const costUnit = salioConFlete ? outCost : (poCost ?? quoteReal ?? catalogo.cost);"), "y entonces manda el costo con el que SALIÓ");
+  assert.ok(r.includes("and m.move_type = 'delivery'") && r.includes("m.freight_unit is not null"), "leído de la salida del kardex");
+  assert.ok(r.includes("not exists (select 1 from stock_moves r where r.reverses_id = m.id)"), "solo salidas vivas");
+  // Ningún movimiento anterior a esta pieza tiene `freight_unit`, así que
+  // ningún pedido viejo cambia de número.
+  assert.ok(r.includes("ningún movimiento anterior a esta pieza lo tiene"), "y queda dicho por qué no toca lo viejo");
 });
 
 // ---------------------------------------------------------------------------
@@ -107,13 +129,16 @@ test("una recepción revertida conserva su costo: el dinero del fletero ya sali�
 test("el costo del viaje lo captura quien ve costos de compra, y el mismo rol lo lee", () => {
   const t = src("src/lib/erp/trip-cost.ts");
   // Leer: quien no ve costos recibe la lista vacía, no el número enmascarado.
-  assert.ok(t.includes("if (!canSeeCosts(m.role)) return { puedeVer: false as const, trips: [] };"), "leer exige ver costos");
+  assert.ok(t.includes("if (!canSeeCosts(m.role)) return { puedeVer: false as const, trips: [], planned: [] };"), "leer exige ver costos");
   // Escribir: el MISMO rol. Si se separan, la máscara se vuelve un borrador.
   assert.ok(t.includes("if (!canSeeCosts(m.role)) throw new Error(SIN_COSTOS);"), "escribir exige el mismo rol");
   assert.ok(t.includes("Lo que se enmascara no se escribe (CLAUDE.md § 10)"), "con la regla citada");
   assert.ok(t.includes('Lo que costó el viaje lo captura quien ve los costos de compra (compras, gerencia o administrador)'), "y dice a quién le toca");
   // Y el permiso del módulo, además del rol.
   assert.ok(t.includes('await assertCan(sql, context.userId, "purchases", "edit");'), "editar la compra");
+  // Decisión 101: capturar lo PLANEADO es la misma puerta y el mismo candado.
+  assert.ok(t.includes("export const savePlannedTrip = createServerFn"), "capturar antes de recibir existe");
+  assert.equal((t.match(/if \(!canSeeCosts\(m\.role\)\) throw new Error\(SIN_COSTOS\);/g) || []).length, 2, "las DOS escrituras exigen ver costos");
   assert.ok(t.includes('await assertCan(sql, context.userId, "purchases", "view");'), "y ver la compra para leerlo");
 });
 

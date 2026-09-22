@@ -69,10 +69,22 @@ test("la recepción convierte ANTES de postStock; postStock no cambia de firma",
   assert.ok(!rw.includes("await postStock(sql, {"), "receivePurchase no toca el kardex: delega");
   assert.ok(rw.includes("const r = await receivePartial(sql, {"), "toda recepción va por partidas");
   const rp = fnBody(a, "receivePartial");
-  assert.ok(rp.includes("unitCost: receiptUnitCostMxn({ unitPrice: line[0].unit_price, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName })"), "recibir por partida");
-  assert.ok(rp.includes("received.push({ productId: line[0].product_id, qty: l.qty, unitPrice: Number(line[0].unit_price) });"), "la FP sigue recibiendo el precio en la moneda de la OC (ella convierte)");
+  // Decisión 101: el bucle se partió en dos pasadas para poder repartir el
+  // flete del viaje, así que cambiaron los nombres. El PRINCIPIO no: convertir
+  // antes de postStock, y la factura del proveedor con el precio en la moneda
+  // de la OC. Se refuerza con lo nuevo.
+  assert.ok(rp.includes("receiptUnitCostMxn({ unitPrice: x.unitPrice, currency: poFx[0].currency, fx: poFx[0].fx_rate, poName: opts.poName })"), "recibir por partida, convirtiendo antes");
+  assert.ok(
+    rp.includes("poName: opts.poName }) + (fleteUnit.get(x.lineId) ?? 0),"),
+    "el flete se suma FUERA de receiptUnitCostMxn: se paga en pesos, y adentro lo multiplicaría el tipo de cambio",
+  );
+  assert.ok(rp.includes("received.push({ productId: x.productId, qty: x.qty, unitPrice: Number(x.unitPrice) });"), "la FP sigue recibiendo el precio en la moneda de la OC (ella convierte)");
+  assert.ok(!/received\.push\([^;]*flete/i.test(rp), "y NUNCA el flete: al proveedor se le debe su mercancía, no lo que cobró el fletero");
   const st = src("src/lib/erp/stock.ts");
   assert.ok(!st.includes("currency") && !st.includes("fx_rate"), "el kardex sigue sin saber de monedas");
+  // Decisión 101: el kardex tampoco sabe de viajes. Recibe el costo YA sumado
+  // y, aparte, cuánto de él era flete — nunca lee `trip_costs`.
+  assert.ok(!st.includes("trip_costs"), "el kardex no lee la tabla de viajes");
 });
 
 test("addBankMove: compra/venta de dólares con TC y las dos patas ligadas; una transferencia entre monedas se rechaza nombrando la salida", () => {

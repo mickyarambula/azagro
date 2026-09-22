@@ -167,8 +167,24 @@ async function orderExpenses(sql: Sql, companyId: number, soId: number) {
     // pedido. La columna nace en 0049; el `coalesce` cubre la base que todavía
     // no la tiene, donde ningún gasto es flete y todo cuenta como venía.
     const exp = await sql<{ id: number; name: string; class: string; amount: string; is_freight: boolean }>`
-      select id, name, class, amount::text, coalesce(is_freight, false) as is_freight
-      from expenses where company_id = ${companyId} and so_id = ${soId} order by id
+      select e.id, e.name, e.class, coalesce(e.is_freight, false) as is_freight, e.amount::text as amount
+      from expenses e
+      where e.company_id = ${companyId} and e.so_id = ${soId}
+        -- Decisión 101: un gasto ligado a un VIAJE ya entró al costo de la
+        -- mercancía. Restarlo otra vez aquí sería contarlo dos veces.
+        --
+        -- LO QUE FALTA, Y ESTÁ ANOTADO (ESTADO.md H7): si el fletero cobró
+        -- $2,600 sobre $2,000 planeados, esos $600 no restan en ningún lado y
+        -- la utilidad del pedido sale $600 alta. El intento de netear
+        -- (importe menos capitalizado) se REVIRTIÓ el 21-sep-2026 porque metía
+        -- tres defectos peores: restaba lo capitalizado a CADA gasto del viaje
+        -- en vez de al conjunto (dos gastos movían la utilidad $2,500 según
+        -- cómo se capturaron), neteaba contra viajes ya revertidos, y dejaba
+        -- que un gasto de viaje se colara como flete del pedido. El neteo
+        -- correcto va POR VIAJE, no por gasto, y necesita su propio motor
+        -- congelado: es su pieza, no una línea al final de ésta.
+        and coalesce(e.event_ref,'') = ''
+      order by e.id
     `;
     expenses = exp.map((e) => ({ id: e.id, name: e.name, class: e.class, amount: Number(e.amount), isFreight: e.is_freight === true }));
   } catch {
@@ -327,6 +343,8 @@ async function dealPnlCore(
     po_currency: string | null;
     po_fx: string | null;
     quote_cost: string | null;
+    out_freight: string | null;
+    out_cost: string | null;
     quote_freight: string;
     quote_other: string;
     quote_disbursed: string | null;
@@ -353,6 +371,29 @@ async function dealPnlCore(
         order by pl.id desc limit 1
       ) as po_fx,
       ql.cost::text as quote_cost,
+      -- Decisión 101: el flete de entrada con el que esta mercancía SALIÓ del
+      -- kardex. Ponderado por cantidad, como el costo de salida de la Decisión
+      -- 9, y solo de salidas vivas. Vacío = salió antes de la pieza 2, o nunca
+      -- pasó por bodega (brokeraje/directo).
+      (
+        select (sum(m.quantity * m.freight_unit) / nullif(sum(m.quantity),0))::text
+        from stock_moves m
+        where m.company_id = ${companyId} and m.origin = ${so[0].name}
+          and m.move_type = 'delivery' and m.product_id = sl.product_id
+          and m.freight_unit is not null
+          and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+      ) as out_freight,
+      -- Y el costo COMPLETO con el que salió (mercancía + flete de entrada).
+      -- Es la regla de la Decisión 9 —lo que salió, salió a ese costo—, la
+      -- misma que ya usan las devoluciones.
+      (
+        select (sum(m.quantity * m.unit_cost) / nullif(sum(m.quantity),0))::text
+        from stock_moves m
+        where m.company_id = ${companyId} and m.origin = ${so[0].name}
+          and m.move_type = 'delivery' and m.product_id = sl.product_id
+          and m.freight_unit is not null
+          and not exists (select 1 from stock_moves r where r.reverses_id = m.id)
+      ) as out_cost,
       coalesce(ql.freight,0)::text as quote_freight,
       coalesce(ql.other_cost,0)::text as quote_other,
       ql.disbursed_unit::text as quote_disbursed
@@ -378,8 +419,24 @@ async function dealPnlCore(
     const catalogo = resolveCost({ avgCost: l.catalog_cost, refCost: l.ref_cost });
     const quoteReal = quoteCost != null && quoteCost > 0 ? quoteCost : null;
     const sinCosto = poCost == null && quoteReal == null && catalogo.source === "ninguno";
-    const costUnit = poCost ?? quoteReal ?? catalogo.cost;
-    const costSource = poCost != null ? "OC" : quoteReal != null ? "cotización" : sinCosto ? "sin costo" : catalogo.source === "referencia" ? "referencia" : "catálogo";
+    // DECISIÓN 101 — una rama ARRIBA de la cascada, y solo una.
+    //
+    // El precio del proveedor (`poCost`) no lleva el flete de traerla; el
+    // promedio del kardex sí, desde la pieza 2. Si esta mercancía salió de
+    // bodega con flete adentro y la utilidad siguiera costeando desde la OC,
+    // el flete de entrada desaparecería del costo del pedido y la utilidad
+    // saldría de MÁS — $2,000 en un camión de $2,000.
+    //
+    // La condición es un hecho del kardex (`freight_unit` en la salida), no
+    // una etiqueta: ningún movimiento anterior a esta pieza lo tiene, así que
+    // ningún pedido viejo cambia de número.
+    const outFreight = l.out_freight != null ? Number(l.out_freight) : 0;
+    const outCost = l.out_cost != null ? Number(l.out_cost) : 0;
+    // El costo con el que SALIÓ, no el promedio de hoy: el promedio ya se
+    // movió con los camiones que llegaron después.
+    const salioConFlete = outFreight > 0.00001 && outCost > 0;
+    const costUnit = salioConFlete ? outCost : (poCost ?? quoteReal ?? catalogo.cost);
+    const costSource = salioConFlete ? "kardex (con flete)" : poCost != null ? "OC" : quoteReal != null ? "cotización" : sinCosto ? "sin costo" : catalogo.source === "referencia" ? "referencia" : "catálogo";
     // Una partida sin costo NO entra a la utilidad (entraría como 100% de
     // ganancia). Queda etiquetada y aparte, con su motivo.
     const excludeReason =
