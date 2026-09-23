@@ -22,6 +22,7 @@ const ACTION: Record<string, string> = {
   "marcar-flete": "Marcó un gasto como flete del pedido",
   "desmarcar-flete": "Quitó la marca de flete a un gasto",
   "flete-de-solicitud": "Capturó el flete de una solicitud",
+  "flete-de-cotizacion": "Declaró el flete al cliente de una cotización",
   "costo-de-viaje": "Capturó lo que costó traer un viaje",
   "costo-de-viaje-corregido": "Corrigió lo que costó traer un viaje",
   "quitar-saldo-a-favor": "Quitó saldo a favor",

@@ -6,7 +6,7 @@ import { getSql, withTx } from "@/lib/db";
 import { addDays, chargeRates, chargesCaptured, computeMora, computeStatementLine, daysBetween, earlyPayBonus, explainInterest, fxDifferential, fxPaymentSplit, missingChargesMessage, missingRateMessage, moraBilling, nearestRate, noMoraMessage, pctRate, policyChargesInterest, rateLabel, requireRate, splitDocName, splitFegaBundle, validateDueDates, NO_MORA_POLICY} from "@/lib/erp/credit";
 import { computeDues } from "@/lib/erp/order-terms";
 import { guardSaleTerms } from "@/lib/erp/sale-terms";
-import { assertFreightDeclared } from "@/lib/erp/freight-terms";
+import { assertFreightDeclared, effectiveFreight, FREIGHT_MODES } from "@/lib/erp/freight-terms";
 import { activeMember, assertAdmin, assertCan, canSeeCosts, canSeeMargins } from "@/lib/erp/acl";
 import { writeAudit } from "@/lib/erp/audit";
 import { dateDMY, todayMx } from "@/lib/utils";
@@ -881,9 +881,11 @@ export const listQuotes = createServerFn({ method: "GET" })
         tiieToday,
         fundingToday,
         terms: pol.quoteTerms,
+        // Decisión 102: para no ofrecer un selector que el servidor rechaza.
+        canSeeCosts: false,
       };
     }
-    return { quotes, lines: pricedLines, customers, products: pricedProducts, tiieToday, fundingToday, terms: pol.quoteTerms };
+    return { quotes, lines: pricedLines, customers, products: pricedProducts, tiieToday, fundingToday, terms: pol.quoteTerms, canSeeCosts: true };
   });
 
 export const createQuote = createServerFn({ method: "POST" })
@@ -919,6 +921,10 @@ export const createQuote = createServerFn({ method: "POST" })
             uom: z.string().optional().default(""),
             cost: z.number().optional().default(0),
             freight: z.number().optional().default(0),
+            // Decisión 102: de dónde salió el flete. Esta pantalla YA tiene el
+            // selector, así que aquí se exige (no `legacy`): era el camino por
+            // el que se esquivaba la declaración.
+            freightMode: z.enum(FREIGHT_MODES).optional(),
             other: z.number().optional().default(0),
             marginPct: z.number().optional().default(0),
           }),
@@ -996,8 +1002,43 @@ export const createQuote = createServerFn({ method: "POST" })
       const cash = l.cashPrice ?? (offer === "credit" ? 0 : l.unitPrice);
       const credit = l.creditPrice ?? (offer === "cash" ? 0 : l.unitPrice);
       const unit = offer === "cash" ? cash : credit || l.unitPrice;
-      return { ...l, cash, credit, unit };
+      // DECISIÓN 102 — el flete EFECTIVO se resuelve UNA vez, aquí, y de aquí
+      // lo toman el costo puesto, el margen y lo guardado. Resolverlo en más
+      // de un lugar fue el defecto que costó cuatro NO PASA en la pieza 3.
+      const freight = effectiveFreight(l.freightMode, l.freight);
+      return { ...l, cash, credit, unit, freight };
     });
+    // LO QUE SE ENMASCARA NO SE ESCRIBE (CLAUDE.md § 10, 20-sep-2026). Esta
+    // pantalla le manda el flete en cero a quien no ve costos, así que quien
+    // no lo ve tampoco lo guarda — igual que `saveLineFreight` en la solicitud.
+    // Sin esto, un vendedor tecleaba «se le cobra $500» y movía $50,000 del
+    // margen guardado sin ver el costo ni el margen.
+    {
+      const me = await activeMember(sql, context.userId);
+      // Por el IMPORTE, no por el modo. «Lo recoge» y «lo pone el proveedor»
+      // valen cero y no enseñan ningún costo — y ventas los sabe de primera
+      // mano. Dispararlo por el modo dejaba al rol ventas sin poder cotizar
+      // por /quotes el 100 % de las veces: le pedía elegir una opción que la
+      // pantalla no le dejaba elegir. Un candado sin salida es peor que el
+      // bug que tapa.
+      const cobra = data.lines.some((l) => l.freightMode === "cobrado" || Number(l.freight ?? 0) > 0.0001);
+      if (cobra && !canSeeCosts(me.role)) {
+        // Un intento negado de tocar un número de costo queda en bitácora,
+        // como hace `assertCan` con `rechazado-permiso`.
+        await writeAudit(sql, {
+          companyId: cid, userId: context.userId, action: "rechazado-permiso", entity: "quote", entityId: null,
+          name: "flete al cliente", detail: `intentó capturar un importe de flete sin ver costos (${me.role})`,
+        });
+        throw new Error("Cobrar flete al cliente lo captura quien ve los costos de compra (compras, gerencia o administrador). Sí puedes marcar «lo recoge» o «lo pone el proveedor».");
+      }
+    }
+    // Y el candado ANTES de escribir nada: puesto después del insert, en un
+    // handler sin transacción, cada intento fallido dejaba una cotización
+    // enviada con su total y sin partidas. Esta pantalla tiene el selector,
+    // así que se exige (sin `legacy`): por aquí se esquivaba la declaración.
+    assertFreightDeclared(
+      priced.map((l) => ({ label: `producto ${l.productId}`, freight: l.freight, mode: l.freightMode })),
+    );
     const total = priced.reduce((s, l) => s + l.qty * l.unit, 0);
     const state = data.send ? "sent" : "draft";
     const q = await sql<{ id: number }>`
@@ -1060,10 +1101,10 @@ export const createQuote = createServerFn({ method: "POST" })
       }
       const mCash = conMargen ? marginFromPrice({ price: line.cash, landed, finance: 0, mode: "nominal" }) : null;
       await sql`
-        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in,
+        insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, other_cost, margin_pct, cash_price, credit_price, cost_currency, cost_fx, cost_freight_in, freight_mode,
           margin_cash_mode, margin_cash_pct, margin_cash_nominal, margin_cash_source,
           margin_credit_mode, margin_credit_pct, margin_credit_nominal, margin_credit_source, finance_unit, disbursed_unit)
-        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight ?? 0}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit}, 'MXN', null, ${costFreightIn},
+        values (${q[0]!.id}, ${line.productId}, ${line.qty}, ${line.unit}, ${line.uom ?? ""}, ${cost}, ${line.freight}, ${line.other ?? 0}, ${line.marginPct ?? 0}, ${line.cash}, ${line.credit}, 'MXN', null, ${costFreightIn}, ${line.freightMode ?? null},
           ${mCash?.mode ?? null}, ${mCash?.pct ?? null}, ${mCash?.nominal ?? null}, ${mCash ? "captura" : null},
           ${mCredit?.mode ?? null}, ${mCredit?.pct ?? null}, ${mCredit?.nominal ?? null}, ${mCredit ? "captura" : null}, ${Number(fin.toFixed(4))}, ${disbursed})
       `;
@@ -1083,6 +1124,23 @@ export const createQuote = createServerFn({ method: "POST" })
       name,
       detail: `Total ${total.toFixed(2)} ${data.currency} · ${priced.length} partidas · ${state === "sent" ? "enviada" : "borrador"}`,
     });
+    // Decisión 102: el flete decide el precio, así que quién lo puso queda en
+    // bitácora — como `flete-de-solicitud` desde el 20-sep. Solo si alguien lo
+    // declaró; una cotización sin flete no llena la bitácora de ruido.
+    {
+      const con = data.lines.filter((l) => l.freightMode || Number(l.freight ?? 0) > 0.0001);
+      if (con.length) {
+        await writeAudit(sql, {
+          companyId: cid,
+          userId: context.userId,
+          action: "flete-de-cotizacion",
+          entity: "quote",
+          entityId: q[0]!.id,
+          name: name,
+          detail: con.map((l) => `producto ${l.productId}: ${l.freightMode ?? "cobrado"}${l.freightMode === "cobrado" || !l.freightMode ? ` ${Number(l.freight ?? 0).toFixed(2)}/u` : ""}`).join(" · "),
+        });
+      }
+    }
     return { id: q[0]!.id, name, state };
   });
 
@@ -1275,6 +1333,17 @@ export const duplicateQuote = createServerFn({ method: "POST" })
     const n = await sql<{ c: number }>`select count(*)::int as c from quotes where company_id = ${cid}`;
     const name = `COT-${String((n[0]?.c ?? 0) + 1).padStart(4, "0")}`;
     const validUntil = addDays(today, pol.quoteValidityDays);
+    // Decisión 102: duplicar CLONA el flete y el modo del renglón viejo. Con
+    // `legacy` porque esta pantalla no tiene selector y la original puede ser
+    // anterior a la pieza; lo que sí atrapa es «se le cobra» con importe cero.
+    // ANTES del insert: puesto después dejaba un folio quemado y una
+    // cotización en borrador sin partidas si llegara a dispararse.
+    // Queda ANOTADO (ESTADO.md H7): clonar una cotización vieja sin declarar
+    // produce otra sin declarar, y `decideQuote` la acepta por lo mismo.
+    assertFreightDeclared(
+      priced.map((l) => ({ label: `producto ${l.productId}`, freight: l.freight, mode: l.freightMode })),
+      { legacy: true },
+    );
     const q = await sql<{ id: number }>`
       insert into quotes (company_id, name, partner_id, date, valid_until, currency, fx_rate, state, notes, delivery_to, total, owner_id, tiie, spread, credit_days, price_offer, circuit_code,
         commission_rate, cost_rate, collection_rate)
@@ -1332,6 +1401,10 @@ export const reviseQuote = createServerFn({ method: "POST" })
             qty: z.number().positive(),
             cashPrice: z.number().nonnegative(),
             creditPrice: z.number().nonnegative(),
+            // Decisión 102: solo para las partidas NUEVAS de la revisión. Las
+            // que ya estaban conservan su flete y su modo; el update no los toca.
+            freight: z.number().nonnegative().optional(),
+            freightMode: z.enum(FREIGHT_MODES).optional(),
           }),
         )
         .min(1),
@@ -1435,6 +1508,40 @@ export const reviseQuote = createServerFn({ method: "POST" })
         `
       : [];
     if (nuevos.length !== nuevasIds.length) throw new Error("Producto no encontrado");
+    // LO QUE SE ENMASCARA NO SE ESCRIBE (CLAUDE.md § 10, 20-sep-2026). Esta
+    // pantalla le manda el flete en cero a quien no ve costos, así que quien
+    // no lo ve tampoco lo guarda — igual que `saveLineFreight` en la solicitud.
+    // Sin esto, un vendedor tecleaba «se le cobra $500» y movía $50,000 del
+    // margen guardado sin ver el costo ni el margen.
+    {
+      const me = await activeMember(sql, context.userId);
+      // Por el IMPORTE, no por el modo. «Lo recoge» y «lo pone el proveedor»
+      // valen cero y no enseñan ningún costo — y ventas los sabe de primera
+      // mano. Dispararlo por el modo dejaba al rol ventas sin poder cotizar
+      // por /quotes el 100 % de las veces: le pedía elegir una opción que la
+      // pantalla no le dejaba elegir. Un candado sin salida es peor que el
+      // bug que tapa.
+      const cobra = data.lines.some((l) => l.freightMode === "cobrado" || Number(l.freight ?? 0) > 0.0001);
+      if (cobra && !canSeeCosts(me.role)) {
+        // Un intento negado de tocar un número de costo queda en bitácora,
+        // como hace `assertCan` con `rechazado-permiso`.
+        await writeAudit(sql, {
+          companyId: cid, userId: context.userId, action: "rechazado-permiso", entity: "quote", entityId: null,
+          name: "flete al cliente", detail: `intentó capturar un importe de flete sin ver costos (${me.role})`,
+        });
+        throw new Error("Cobrar flete al cliente lo captura quien ve los costos de compra (compras, gerencia o administrador). Sí puedes marcar «lo recoge» o «lo pone el proveedor».");
+      }
+    }
+    // DECISIÓN 102 — la partida NUEVA de una revisión se declara, y el candado
+    // va ANTES de la primera escritura. Hasta hoy nacía con flete 0 sin modo,
+    // sin pasar por la regla: un cero por omisión en un documento creado hoy,
+    // justo lo que la Decisión 102 mata. Esta pantalla tiene el selector, así
+    // que se exige sin `legacy`.
+    assertFreightDeclared(
+      data.lines
+        .filter((l) => nuevasIds.includes(l.productId))
+        .map((l) => ({ label: `producto ${l.productId}`, freight: l.freight, mode: l.freightMode })),
+    );
     // Una revisión es una oferta distinta: si nada cambió (precio, cantidad,
     // plazo u oferta) no se sube el número de revisión ni se escribe bitácora.
     const cambios: string[] = [];
@@ -1499,6 +1606,8 @@ export const reviseQuote = createServerFn({ method: "POST" })
     // Decisión 101: una partida NUEVA toma el costo del catálogo, que desde la
     // pieza 2 es costo PUESTO. Hay que congelar cuánto de él es flete, o al
     // cotizarla se sumaría el flete otra vez.
+    // El MISMO número que se usó para despejar el margen: una sola regla.
+    const fleteDeNueva = (line: { freightMode?: string; freight?: number }) => effectiveFreight(line.freightMode, line.freight);
     const fleteDentroNuevo = (productId: number) => {
       const p = costos.find((c) => c.id === productId);
       const pick = resolveCost({ avgCost: p?.cost, refCost: p?.ref_cost });
@@ -1510,7 +1619,15 @@ export const reviseQuote = createServerFn({ method: "POST" })
     >();
     for (const line of data.lines) {
       const prev = oldLines.find((o) => o.product_id === line.productId);
-      const landed = prev ? Number(prev.cost) + Number(prev.freight) : costoNuevo(line.productId);
+      // DECISIÓN 102 — el flete de la partida NUEVA se resuelve UNA vez, aquí,
+      // y de aquí lo toman el costo puesto (con el que se despeja su margen) Y
+      // lo guardado. La primera versión lo resolvía solo en el insert: la
+      // partida guardaba $500/u de flete pero su margen se despejaba sin él —
+      // $52,793.54 de utilidad fantasma en 100 unidades, y al reconstruir el
+      // precio desde ese margen, $629.92/u de más al cliente. Es el mismo
+      // defecto de la pieza 3: resuelto donde se guarda, no donde se decide.
+      const fleteNuevo = prev ? 0 : effectiveFreight(line.freightMode, line.freight);
+      const landed = prev ? Number(prev.cost) + Number(prev.freight) : costoNuevo(line.productId) + fleteNuevo;
       if (landed <= 0.0001) continue;
       // Sin margen guardado el modo se despeja como %: el número sale del
       // precio que se acaba de capturar, no de un valor por omisión.
@@ -1565,7 +1682,8 @@ export const reviseQuote = createServerFn({ method: "POST" })
       if (nueva) {
         await sql`
           insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in, freight_mode)
-          values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)}, 0, ${line.cashPrice}, ${line.creditPrice}, ${fleteDentroNuevo(line.productId)}, null)
+          values (${q[0].id}, ${line.productId}, ${line.qty}, ${unit}, ${nueva.uom}, ${costoNuevo(line.productId)},
+            ${fleteDeNueva(line)}, ${line.cashPrice}, ${line.creditPrice}, ${fleteDentroNuevo(line.productId)}, ${line.freightMode ?? null})
         `;
         // Decisión 77: el costo de catálogo es pesos.
         await sql`update quote_lines set cost_currency = 'MXN', cost_fx = null where quote_id = ${q[0].id} and product_id = ${line.productId}`;
@@ -1599,6 +1717,23 @@ export const reviseQuote = createServerFn({ method: "POST" })
       name: q[0].name,
       detail: `Rev ${q[0].revision} → ${q[0].revision + 1} · ${cambios.join(" · ")}`,
     });
+    // Decisión 102: el flete decide el precio, así que quién lo puso queda en
+    // bitácora — como `flete-de-solicitud` desde el 20-sep. Solo si alguien lo
+    // declaró; una cotización sin flete no llena la bitácora de ruido.
+    {
+      const con = data.lines.filter((l) => l.freightMode || Number(l.freight ?? 0) > 0.0001);
+      if (con.length) {
+        await writeAudit(sql, {
+          companyId: cid,
+          userId: context.userId,
+          action: "flete-de-cotizacion",
+          entity: "quote",
+          entityId: q[0].id,
+          name: q[0].name,
+          detail: con.map((l) => `producto ${l.productId}: ${l.freightMode ?? "cobrado"}${l.freightMode === "cobrado" || !l.freightMode ? ` ${Number(l.freight ?? 0).toFixed(2)}/u` : ""}`).join(" · "),
+        });
+      }
+    }
     // El pedido en borrador que salió de esta cotización se pone al día: las
     // partidas nuevas se agregan con su cantidad y precio, y las que ya tenía
     // toman el precio de la revisión. La cantidad de las que ya estaban NO se

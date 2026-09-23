@@ -447,7 +447,9 @@ test("la revisión acepta partidas nuevas, les resuelve costo y actualiza el ped
   // modo null explícito). Escribirlo explícito es lo que impide que la
   // revisión borre un modo ya declarado de otra partida.
   assert.ok(body.includes("insert into quote_lines (quote_id, product_id, qty, unit_price, uom, cost, freight, cash_price, credit_price, cost_freight_in, freight_mode)"), "entra a la cotización");
-  assert.ok(body.includes("${fleteDentroNuevo(line.productId)}, null)"), "con el apagador congelado, y el modo del flete explícito (Decisión 102)");
+  // Decisión 102, cierre del hueco: la partida nueva ya no nace con flete 0 y
+  // modo null a la fuerza — lleva lo que la persona declaró en el selector.
+  assert.ok(body.includes("${fleteDentroNuevo(line.productId)}, ${line.freightMode ?? null})"), "con el apagador congelado, y el modo del flete que se declaró (Decisión 102)");
   assert.ok(body.includes("partida nueva ×"), "queda en la bitácora de la revisión");
   assert.ok(body.includes("await assertCostForCredit(sql, cid, data.lines.map((l) => l.productId), plazoRev)"), "a crédito sigue exigiendo costo");
   // Sincronía con el pedido en borrador.

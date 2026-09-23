@@ -63,6 +63,7 @@ const COSTO_DE_COMPRA = new Set([
   "costo-de-viaje-planeado-corregido",
   "recibir",
   "flete-de-solicitud",
+  "flete-de-cotizacion",         // el mismo número que listQuotes enmascara
   // Las que ya imprimían un costo de compra desde antes. Estaban abiertas y se
   // cierran aquí: la lista solo sirve si está completa.
   "elegir-proveedor",            // «costo 4500 → 4200», el precio del proveedor

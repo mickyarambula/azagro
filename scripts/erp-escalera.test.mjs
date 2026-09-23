@@ -236,7 +236,9 @@ test("servidor: listQuotes arma la escalera por partida con el costo real y las 
   assert.ok(fn.includes("days === l.q_days ? stored : financeUnit({ cost: landed, days, tiie: Number(l.q_tiie), costSpread: Number(l.q_spread), commissionRate: frozenCommission(l) })"), "financiamiento por columna con TIIE/spread/comisión de la COT; el acordado usa el guardado");
   assert.ok(fn.includes("ladder: l.ladder.map((s) => ({ ...s, utility: null, pct: null }))"), "a quien no ve márgenes se le esconde utilidad y %, no el precio");
   assert.ok(fn.indexOf("...ladderOf(l)") < fn.indexOf("if (!canSeeCosts(me.role))"), "se calcula antes de esconder el costo");
-  assert.ok(fn.includes("terms: pol.quoteTerms }"), "la pantalla recibe la lista de plazos");
+  // Decisión 102: al return se le sumó `canSeeCosts`, para que la pantalla no
+  // ofrezca un selector de flete que el servidor va a rechazar.
+  assert.ok(fn.includes("terms: pol.quoteTerms, canSeeCosts: true }"), "la pantalla recibe la lista de plazos");
   // Alta manual: contado + financiamiento = misma utilidad en pesos → margen en $ fijo.
   const crear = ops.slice(ops.indexOf("export const createQuote"), ops.indexOf("export const reviseQuote"));
   assert.ok(crear.includes('marginFromPrice({ price: line.cash, landed, finance: 0, mode: "nominal" })'), "alta manual: margen contado en $ fijo");

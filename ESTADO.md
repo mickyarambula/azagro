@@ -917,16 +917,30 @@ al cliente se declara, con sus dos salidas, y `sales_lines` estrena el campo
 que nunca tuvo. **El bloque del flete está completo** (piezas 1 a 3; la vieja
 pieza 4 resultó estar dentro de la 2).
 
-**ABIERTO de la pieza 3 — dos caminos crean partidas sin declarar el flete.**
-`createQuote` (la pantalla «Nueva cotización» de `/quotes`) y `reviseQuote`
-(agregar una partida en una revisión) escriben flete 0 sin modo y no pasan por
-la regla; al aceptar, `legacy` las deja pasar. O sea que **la exigencia se
-puede esquivar cotizando por la pantalla principal de Cotizaciones**. Cerrarlo
-pide ponerles el selector a esas dos pantallas — no se hizo aquí porque poner
-el candado antes que la salida fue exactamente el NO PASA de esta pieza.
-Tampoco hay pantalla que escriba el flete en `sales_lines`: hoy la columna
-nueva solo la llenan caminos sin pantalla, así que en la práctica el flete del
-pedido sigue leyéndose de la cotización.
+**CERRADO el 22-sep-2026 — la pantalla de Cotizaciones ya no esquiva la
+declaración.** `createQuote` (la pantalla «Nueva cotización» de `/quotes`) y la
+partida nueva de `reviseQuote` tienen el selector (`FreightPick`) y exigen la
+declaración **sin `legacy`**, con el candado antes de la primera escritura y el
+flete efectivo resuelto una vez arriba del mapeo — las dos lecciones de la
+pieza 3, aplicadas a las dos puertas que faltaban. La revisión de dinero atrapó
+en la primera vuelta el mismo defecto por tercera vez: la partida nueva de una
+revisión guardaba el flete pero despejaba su margen sin él ($52,793.54 de
+utilidad fantasma en 100 unidades). Cerrado: el flete se resuelve una vez
+arriba del bucle y de ahí van el costo puesto y lo guardado. Y el candado de
+rol (quien no ve costos no guarda el flete, CLAUDE.md § 10) con su bitácora.
+La segunda revisión encontró que el candado de rol, disparado por el MODO,
+dejaba al rol ventas sin poder cotizar por `/quotes` el 100 % de las veces
+(le pedía elegir una opción que la pantalla le negaba). Resuelto con criterio
+técnico: dispara por el IMPORTE — ventas sí marca «lo recoge» o «lo pone el
+proveedor», que valen cero y no enseñan ningún costo; «se le cobra» y su
+importe siguen siendo de quien ve costos. **Lo único que queda abierto:**
+`duplicateQuote` clona el flete y el modo del
+renglón viejo con `legacy` (no tiene selector), así que duplicar una cotización
+anterior a la pieza produce otra sin declarar y `decideQuote` la acepta. Sin
+datos reales, es teórico; el día que haya cotizaciones viejas, es la puerta. Sigue sin haber pantalla
+que escriba el flete en `sales_lines`: la columna solo la llenan caminos sin
+pantalla, así que el flete del pedido se sigue leyendo de la cotización — y
+como ahora TODA cotización nueva lo declara, eso es correcto.
 
 *Resuelto en la pieza 2:* el viaje viejo sigue vivo con su importe después de
 revertir, pero ya no importa — cada movimiento del kardex lleva su propio

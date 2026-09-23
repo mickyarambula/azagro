@@ -1,4 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import type { FreightMode } from "@/lib/erp/freight-terms";
 import { Plus, Trash2 } from "lucide-react";
 import { Fragment, useEffect, useState, type FormEvent } from "react";
 import { AppShell } from "@/components/app-shell";
@@ -35,9 +36,62 @@ export const Route = createFileRoute("/quotes")({
 
 /** fin = base del financiamiento que manda el servidor (calculada con el costo real, igual para todos los roles). */
 /** finLineal = tasa anual del lineal (tasa de cobro + spread) que mandó el servidor; null si la tabla no cubre hoy. */
-type Line = { productId: number; qty: number; cashPrice: number; creditPrice: number; uom: string; fin: FinanceBase; finLineal: { rate: number } | null };
+type Line = {
+  productId: number; qty: number; cashPrice: number; creditPrice: number; uom: string; fin: FinanceBase; finLineal: { rate: number } | null;
+  /** Decisión 102: el flete de llevársela al cliente, por unidad, y de dónde salió. Sin modo, el servidor no deja cotizar. */
+  freight?: number;
+  freightMode?: FreightMode;
+};
 const SIN_FIN: FinanceBase = { commission: 0, interestYear: 0 };
 type Offer = "cash" | "credit" | "both";
+
+/**
+ * Decisión 102: el flete de llevársela al cliente, declarado. Tres opciones y,
+ * solo con «se le cobra», el importe. Sin elegir, el servidor se detiene: por
+ * esta pantalla se esquivaba la declaración que la comparativa de proveedores
+ * ya exigía.
+ */
+function FreightPick({
+  mode,
+  amount,
+  onChange,
+  canCharge = true,
+}: {
+  mode: FreightMode | undefined;
+  amount: number | undefined;
+  onChange: (next: { freightMode: FreightMode | undefined; freight: number | undefined }) => void;
+  /**
+   * Cobrar flete —«se le cobra» y su importe— es un número de costo: solo quien
+   * ve costos lo guarda (CLAUDE.md § 10). Los dos ceros dichos no enseñan
+   * nada y ventas los sabe de primera mano, así que el selector sigue abierto
+   * para ellos: un selector apagado del todo dejaba a ventas sin poder cotizar.
+   */
+  canCharge?: boolean;
+}) {
+  return (
+    <div className="mt-1 flex items-center gap-1">
+      <span className="text-[10px] uppercase tracking-wide text-muted">Flete al cliente</span>
+      <select
+        className="erp-input h-7 w-36 text-[11px]"
+        value={mode ?? ""}
+        onChange={(e) => {
+          const m = (e.target.value || undefined) as FreightMode | undefined;
+          // El importe NO se borra al cambiar de modo: el modo lo vale cero por
+          // sí solo, y volver a «se le cobra» lo recupera.
+          onChange({ freightMode: m, freight: amount });
+        }}
+      >
+        <option value="">Sin decidir</option>
+        <option value="cobrado" disabled={!canCharge}>Se le cobra{canCharge ? "" : " (compras)"}</option>
+        <option value="recoge">Lo recoge</option>
+        <option value="proveedor">Lo pone el proveedor</option>
+      </select>
+      {mode === "cobrado" && canCharge ? (
+        <MoneyField className="w-24" placeholder="por unidad" value={amount ?? 0} onChange={(n) => onChange({ freightMode: mode, freight: n })} />
+      ) : null}
+    </div>
+  );
+}
 
 function offerLabel(o: string) {
   return o === "cash" ? "Contado" : o === "credit" ? "Crédito" : "Contado y crédito";
@@ -167,7 +221,7 @@ function Page() {
   // sin tocar: se sigue proponiendo con la regla según el plazo acordado.
   const [circuitOverride, setCircuitOverride] = useState<"CONTADO" | "ASR" | null>(null);
   /** Partidas que se están agregando a la cotización abierta (punto C3): entran al guardar la revisión. */
-  const [addLines, setAddLines] = useState<Array<{ productId: number; qty: number }>>([]);
+  const [addLines, setAddLines] = useState<Array<{ productId: number; qty: number; freight?: number; freightMode?: FreightMode }>>([]);
   const [locationId, setLocationId] = useState(0);
   const [fulfillKind, setFulfillKind] = useState<"inventory" | "direct">("inventory");
 
@@ -359,6 +413,8 @@ function Page() {
             cashPrice: l.cashPrice,
             creditPrice: l.creditPrice,
             uom: l.uom,
+            freight: l.freight,
+            freightMode: l.freightMode,
           })),
         },
       });
@@ -628,6 +684,12 @@ function Page() {
                     </td>
                     <td className="px-3 py-2">
                       <UomSelect value={line.uom || p?.uom || "TM"} extra={p?.uom} onChange={(uom) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, uom } : x)))} />
+                      <FreightPick
+                        mode={line.freightMode}
+                        amount={line.freight}
+                        onChange={(next) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, ...next } : x)))}
+                        canCharge={!!data?.canSeeCosts}
+                      />
                     </td>
                     <td className="px-3 py-2">
                       <QtyField value={line.qty} onChange={(q) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, qty: q } : x)))} />
@@ -1022,6 +1084,12 @@ function Page() {
                                           value={al.qty}
                                           onChange={(n) => setAddLines((ls) => ls.map((x, j) => (j === i ? { ...x, qty: n } : x)))}
                                         />
+                                        <FreightPick
+                                          mode={al.freightMode}
+                                          amount={al.freight}
+                                          onChange={(next) => setAddLines((ls) => ls.map((x, j) => (j === i ? { ...x, ...next } : x)))}
+                                          canCharge={data.canSeeCosts}
+                                        />
                                       </td>
                                       <td className="py-1.5 text-right text-[12px] text-muted">al guardar</td>
                                       {both || qrow.price_offer === "cash" ? (
@@ -1208,6 +1276,8 @@ function Page() {
                                         qty: a.qty,
                                         cashPrice: revPrices[a.productId]?.cash ?? 0,
                                         creditPrice: revPrices[a.productId]?.credit ?? 0,
+                                        freight: a.freight,
+                                        freightMode: a.freightMode,
                                       })),
                                     ],
                                   },

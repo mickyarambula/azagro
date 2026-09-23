@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertFreightDeclared, effectiveFreight, freightDeclared, freightSpoken, isDeclaredZero, FREIGHT_MODES, FREIGHT_MODE_LABEL } from "../src/lib/erp/freight-terms.ts";
+import { marginFromPrice } from "../src/lib/erp/margins.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(root, p), "utf8");
@@ -294,4 +295,159 @@ test("«lo pone el proveedor» no se lee como «nadie pagó flete»", () => {
   const ui = src("src/routes/solicitudes.$solicitudId.tsx");
   assert.ok(ui.includes('"flete incluido en el precio del proveedor"'), "lo dice como es");
   assert.ok(ui.includes('"sin flete: lo recoge el cliente"'), "y el otro caso sí es sin flete");
+});
+
+// ---------------------------------------------------------------------------
+// 7. El hueco de la pieza 3, cerrado: la pantalla de Cotizaciones ya no esquiva
+// ---------------------------------------------------------------------------
+function cuerpo(source, name) {
+  const i = source.indexOf(`export const ${name}`);
+  assert.notEqual(i, -1, `no existe ${name}`);
+  const j = source.indexOf("export const ", i + 10);
+  return source.slice(i, j > 0 ? j : source.length)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/^\s*--.*$/gm, "")
+    // Todo espacio en blanco a uno solo: «insert into\n    quotes» se leía
+    // como si no escribiera nada.
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * Toda escritura a la base dentro de un cuerpo, se llame la tabla como se
+ * llame. Una lista de tablas conocidas se burlaba escribiendo a otra.
+ */
+function escrituras(b) {
+  // Insensible a mayúsculas y con `merge into`: la revisión burló la versión
+  // anterior con `INSERT INTO` y con `merge … when not matched then insert`.
+  // Lo que un recorrido de texto NO puede ver, y queda dicho: una escritura
+  // dentro de una función auxiliar definida afuera, y un candado envuelto en
+  // una rama muerta. Para eso están la revisión de dinero y `withTx`.
+  return [...b.matchAll(/\b(insert\s+into|update|delete\s+from|merge\s+into)\s+[a-z_$]+/gi)].map((m) => ({ que: m[0], en: m.index }));
+}
+
+test("createQuote y reviseQuote exigen la declaración SIN legacy: ya tienen el selector", () => {
+  // Eran las dos puertas por las que se creaban partidas con flete cero sin
+  // decir por qué. El candado va donde está la salida, y ahora la salida está.
+  const ops = src("src/lib/erp/ops.ts");
+  for (const fn of ["createQuote", "reviseQuote"]) {
+    const b = cuerpo(ops, fn);
+    const k = b.indexOf("assertFreightDeclared(");
+    assert.notEqual(k, -1, `${fn} llama la regla`);
+    const llamada = b.slice(k, b.indexOf(");", k) + 2);
+    assert.ok(!llamada.includes("legacy"), `${fn} es estricta: esta pantalla sí puede declarar`);
+  }
+  // `decideQuote` sigue con legacy: acepta cotizaciones de antes de la pieza.
+  const dq = cuerpo(ops, "decideQuote");
+  const k = dq.indexOf("assertFreightDeclared(");
+  assert.ok(dq.slice(k, dq.indexOf(");", k) + 2).includes("{ legacy: true }"), "decideQuote no tranca lo viejo");
+});
+
+test("en createQuote y reviseQuote la validación corre ANTES de toda escritura de DINERO", () => {
+  // La lección de la pieza 3, aplicada a las dos puertas nuevas: puesto
+  // después, en un handler sin transacción, dejaba el documento a medias.
+  // Se recorren TODAS las escrituras del cuerpo, no una lista de tablas, y se
+  // exige que exista al menos una: un cuerpo «sin escrituras» sería la señal
+  // de que el recorrido dejó de ver.
+  const ops = src("src/lib/erp/ops.ts");
+  for (const fn of ["createQuote", "reviseQuote", "duplicateQuote"]) {
+    const b = cuerpo(ops, fn);
+    const v = b.indexOf("assertFreightDeclared(");
+    assert.notEqual(v, -1, `${fn} llama la regla`);
+    // La llamada es una sentencia incondicional. Un candado colgado de un
+    // `if (` —`if (x) assertFreightDeclared(...)` o `if (x) { assert… }`— es
+    // un candado que a veces no está, y la revisión lo metió en una rama
+    // muerta antes del real para que `indexOf` lo encontrara primero. Se mira
+    // TODA aparición, y el tramo desde el último `;` hasta ella no puede
+    // traer un `if (`.
+    for (const m of b.matchAll(/assertFreightDeclared\(/g)) {
+      const pre = b.slice(b.lastIndexOf(";", m.index) + 1, m.index);
+      assert.ok(!/\bif\s*\(/.test(pre), `${fn}: la regla cuelga de una condición: «${pre.trim().slice(-80)}»`);
+    }
+    // `alter table … if not exists` es esquema idempotente, no dinero: se
+    // deja fuera a propósito.
+    const ws = escrituras(b).filter((w) => !/^update .*if not exists/.test(w.que));
+    assert.ok(ws.length >= 2, `${fn}: el recorrido tiene que ver escrituras (vio ${ws.length})`);
+    for (const w of ws) assert.ok(w.en > v, `${fn}: «${w.que}» está antes de la validación`);
+  }
+});
+
+test("la partida NUEVA de una revisión despeja su margen CON el flete que guarda", () => {
+  // La primera versión guardaba $500/u de flete pero despejaba el margen sin
+  // él: $52,793.54 de utilidad fantasma en 100 unidades, y $629.92/u de más
+  // al cliente al reconstruir el precio desde ese margen. El mismo defecto de
+  // la pieza 3 — resuelto donde se guarda, no donde se decide.
+  const b = cuerpo(src("src/lib/erp/ops.ts"), "reviseQuote");
+  assert.ok(b.includes("const fleteNuevo = prev ? 0 : effectiveFreight(line.freightMode, line.freight);"), "se resuelve una vez, arriba del bucle");
+  assert.ok(b.includes("costoNuevo(line.productId) + fleteNuevo;"), "y entra al costo puesto con el que se despeja el margen");
+  assert.ok(b.includes("${fleteDeNueva(line)},"), "y es el mismo número que se guarda");
+  assert.ok(b.includes("const fleteDeNueva = (line: { freightMode?: string; freight?: number }) => effectiveFreight(line.freightMode, line.freight);"), "con la misma regla, no una copia");
+  // Con números, usando la fórmula REAL del margen: costo 10,000 + flete 500,
+  // precio de contado 11,363.64 (12 % sobre 10,000). Con el flete adentro, el
+  // margen real es 7.6 %, no 12 %.
+  const conFlete = marginFromPrice({ price: 11363.64, landed: 10500, finance: 0, mode: "pct" });
+  const sinFlete = marginFromPrice({ price: 11363.64, landed: 10000, finance: 0, mode: "pct" });
+  assert.equal(Math.round(sinFlete.pct * 100) / 100, 12, "sin el flete el margen se ve completo");
+  assert.equal(Math.round(conFlete.pct * 100) / 100, 7.6, "con el flete adentro, el margen real");
+  assert.equal(Math.round((sinFlete.nominal - conFlete.nominal) * 100) / 100, 500, "$500/u de utilidad fantasma por unidad");
+});
+
+test("lo que se enmascara no se escribe: el flete de una cotización lo guarda quien lo ve", () => {
+  // `listQuotes` manda el flete en cero a quien no ve costos; sin este
+  // candado, un vendedor tecleaba «se le cobra $500» y movía $50,000 del
+  // margen guardado sin ver el costo ni el margen — y sin bitácora.
+  const ops = src("src/lib/erp/ops.ts");
+  for (const fn of ["createQuote", "reviseQuote"]) {
+    const b = cuerpo(ops, fn);
+    // Por el IMPORTE, no por el modo: los dos ceros dichos no enseñan ningún
+    // costo y ventas los sabe. Dispararlo por el modo dejaba a ventas sin
+    // poder cotizar por /quotes el 100 % de las veces.
+    assert.ok(b.includes('const cobra = data.lines.some((l) => l.freightMode === "cobrado" || Number(l.freight ?? 0) > 0.0001);'), `${fn}: el candado mira el importe`);
+    assert.ok(b.includes("if (cobra && !canSeeCosts(me.role)) {"), `${fn}: el candado de rol`);
+    assert.ok(b.includes("Sí puedes marcar «lo recoge» o «lo pone el proveedor»."), `${fn}: y nombra la salida que ventas SÍ tiene`);
+    assert.ok(b.includes('action: "rechazado-permiso", entity: "quote"'), `${fn}: el intento negado queda en bitácora`);
+    assert.ok(b.includes('action: "flete-de-cotizacion",'), `${fn}: y el flete declarado también`);
+  }
+  // La pantalla: el selector sigue abierto para ventas; «se le cobra» y el
+  // importe, solo para quien ve costos.
+  const qq = src("src/routes/quotes.tsx");
+  assert.ok(qq.includes('<option value="cobrado" disabled={!canCharge}>'), "«se le cobra» se apaga a quien no ve costos");
+  assert.ok(qq.includes('{mode === "cobrado" && canCharge ? ('), "y el importe también");
+  assert.ok(!qq.includes("<select\n        className=\"erp-input h-7 w-36 text-[11px]\"\n        disabled="), "pero el selector NO se apaga entero");
+  assert.ok(ops.includes("canSeeCosts: false,") && ops.includes("canSeeCosts: true }"), "listQuotes le dice a la pantalla si puede");
+  const q = src("src/routes/quotes.tsx");
+  assert.equal((q.match(/canCharge=\{!?!?data\??\.canSeeCosts\}/g) || []).length, 2, "y las dos filas saben si pueden cobrar");
+  assert.ok(src("src/routes/bitacora.tsx").includes('"flete-de-cotizacion":'), "con nombre legible");
+  assert.ok(src("src/lib/erp/audit.ts").includes('"flete-de-cotizacion",'), "y enmascarada, como el número que protege");
+});
+
+test("duplicateQuote pasa por la regla (con legacy), y el hueco que deja queda dicho", () => {
+  const b = cuerpo(src("src/lib/erp/ops.ts"), "duplicateQuote");
+  const k = b.indexOf("assertFreightDeclared(");
+  assert.notEqual(k, -1, "la llama");
+  assert.ok(b.slice(k, b.indexOf(");", k) + 2).includes("{ legacy: true }"), "con legacy: no tiene selector y la original puede ser vieja");
+  const ins = b.indexOf("insert into quote_lines");
+  assert.ok(k < ins, "y antes de escribir las partidas");
+});
+
+test("createQuote resuelve el flete efectivo UNA vez, arriba, y de ahí sale todo", () => {
+  const b = cuerpo(src("src/lib/erp/ops.ts"), "createQuote");
+  assert.ok(b.includes("const freight = effectiveFreight(l.freightMode, l.freight);"), "una vez, en el mapeo");
+  assert.ok(b.includes("return { ...l, cash, credit, unit, freight };"), "y reemplaza el crudo en la partida");
+  // De ahí en adelante `line.freight` YA es el efectivo: el costo puesto y lo
+  // guardado lo leen sin volver a interpretar.
+  assert.ok(b.includes("${line.freight}, ${line.other ?? 0}"), "lo guardado");
+  assert.ok(!b.includes("effectiveFreight(line."), "y no se vuelve a resolver más abajo");
+  assert.ok(b.includes("${line.freightMode ?? null},"), "con su modo");
+});
+
+test("la pantalla de Cotizaciones tiene el selector en las DOS filas y lo manda", () => {
+  const q = src("src/routes/quotes.tsx");
+  assert.equal((q.match(/<FreightPick/g) || []).length, 2, "la fila nueva y la partida nueva de una revisión");
+  assert.ok(q.includes('<option value="recoge">Lo recoge</option>'), "las tres opciones");
+  assert.ok(q.includes("freight: l.freight,\n            freightMode: l.freightMode,"), "createQuote las recibe");
+  assert.ok(q.includes("freight: a.freight,\n                                        freightMode: a.freightMode,"), "reviseQuote las recibe para las nuevas");
+  // El importe no se borra al cambiar de modo — la lección del selector de la
+  // solicitud.
+  assert.ok(q.includes("onChange({ freightMode: m, freight: amount });"), "cambiar de modo conserva el importe");
 });
